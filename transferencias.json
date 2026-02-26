@@ -1,0 +1,103 @@
+[
+  {
+    "id": "9523e0ae-7c0f-486f-8cbd-904c4e6664b7",
+    "status": "PENDENTE",
+    "codigo_origem": "PG260116160727",
+    "codigo_destino": "PG260114192644",
+    "pedido": "43291",
+    "cod_cliente": "284",
+    "qtd_caixas": 1,
+    "snapshot": {
+      "nf_numero": "1102030",
+      "nf_kg": 5000.0,
+      "nf_preco": 0.0,
+      "local_carregado": "",
+      "aves_por_caixa": 6,
+      "media_kg_ave": 3.181,
+      "caixas_carregadas": 262
+    },
+    "obs": "",
+    "criado_em": "2026-01-17T22:26:30",
+    "atualizado_em": "2026-01-17T22:26:30",
+    "motorista_origem": "ANDERSON"
+  },
+  {
+    "id": "98e898d0-6b7c-4348-930f-f87771ce662a",
+    "status": "ACEITA",
+    "codigo_origem": "PG260118123050",
+    "codigo_destino": "PG260118123246",
+    "pedido": "43251",
+    "cod_cliente": "49",
+    "qtd_caixas": 18,
+    "snapshot": {
+      "nf_numero": "604030",
+      "nf_kg": 5000.0,
+      "nf_preco": 0.0,
+      "local_carregado": "TIJUCA",
+      "aves_por_caixa": 6,
+      "media_kg_ave": 3.205,
+      "caixas_carregadas": 0
+    },
+    "obs": "",
+    "criado_em": "2026-01-18T17:04:22",
+    "atualizado_em": "2026-01-18T17:06:26",
+    "motorista_origem": "TESTE 2",
+    "motorista_destino": "ANDERSON",
+    "conversoes": [
+      {
+        "pedido_destino": "43310",
+        "cod_cliente_destino": "407",
+        "qtd": 18,
+        "obs": "",
+        "criado_em": "2026-01-18T17:06:26"
+      }
+    ],
+    "qtd_convertida": 18
+  },
+  {
+    "id": "6902c795-9827-4ce9-84e8-70e4c324a62e",
+    "status": "PENDENTE",
+    "codigo_origem": "PG260122200652",
+    "codigo_destino": "PG260112164916",
+    "pedido": "43300",
+    "cod_cliente": "282",
+    "qtd_caixas": 50,
+    "snapshot": {},
+    "obs": "Teste transferencia 50 caixas",
+    "criado_em": "2026-01-24T19:48:40",
+    "atualizado_em": "2026-01-24T19:48:40",
+    "motorista_origem": "MOTORISTA TESTE"
+  },
+  {
+    "id": "208000c8-c2e0-4e5e-9355-aa30d312bbea",
+    "status": "ACEITA",
+    "codigo_origem": "PG260126183026177X51",
+    "codigo_destino": "PG26012618094366959X",
+    "pedido": "45434.0",
+    "cod_cliente": "430.0",
+    "qtd_caixas": 30,
+    "snapshot": {
+      "nf_numero": "103020",
+      "nf_kg": 6500.0,
+      "nf_preco": 0.0,
+      "local_carregado": "TIJUCA",
+      "aves_por_caixa": 6,
+      "media_kg_ave": 2.987,
+      "caixas_carregadas": 0,
+      "origem_pedido": "45434.0",
+      "origem_cod_cliente": "430.0",
+      "origem_nome_cliente": "ANTONIO ALVES TORQUATO",
+      "origem_produto": "FRANGO VIVO",
+      "origem_preco": 570.0,
+      "origem_kg": 0.0,
+      "origem_caixas": 30,
+      "origem_endereco": "GUARACIABA DO NORTE",
+      "origem_vendedor": "PEDRO MARQUES"
+    },
+    "obs": "",
+    "criado_em": "2026-01-26T18:33:36",
+    "atualizado_em": "2026-01-26T18:34:04",
+    "motorista_origem": "TESTE 2",
+    "motorista_destino": "TESTE"
+  }
+]
