@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import sqlite3
+import sys
 import tempfile
 import tkinter as tk
 import urllib.error
@@ -39,9 +40,41 @@ import ctypes
 # CONSTANTES E CONFIGURAÃ‡Ã•ES
 # =========================================================
 APP_W, APP_H = 1360, 780
-DB_PATH = os.path.join(os.path.dirname(__file__), "rota_granja.db")
 DB_NAME = "rota_granja"
 APP_TITLE_DESKTOP = "ROTAHUB DESKTOP"
+
+IS_FROZEN = getattr(sys, "frozen", False)
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+RESOURCE_DIR = getattr(sys, "_MEIPASS", APP_DIR)
+
+# Em dev (python main.py), mantem o banco local da pasta do projeto.
+# Em app instalado (PyInstaller), usa pasta persistente do usuario para nao perder dados em updates.
+if IS_FROZEN:
+    USER_DATA_DIR = os.path.join(
+        os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+        "RotaHubDesktop",
+    )
+    os.makedirs(USER_DATA_DIR, exist_ok=True)
+    DEFAULT_DB_PATH = os.path.join(USER_DATA_DIR, "rota_granja.db")
+else:
+    DEFAULT_DB_PATH = os.path.join(APP_DIR, "rota_granja.db")
+
+DB_PATH = os.environ.get("ROTA_DB", DEFAULT_DB_PATH)
+os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
+
+# Primeira execucao do app instalado: copia o banco seed embutido, se existir.
+if IS_FROZEN and not os.path.exists(DB_PATH):
+    seed_candidates = [
+        os.path.join(RESOURCE_DIR, "rota_granja.db"),
+        os.path.join(os.path.dirname(sys.executable), "rota_granja.db"),
+    ]
+    for seed in seed_candidates:
+        try:
+            if os.path.exists(seed):
+                shutil.copy2(seed, DB_PATH)
+                break
+        except Exception:
+            logging.debug("Falha ignorada")
 
 API_BASE_URL = os.environ.get("ROTA_SERVER_URL", "http://127.0.0.1:8000").strip().rstrip("/")
 if not API_BASE_URL:
@@ -65,7 +98,7 @@ def apply_window_icon(win):
     except Exception:
         logging.debug("Falha ignorada")
 
-    base = os.path.dirname(__file__)
+    base = RESOURCE_DIR
     candidates = [
         os.path.join(base, "assets", "app_icon.ico"),
         os.path.join(base, "app_icon.ico"),
@@ -752,7 +785,7 @@ def _build_api_url(path: str) -> str:
     return API_BASE_URL
 
 
-def _call_api(method: str, path: str, payload=None, token: str = None):
+def _call_api(method: str, path: str, payload=None, token: str = None, extra_headers: dict = None):
     url = _build_api_url(path)
     headers = {"Accept": "application/json"}
     data = None
@@ -761,6 +794,10 @@ def _call_api(method: str, path: str, payload=None, token: str = None):
         headers["Content-Type"] = "application/json; charset=utf-8"
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    if extra_headers:
+        for k, v in (extra_headers or {}).items():
+            if k and v is not None:
+                headers[str(k)] = str(v)
 
     req = urllib.request.Request(url, data=data, headers=headers, method=method.upper())
     try:
@@ -3537,6 +3574,8 @@ class HomePage(PageBase):
             caixa_final = 0
             aves_por_cx = 6
             subst_txt = "-"
+            api_rota = None
+            api_clientes = None
 
             # âœ… helper local pra nÃ£o quebrar se nÃ£o existir ainda no arquivo
             def _db_has_column_best_effort(cur, table, col):
@@ -3759,6 +3798,62 @@ class HomePage(PageBase):
             except Exception:
                 logging.debug("Falha ignorada")
 
+            # 1.2) tenta fonte central (API) para refletir status/carregamento do app em tempo real
+            try:
+                desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+                if desktop_secret:
+                    resposta = _call_api(
+                        "GET",
+                        f"desktop/rotas/{codigo}",
+                        extra_headers={"X-Desktop-Secret": desktop_secret},
+                    )
+                    if isinstance(resposta, dict):
+                        api_rota = resposta.get("rota") if isinstance(resposta.get("rota"), dict) else None
+                        api_clientes = resposta.get("clientes") if isinstance(resposta.get("clientes"), list) else None
+            except Exception:
+                logging.debug("Falha ao puxar preview da API central", exc_info=True)
+
+            if api_rota:
+                try:
+                    motorista = str(api_rota.get("motorista") or motorista or "")
+                    veiculo = str(api_rota.get("veiculo") or veiculo or "")
+                    equipe = str(api_rota.get("equipe") or equipe or "")
+                    status = str(api_rota.get("status_operacional") or api_rota.get("status") or status or "")
+                    nf_numero = str(api_rota.get("nf_numero") or nf_numero or "")
+                    local_rota = str(api_rota.get("local_rota") or api_rota.get("tipo_rota") or local_rota or "")
+                    local_carreg = str(
+                        api_rota.get("local_carregado")
+                        or api_rota.get("local_carregamento")
+                        or api_rota.get("granja_carregada")
+                        or local_carreg
+                        or ""
+                    )
+                    saida_data = str(api_rota.get("saida_data") or saida_data or "")
+                    saida_hora = str(api_rota.get("saida_hora") or saida_hora or "")
+                    data_saida = str(api_rota.get("data_saida") or data_saida or "")
+                    hora_saida = str(api_rota.get("hora_saida") or hora_saida or "")
+                    km_inicial = safe_float(api_rota.get("km_inicial"), km_inicial)
+                    km_final = safe_float(api_rota.get("km_final"), km_final)
+                    adiant = safe_float(api_rota.get("adiantamento"), adiant)
+                    nf_kg = safe_float(api_rota.get("nf_kg"), nf_kg)
+                    nf_kg_carregado = safe_float(
+                        api_rota.get("nf_kg_carregado") if api_rota.get("nf_kg_carregado") is not None else api_rota.get("kg_carregado"),
+                        nf_kg_carregado,
+                    )
+                    nf_caixas = safe_int(
+                        api_rota.get("nf_caixas") if api_rota.get("nf_caixas") is not None else api_rota.get("caixas_carregadas"),
+                        nf_caixas,
+                    )
+                    nf_saldo = safe_float(api_rota.get("nf_saldo"), nf_saldo)
+                    media_carregada = safe_float(api_rota.get("media"), media_carregada)
+                    aves_por_cx = safe_int(api_rota.get("qnt_aves_por_cx"), aves_por_cx) or aves_por_cx
+                    caixa_final = safe_int(
+                        api_rota.get("caixa_final") if api_rota.get("caixa_final") is not None else api_rota.get("aves_caixa_final"),
+                        caixa_final,
+                    )
+                except Exception:
+                    logging.debug("Falha ignorada")
+
             # 1.1) HISTORICO DE SUBSTITUICAO (se tabela existir)
             try:
                 with get_db() as conn:
@@ -3792,7 +3887,9 @@ class HomePage(PageBase):
 
             # 2) ITENS (fallback se helper nÃ£o existir ainda)
             try:
-                if "fetch_programacao_itens" in globals():
+                if isinstance(api_clientes, list):
+                    itens = api_clientes
+                elif "fetch_programacao_itens" in globals():
                     itens = fetch_programacao_itens(codigo)
                 else:
                     itens = []
@@ -9664,16 +9761,26 @@ def setup_despesas_logger():
     """
     logger = logging.getLogger(__name__ + ".DespesasPage")
     if not logger.handlers:
+        # Em app instalado, Program Files e somente leitura.
+        # Usa pasta de dados do app (mesma base do DB_PATH) para garantir escrita.
+        log_dir = os.path.dirname(DB_PATH) or APP_DIR
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+        except Exception:
+            logging.debug("Falha ignorada")
+            log_dir = APP_DIR
+        log_path = os.path.join(log_dir, "despesas_audit.log")
+
         try:
             from logging.handlers import RotatingFileHandler
             handler = RotatingFileHandler(
-                "despesas_audit.log",
+                log_path,
                 maxBytes=2_000_000,   # ~2MB
                 backupCount=5,
                 encoding="utf-8"
             )
         except Exception:
-            handler = logging.FileHandler("despesas_audit.log", encoding="utf-8")
+            handler = logging.FileHandler(log_path, encoding="utf-8")
 
         formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
         handler.setFormatter(formatter)

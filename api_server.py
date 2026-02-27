@@ -1158,6 +1158,15 @@ def _fetch_programacao_owned(
     cur.execute(sql, ((codigo_programacao or "").strip(), *owner_params))
     return cur.fetchone()
 
+
+def _require_desktop_secret(
+    x_desktop_secret: Optional[str] = Header(default=None, alias="X-Desktop-Secret"),
+) -> bool:
+    secret = (x_desktop_secret or "").strip()
+    if not secret or secret != str(SECRET_KEY):
+        raise HTTPException(status_code=401, detail="Desktop secret inválido")
+    return True
+
 # =========================================================
 # ENDPOINTS BÃSICOS
 # =========================================================
@@ -1554,6 +1563,101 @@ def rota_detalhe(codigo_programacao: str, m=Depends(get_current_motorista)):
 
         equipes_map = _load_equipes_map(cur)
 
+        itens_select_expr = _programacao_itens_select_expr(conn, "pi")
+        cur.execute(
+            """
+            SELECT """ + itens_select_expr + """
+            FROM programacao_itens pi
+            WHERE pi.codigo_programacao=?
+            ORDER BY id ASC
+            LIMIT 2000
+            """,
+            (codigo_programacao,),
+        )
+        itens = cur.fetchall()
+
+        cur.execute(
+            """
+            SELECT *
+            FROM programacao_itens_controle
+            WHERE codigo_programacao=?
+            """,
+            (codigo_programacao,),
+        )
+        controles = cur.fetchall()
+
+        rota = row_to_dict(pr)
+        rota = _apply_equipe_nome(rota, equipes_map, cur)
+        rota = _decorate_rota_row(rota, cur)
+        pend_sub = _has_pending_substituicao(cur, codigo_programacao)
+        rota["substituicao_pendente"] = 1 if pend_sub else 0
+        if pend_sub:
+            rota["status_operacional"] = "EM_TRANSFERENCIA"
+        rota["substituicoes"] = _list_substituicoes_por_rota(cur, codigo_programacao, limit=20)
+
+        controle_map = {}
+        for row in controles:
+            rd = row_to_dict(row)
+            key = (str(rd.get("cod_cliente") or "").strip().upper(), str(rd.get("pedido") or "").strip())
+            controle_map[key] = rd
+
+        clientes = []
+        for i in itens:
+            d = row_to_dict(i)
+            cod = str(d.get("cod_cliente") or "").strip().upper()
+            ped = str(d.get("pedido") or "").strip()
+            c = controle_map.get((cod, ped))
+            if c:
+                d["mortalidade_aves"] = c.get("mortalidade_aves")
+                d["media_aplicada"] = c.get("media_aplicada")
+                d["peso_previsto"] = c.get("peso_previsto")
+                d["recebido_valor"] = c.get("valor_recebido")
+                d["recebido_forma"] = c.get("forma_recebimento")
+                d["recebido_obs"] = c.get("obs_recebimento")
+                d["status_pedido"] = c.get("status_pedido")
+                d["alteracao_tipo"] = c.get("alteracao_tipo")
+                d["alteracao_detalhe"] = c.get("alteracao_detalhe")
+                d["caixas_atual"] = c.get("caixas_atual")
+                d["preco_atual"] = c.get("preco_atual")
+                d["alterado_em"] = c.get("alterado_em")
+                d["alterado_por"] = c.get("alterado_por")
+            clientes.append(d)
+
+        return {"rota": rota, "clientes": clientes}
+
+
+@app.get("/desktop/rotas/{codigo_programacao}", response_model=RotaDetalheOut)
+def rota_detalhe_desktop(codigo_programacao: str, _ok: bool = Depends(_require_desktop_secret)):
+    codigo_programacao = (codigo_programacao or "").strip()
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        caixas_saldo_expr = _caixas_saldo_subquery(conn, "p")
+
+        cur.execute(
+            """
+            SELECT
+                p.*,
+                (
+                    SELECT CAST(NULLIF(TRIM(v.capacidade_cx), '') AS INTEGER)
+                    FROM veiculos v
+                    WHERE UPPER(TRIM(v.placa)) = UPPER(TRIM(p.veiculo))
+                       OR UPPER(TRIM(v.modelo)) = UPPER(TRIM(p.veiculo))
+                    LIMIT 1
+                ) AS capacidade_cx,
+                """ + caixas_saldo_expr + """
+            FROM programacoes p
+            WHERE p.codigo_programacao=?
+            LIMIT 1
+            """,
+            (codigo_programacao,),
+        )
+        pr = cur.fetchone()
+
+        if not pr:
+            raise HTTPException(status_code=404, detail="Rota não encontrada")
+
+        equipes_map = _load_equipes_map(cur)
         itens_select_expr = _programacao_itens_select_expr(conn, "pi")
         cur.execute(
             """
