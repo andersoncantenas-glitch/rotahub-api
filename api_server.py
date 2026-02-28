@@ -268,6 +268,24 @@ def _decorate_rota_row(row: Dict[str, Any], cur: Optional[sqlite3.Cursor] = None
     return row
 
 
+def _norm_pedido_key(v: Any) -> str:
+    s = (str(v or "")).strip()
+    if not s:
+        return ""
+    s_num = s.replace(" ", "").replace(",", ".")
+    try:
+        f = float(s_num)
+        if f.is_integer():
+            return str(int(f))
+        return ("%f" % f).rstrip("0").rstrip(".")
+    except Exception:
+        if s.endswith(".0"):
+            base = s[:-2].strip()
+            if base:
+                return base
+        return s
+
+
 def _local_rota_expr(conn: sqlite3.Connection) -> str:
     candidates: List[str] = []
     if col_exists(conn, "programacoes", "local_rota"):
@@ -1598,14 +1616,17 @@ def rota_detalhe(codigo_programacao: str, m=Depends(get_current_motorista)):
         controle_map = {}
         for row in controles:
             rd = row_to_dict(row)
-            key = (str(rd.get("cod_cliente") or "").strip().upper(), str(rd.get("pedido") or "").strip())
+            key = (
+                str(rd.get("cod_cliente") or "").strip().upper(),
+                _norm_pedido_key(rd.get("pedido")),
+            )
             controle_map[key] = rd
 
         clientes = []
         for i in itens:
             d = row_to_dict(i)
             cod = str(d.get("cod_cliente") or "").strip().upper()
-            ped = str(d.get("pedido") or "").strip()
+            ped = _norm_pedido_key(d.get("pedido"))
             c = controle_map.get((cod, ped))
             if c:
                 d["mortalidade_aves"] = c.get("mortalidade_aves")
@@ -1693,14 +1714,17 @@ def rota_detalhe_desktop(codigo_programacao: str, _ok: bool = Depends(_require_d
         controle_map = {}
         for row in controles:
             rd = row_to_dict(row)
-            key = (str(rd.get("cod_cliente") or "").strip().upper(), str(rd.get("pedido") or "").strip())
+            key = (
+                str(rd.get("cod_cliente") or "").strip().upper(),
+                _norm_pedido_key(rd.get("pedido")),
+            )
             controle_map[key] = rd
 
         clientes = []
         for i in itens:
             d = row_to_dict(i)
             cod = str(d.get("cod_cliente") or "").strip().upper()
-            ped = str(d.get("pedido") or "").strip()
+            ped = _norm_pedido_key(d.get("pedido"))
             c = controle_map.get((cod, ped))
             if c:
                 d["mortalidade_aves"] = c.get("mortalidade_aves")
@@ -1746,6 +1770,11 @@ def salvar_controle_cliente(
             raise HTTPException(
                 status_code=409,
                 detail=f"Rota encerrada. Alteracoes bloqueadas para status {status_atual}.",
+            )
+        if status_atual not in ("EM_ROTA", "EM ROTA", "INICIADA", "EM_ENTREGAS", "EM ENTREGAS", "CARREGADA"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Rota ainda nao iniciada (status={status_atual or 'N/D'}). Inicie a rota para alterar pedidos.",
             )
         if _has_pending_substituicao(cur, codigo_programacao):
             raise HTTPException(
@@ -2239,7 +2268,7 @@ def iniciar_rota(
             raise HTTPException(status_code=400, detail="KM inicial deve ser maior que 0.")
 
         status_atual = str(pr["status"] or "").strip().upper()
-        if status_atual in ("EM_ROTA", "EM ROTA", "INICIADA"):
+        if status_atual in ("EM_ROTA", "EM ROTA", "INICIADA", "EM_ENTREGAS", "EM ENTREGAS", "CARREGADA"):
             raise HTTPException(status_code=409, detail="Rota jÃ¡ estÃ¡ em andamento.")
         if status_atual in ("FINALIZADA", "FINALIZADO", "CANCELADA", "CANCELADO"):
             raise HTTPException(status_code=409, detail=f"Rota encerrada (status={status_atual}).")
@@ -2495,6 +2524,17 @@ def salvar_carregamento(
         pr = _fetch_programacao_owned(cur, codigo_programacao, m, "p.id, p.status, p.carregamento_fechado")
         if not pr:
             raise HTTPException(status_code=404, detail="Rota nÃ£o encontrada para este motorista")
+        status_atual = str(pr["status"] or "").strip().upper()
+        if status_atual in ("FINALIZADA", "FINALIZADO", "CANCELADA", "CANCELADO"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Rota encerrada (status={status_atual}).",
+            )
+        if status_atual not in ("EM_ROTA", "EM ROTA", "INICIADA", "EM_ENTREGAS", "EM ENTREGAS", "CARREGADA"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Rota ainda nao iniciada (status={status_atual or 'N/D'}). Inicie a rota antes do carregamento.",
+            )
 
         # detecta colunas existentes
         cur.execute("PRAGMA table_info(programacoes)")
