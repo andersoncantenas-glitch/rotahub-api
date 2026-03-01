@@ -1222,13 +1222,25 @@ def _owner_filter_for_programacoes(
     cur.execute("PRAGMA table_info(programacoes)")
     cols = {r[1] for r in cur.fetchall() or []}
 
+    conds: List[str] = []
+    params: List[Any] = []
+
+    # Prioriza chaves estáveis, mas mantém fallback para bancos/linhas legadas.
     if "motorista_id" in cols:
-        return f"{alias}.motorista_id=?", (int(motorista["id"]),)
+        conds.append(f"{alias}.motorista_id=?")
+        params.append(int(motorista["id"]))
     if "motorista_codigo" in cols:
-        return f"UPPER(TRIM({alias}.motorista_codigo))=UPPER(TRIM(?))", (str(motorista["codigo"]),)
+        conds.append(f"UPPER(TRIM(COALESCE({alias}.motorista_codigo,'')))=UPPER(TRIM(?))")
+        params.append(str(motorista["codigo"]))
     if "codigo_motorista" in cols:
-        return f"UPPER(TRIM({alias}.codigo_motorista))=UPPER(TRIM(?))", (str(motorista["codigo"]),)
-    return f"UPPER(TRIM({alias}.motorista))=UPPER(TRIM(?))", (str(motorista["nome"]),)
+        conds.append(f"UPPER(TRIM(COALESCE({alias}.codigo_motorista,'')))=UPPER(TRIM(?))")
+        params.append(str(motorista["codigo"]))
+
+    # Fallback final por nome (compatibilidade com programacoes antigas).
+    conds.append(f"UPPER(TRIM(COALESCE({alias}.motorista,'')))=UPPER(TRIM(?))")
+    params.append(str(motorista["nome"]))
+
+    return "(" + " OR ".join(conds) + ")", tuple(params)
 
 
 def _fetch_programacao_owned(
