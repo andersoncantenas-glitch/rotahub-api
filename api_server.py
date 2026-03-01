@@ -10,7 +10,7 @@ import math
 import logging
 from uuid import uuid4
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Iterator
 from contextlib import contextmanager
 
 from fastapi import FastAPI, HTTPException, Depends, Query, Header
@@ -70,7 +70,7 @@ security = HTTPBearer()
 # DB HELPERS
 # =========================================================
 @contextmanager
-def get_conn() -> sqlite3.Connection:
+def get_conn() -> Iterator[sqlite3.Connection]:
     if not os.path.exists(DB_PATH):
         raise RuntimeError(f"Banco n?o encontrado em: {DB_PATH}")
     conn = sqlite3.connect(DB_PATH)
@@ -280,6 +280,42 @@ def _decorate_rota_row(row: Dict[str, Any], cur: Optional[sqlite3.Cursor] = None
     row["equipe_ajudantes"] = _format_equipe_ajudantes(row, cur)
     if row.get("equipe_ajudantes"):
         row["equipe"] = row["equipe_ajudantes"]
+
+    def _first_non_empty(*keys: str):
+        for k in keys:
+            if k in row:
+                v = row.get(k)
+                if v is not None and str(v).strip() != "":
+                    return v
+        return None
+
+    # Aliases esperados pelo desktop (compatibilidade retroativa).
+    sd = _first_non_empty("saida_data", "data_saida")
+    if sd is not None:
+        row["saida_data"] = sd
+    sh = _first_non_empty("saida_hora", "hora_saida")
+    if sh is not None:
+        row["saida_hora"] = sh
+    fd = _first_non_empty("fim_data", "data_chegada", "data_fim")
+    if fd is not None:
+        row["fim_data"] = fd
+    fh = _first_non_empty("fim_hora", "hora_chegada", "hora_fim")
+    if fh is not None:
+        row["fim_hora"] = fh
+
+    cx = _first_non_empty("nf_caixas", "caixas_carregadas", "qnt_cx_carregada", "total_caixas")
+    if cx is not None:
+        row["nf_caixas"] = cx
+    kg = _first_non_empty("nf_kg_carregado", "kg_carregado", "nf_kg")
+    if kg is not None:
+        row["nf_kg_carregado"] = kg
+    md = _first_non_empty("media", "media_carregada")
+    if md is not None:
+        row["media"] = md
+    cf = _first_non_empty("caixa_final", "aves_caixa_final", "qnt_aves_caixa_final")
+    if cf is not None:
+        row["caixa_final"] = cf
+
     return row
 
 
@@ -1856,6 +1892,7 @@ def rota_detalhe(codigo_programacao: str, m=Depends(get_current_motorista)):
                 d["media_aplicada"] = c.get("media_aplicada")
                 d["peso_previsto"] = c.get("peso_previsto")
                 d["recebido_valor"] = c.get("valor_recebido")
+                d["valor_recebido"] = c.get("valor_recebido")
                 d["recebido_forma"] = c.get("forma_recebimento")
                 d["recebido_obs"] = c.get("obs_recebimento")
                 d["status_pedido"] = c.get("status_pedido")
@@ -1954,6 +1991,7 @@ def rota_detalhe_desktop(codigo_programacao: str, _ok: bool = Depends(_require_d
                 d["media_aplicada"] = c.get("media_aplicada")
                 d["peso_previsto"] = c.get("peso_previsto")
                 d["recebido_valor"] = c.get("valor_recebido")
+                d["valor_recebido"] = c.get("valor_recebido")
                 d["recebido_forma"] = c.get("forma_recebimento")
                 d["recebido_obs"] = c.get("obs_recebimento")
                 d["status_pedido"] = c.get("status_pedido")
@@ -2891,7 +2929,7 @@ def salvar_carregamento(
             sets.append("media_3=?"); params.append(media_3)
 
         if not sets:
-            return {"ok": True, "status": status_result, "warning": "Nenhuma coluna compatível encontrada para atualizar."}
+            return {"ok": True, "status": status_atual, "warning": "Nenhuma coluna compatível encontrada para atualizar."}
 
         sql = f"UPDATE programacoes SET {', '.join(sets)} WHERE id=?"
         params.append(pr["id"])
@@ -3380,7 +3418,7 @@ def aceitar_substituicao_rota(
             params.append("EM_ROTA")
 
         if not sets:
-            return {"ok": True, "status": status_result, "warning": "Nenhuma coluna compatível encontrada para atualizar."}
+            return {"ok": True, "status": status_atual, "warning": "Nenhuma coluna compatível encontrada para atualizar."}
 
         params.append(int(pr["id"]))
         cur.execute(f"UPDATE programacoes SET {', '.join(sets)} WHERE id=?", tuple(params))
@@ -3909,3 +3947,5 @@ def converter_transferencia(
 
         conn.commit()
         return _fetch_transferencia_by_id(conn, tid)
+
+
