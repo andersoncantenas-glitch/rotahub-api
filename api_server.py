@@ -132,29 +132,44 @@ def verify_password_pbkdf2(password: str, stored: str) -> bool:
     except Exception:
         return False
 
-def authenticate_motorista(cur: sqlite3.Cursor, codigo: str, senha: str) -> Optional[sqlite3.Row]:
-    cur.execute(
-        "SELECT id, nome, codigo, senha FROM motoristas WHERE UPPER(TRIM(codigo))=? LIMIT 1",
-        (codigo,),
-    )
+def authenticate_motorista(cur: sqlite3.Cursor, codigo: str, senha: str) -> tuple[Optional[sqlite3.Row], Optional[str]]:
+    has_acesso = col_exists(cur.connection, "motoristas", "acesso_liberado")
+    if has_acesso:
+        cur.execute(
+            """
+            SELECT id, nome, codigo, senha, COALESCE(acesso_liberado, 0) AS acesso_liberado
+            FROM motoristas
+            WHERE UPPER(TRIM(codigo))=?
+            LIMIT 1
+            """,
+            (codigo,),
+        )
+    else:
+        cur.execute(
+            "SELECT id, nome, codigo, senha FROM motoristas WHERE UPPER(TRIM(codigo))=? LIMIT 1",
+            (codigo,),
+        )
     row = cur.fetchone()
     if not row:
-        return None
+        return None, "not_found"
+
+    if has_acesso and int(row["acesso_liberado"] or 0) != 1:
+        return None, "blocked"
 
     senha_db = row["senha"] or ""
     if str(senha_db).startswith("pbkdf2_sha256$"):
         if not verify_password_pbkdf2(senha, senha_db):
-            return None
+            return None, "invalid_password"
     else:
         if str(senha_db).strip() != senha:
-            return None
+            return None, "invalid_password"
         try:
             novo_hash = hash_password_pbkdf2(senha)
             cur.execute("UPDATE motoristas SET senha=? WHERE id=?", (novo_hash, row["id"]))
         except Exception:
             pass
 
-    return row
+    return row, None
 
 
 def row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
@@ -701,6 +716,37 @@ def ensure_tables():
         except Exception:
             pass
 
+        # controle de acesso ao app por motorista (desbloqueio admin)
+        try:
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='motoristas'")
+            if cur.fetchone() is not None:
+                cur.execute("PRAGMA table_info(motoristas)")
+                cols_m = {row[1] for row in cur.fetchall() or []}
+
+                existing_ids: List[int] = []
+                if "acesso_liberado" not in cols_m:
+                    cur.execute("SELECT id FROM motoristas")
+                    existing_ids = [int(r[0]) for r in (cur.fetchall() or []) if r[0] is not None]
+                    cur.execute("ALTER TABLE motoristas ADD COLUMN acesso_liberado INTEGER DEFAULT 0")
+
+                if "acesso_liberado_por" not in cols_m:
+                    cur.execute("ALTER TABLE motoristas ADD COLUMN acesso_liberado_por TEXT")
+                if "acesso_liberado_em" not in cols_m:
+                    cur.execute("ALTER TABLE motoristas ADD COLUMN acesso_liberado_em TEXT")
+                if "acesso_obs" not in cols_m:
+                    cur.execute("ALTER TABLE motoristas ADD COLUMN acesso_obs TEXT")
+
+                # Nao derruba operacao atual: cadastros existentes ficam liberados
+                # e novos cadastros entram bloqueados por default (acesso_liberado=0).
+                if existing_ids:
+                    qmarks = ",".join(["?"] * len(existing_ids))
+                    cur.execute(
+                        f"UPDATE motoristas SET acesso_liberado=1 WHERE id IN ({qmarks})",
+                        tuple(existing_ids),
+                    )
+        except Exception:
+            pass
+
         # transferencias em banco (substituindo o JSON antigo)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS transferencias (
@@ -995,6 +1041,12 @@ class LoginOut(BaseModel):
     codigo: str
 
 
+class MotoristaAcessoIn(BaseModel):
+    liberado: bool
+    admin: Optional[str] = None
+    motivo: Optional[str] = None
+
+
 class RotaAtivaOut(BaseModel):
     codigo_programacao: str
     status: str = ""
@@ -1129,10 +1181,24 @@ def get_current_motorista(
 
     with get_conn() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT id, nome, codigo FROM motoristas WHERE codigo=?", (codigo,))
+        cur.execute("PRAGMA table_info(motoristas)")
+        cols_m = {r[1] for r in (cur.fetchall() or [])}
+        if "acesso_liberado" in cols_m:
+            cur.execute(
+                """
+                SELECT id, nome, codigo, COALESCE(acesso_liberado, 0) AS acesso_liberado
+                FROM motoristas
+                WHERE codigo=?
+                """,
+                (codigo,),
+            )
+        else:
+            cur.execute("SELECT id, nome, codigo FROM motoristas WHERE codigo=?", (codigo,))
         m = cur.fetchone()
         if not m:
             raise HTTPException(status_code=401, detail="Motorista nÃ£o encontrado")
+        if "acesso_liberado" in cols_m and int(m["acesso_liberado"] or 0) != 1:
+            raise HTTPException(status_code=403, detail="Acesso bloqueado. Solicite desbloqueio do administrador.")
 
     return {"codigo": m["codigo"], "nome": m["nome"], "id": m["id"]}
 
@@ -1378,13 +1444,113 @@ def autenticar_motorista(payload: LoginIn):
 
     with get_conn() as conn:
         cur = conn.cursor()
-        m = authenticate_motorista(cur, codigo, senha)
+        m, auth_err = authenticate_motorista(cur, codigo, senha)
 
+    if auth_err == "blocked":
+        raise HTTPException(status_code=403, detail="Acesso bloqueado. Solicite desbloqueio do administrador.")
     if not m:
         raise HTTPException(status_code=401, detail="Codigo ou senha invalidos")
 
     token = create_token(m["codigo"])
     return {"token": token, "nome": m["nome"], "codigo": m["codigo"]}
+
+
+@app.get("/admin/motoristas/acesso")
+def admin_listar_acesso_motoristas(_ok=Depends(_require_desktop_secret)):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(motoristas)")
+        cols = {r[1] for r in (cur.fetchall() or [])}
+
+        has_acesso = "acesso_liberado" in cols
+        has_por = "acesso_liberado_por" in cols
+        has_em = "acesso_liberado_em" in cols
+        has_obs = "acesso_obs" in cols
+
+        cur.execute(
+            f"""
+            SELECT
+                id,
+                TRIM(COALESCE(nome,'')) AS nome,
+                UPPER(TRIM(COALESCE(codigo,''))) AS codigo,
+                {("COALESCE(acesso_liberado, 1)" if has_acesso else "1")} AS acesso_liberado,
+                {("TRIM(COALESCE(acesso_liberado_por,''))" if has_por else "''")} AS acesso_liberado_por,
+                {("TRIM(COALESCE(acesso_liberado_em,''))" if has_em else "''")} AS acesso_liberado_em,
+                {("TRIM(COALESCE(acesso_obs,''))" if has_obs else "''")} AS acesso_obs
+            FROM motoristas
+            WHERE TRIM(COALESCE(codigo,'')) <> ''
+            ORDER BY nome
+            """
+        )
+        out = []
+        for r in (cur.fetchall() or []):
+            out.append(
+                {
+                    "id": int(r["id"]) if r["id"] is not None else None,
+                    "nome": str(r["nome"] or ""),
+                    "codigo": str(r["codigo"] or ""),
+                    "acesso_liberado": int(r["acesso_liberado"] or 0),
+                    "acesso_liberado_por": str(r["acesso_liberado_por"] or ""),
+                    "acesso_liberado_em": str(r["acesso_liberado_em"] or ""),
+                    "acesso_obs": str(r["acesso_obs"] or ""),
+                }
+            )
+        return {"ok": True, "motoristas": out}
+
+
+@app.post("/admin/motoristas/acesso/{codigo_motorista}")
+def admin_set_acesso_motorista(
+    codigo_motorista: str,
+    payload: MotoristaAcessoIn,
+    _ok=Depends(_require_desktop_secret),
+):
+    codigo = (codigo_motorista or "").strip().upper()
+    if not codigo:
+        raise HTTPException(status_code=400, detail="Codigo do motorista obrigatorio.")
+
+    admin_nome = (payload.admin or "").strip() or "ADMIN"
+    motivo = (payload.motivo or "").strip()
+    liberado = 1 if bool(payload.liberado) else 0
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(motoristas)")
+        cols = {r[1] for r in (cur.fetchall() or [])}
+        if "acesso_liberado" not in cols:
+            raise HTTPException(status_code=500, detail="Controle de acesso ainda não inicializado no banco.")
+
+        cur.execute(
+            "SELECT id, nome, codigo FROM motoristas WHERE UPPER(TRIM(codigo))=? LIMIT 1",
+            (codigo,),
+        )
+        m = cur.fetchone()
+        if not m:
+            raise HTTPException(status_code=404, detail="Motorista nao encontrado.")
+
+        sets = ["acesso_liberado=?"]
+        params: List[Any] = [liberado]
+        if "acesso_liberado_por" in cols:
+            sets.append("acesso_liberado_por=?")
+            params.append(admin_nome)
+        if "acesso_liberado_em" in cols:
+            sets.append("acesso_liberado_em=?")
+            params.append(ts)
+        if "acesso_obs" in cols:
+            sets.append("acesso_obs=?")
+            params.append(motivo)
+        params.append(int(m["id"]))
+        cur.execute(f"UPDATE motoristas SET {', '.join(sets)} WHERE id=?", tuple(params))
+
+        return {
+            "ok": True,
+            "codigo": str(m["codigo"] or "").strip().upper(),
+            "nome": str(m["nome"] or "").strip().upper(),
+            "acesso_liberado": liberado,
+            "acesso_liberado_por": admin_nome,
+            "acesso_liberado_em": ts,
+            "acesso_obs": motivo,
+        }
 
 
 # =========================================================
