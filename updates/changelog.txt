@@ -1,0 +1,7 @@
+RotaHub Desktop - Historico de Versoes
+
+Versao 9.0.0
+- Estrutura de manifest/changelog para atualizacao automatica.
+- Painel "Informacoes do Sistema" com verificacao de atualizacoes.
+- Indicador de status da API na Home.
+
