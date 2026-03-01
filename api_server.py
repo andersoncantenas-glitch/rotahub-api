@@ -1047,6 +1047,12 @@ class MotoristaAcessoIn(BaseModel):
     motivo: Optional[str] = None
 
 
+class MotoristaSenhaIn(BaseModel):
+    nova_senha: str
+    admin: Optional[str] = None
+    motivo: Optional[str] = None
+
+
 class RotaAtivaOut(BaseModel):
     codigo_programacao: str
     status: str = ""
@@ -1550,6 +1556,45 @@ def admin_set_acesso_motorista(
             "acesso_liberado_por": admin_nome,
             "acesso_liberado_em": ts,
             "acesso_obs": motivo,
+        }
+
+
+@app.post("/admin/motoristas/senha/{codigo_motorista}")
+def admin_set_senha_motorista(
+    codigo_motorista: str,
+    payload: MotoristaSenhaIn,
+    _ok=Depends(_require_desktop_secret),
+):
+    codigo = (codigo_motorista or "").strip().upper()
+    if not codigo:
+        raise HTTPException(status_code=400, detail="Codigo do motorista obrigatorio.")
+
+    senha = (payload.nova_senha or "").strip()
+    if len(senha) < 4 or len(senha) > 24:
+        raise HTTPException(status_code=400, detail="Senha invalida. Use 4 a 24 caracteres.")
+
+    admin_nome = (payload.admin or "").strip() or "ADMIN"
+    motivo = (payload.motivo or "").strip()
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, nome, codigo FROM motoristas WHERE UPPER(TRIM(codigo))=? LIMIT 1",
+            (codigo,),
+        )
+        m = cur.fetchone()
+        if not m:
+            raise HTTPException(status_code=404, detail="Motorista nao encontrado.")
+
+        senha_hash = hash_password_pbkdf2(senha)
+        cur.execute("UPDATE motoristas SET senha=? WHERE id=?", (senha_hash, int(m["id"])))
+
+        return {
+            "ok": True,
+            "codigo": str(m["codigo"] or "").strip().upper(),
+            "nome": str(m["nome"] or "").strip().upper(),
+            "senha_atualizada_por": admin_nome,
+            "motivo": motivo,
         }
 
 
