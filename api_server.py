@@ -1131,6 +1131,51 @@ def sanitize_status_operacional_legado() -> int:
     return fixed
 
 
+def sanitize_status_finalizacao_inconsistente() -> int:
+    """
+    Corrige rotas marcadas como ativas/em entrega, mas com evidência de finalização.
+    Regra: se data_chegada/hora_chegada/km_final já existem, status deve ser FINALIZADA.
+    """
+    fixed = 0
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(programacoes)")
+        cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+        if not cols:
+            return 0
+        has_data_chegada = "data_chegada" in cols
+        has_hora_chegada = "hora_chegada" in cols
+        has_km_final = "km_final" in cols
+        if not (has_data_chegada or has_hora_chegada or has_km_final):
+            return 0
+
+        evidencias = []
+        if has_data_chegada:
+            evidencias.append("TRIM(COALESCE(data_chegada,''))<>''")
+        if has_hora_chegada:
+            evidencias.append("TRIM(COALESCE(hora_chegada,''))<>''")
+        if has_km_final:
+            evidencias.append("COALESCE(km_final,0)>0")
+        evid_sql = " OR ".join(evidencias) or "0=1"
+
+        set_cols = ["status='FINALIZADA'"]
+        if "status_operacional" in cols:
+            set_cols.append("status_operacional='FINALIZADA'")
+        if "finalizada_no_app" in cols:
+            set_cols.append("finalizada_no_app=1")
+
+        sql = f"""
+            UPDATE programacoes
+               SET {", ".join(set_cols)}
+             WHERE UPPER(TRIM(COALESCE(status,''))) NOT IN ('FINALIZADA','FINALIZADO','CANCELADA','CANCELADO')
+               AND ({evid_sql})
+        """
+        cur.execute(sql)
+        fixed = int(cur.rowcount or 0)
+        conn.commit()
+    return fixed
+
+
 def reconcile_programacoes_motorista_links() -> int:
     """
     Preenche motorista_id/motorista_codigo/codigo_motorista em programacoes abertas,
@@ -1272,6 +1317,11 @@ def _startup():
         logging.info("Saneamento de status operacional legado concluido. Rotas ajustadas: %s", fixed_st)
     except Exception:
         logging.exception("Falha no saneamento de status operacional legado no startup")
+    try:
+        fixed_fin = sanitize_status_finalizacao_inconsistente()
+        logging.info("Saneamento de finalizacao inconsistente concluido. Rotas ajustadas: %s", fixed_fin)
+    except Exception:
+        logging.exception("Falha no saneamento de finalizacao inconsistente no startup")
     try:
         fixed_links = reconcile_programacoes_motorista_links()
         logging.info("Reconciliacao de vinculos motorista/programacoes concluida. Rotas ajustadas: %s", fixed_links)
@@ -1948,9 +1998,45 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
                 if not motorista_codigo:
                     motorista_codigo = str(rr["codigo"] or "").strip().upper()
 
-        cur.execute("SELECT id FROM programacoes WHERE codigo_programacao=? ORDER BY id DESC LIMIT 1", (codigo,))
+        cur.execute(
+            """
+            SELECT id,
+                   COALESCE(status,'') AS status,
+                   COALESCE(status_operacional,'') AS status_operacional
+            FROM programacoes
+            WHERE codigo_programacao=?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (codigo,),
+        )
         row = cur.fetchone()
         pid = int(row["id"] or 0) if row else 0
+        status_atual = str((row["status"] if row else "") or "").strip().upper()
+        status_op_atual = str((row["status_operacional"] if row else "") or "").strip().upper()
+
+        status_execucao = {"EM_ROTA", "EM ROTA", "INICIADA", "EM_ENTREGAS", "EM ENTREGAS", "CARREGADA"}
+        status_fechado = {"FINALIZADA", "FINALIZADO", "CANCELADA", "CANCELADO"}
+        status_edicao_desktop = {"", "ATIVA", "ABERTA", "PENDENTE", "PROGRAMADA"}
+
+        # Regra de negocio: desktop edita somente programação ainda não iniciada.
+        # Se já está em execução, substituição deve ser via APK.
+        if pid > 0:
+            st_eff = status_op_atual if status_op_atual else status_atual
+            if st_eff in status_execucao:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Programacao {codigo} ja esta em execucao ({st_eff}); altere via APK (substituir rota/transferir caixas).",
+                )
+            if st_eff in status_fechado:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Programacao {codigo} ja esta encerrada ({st_eff}) e nao pode ser reaberta pelo desktop.",
+                )
+
+            # Não deixa payload legacy degradar status para ATIVA indevidamente.
+            if status not in status_edicao_desktop:
+                status = status_atual or "ATIVA"
 
         if pid > 0:
             sets = [
