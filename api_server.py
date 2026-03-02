@@ -1161,17 +1161,35 @@ def reconcile_programacoes_motorista_links() -> int:
         if not set_sql:
             return 0
 
+        select_parts = ["id", "COALESCE(motorista,'') AS motorista"]
+        if has_mid:
+            select_parts.append("COALESCE(motorista_id,0) AS motorista_id")
+        else:
+            select_parts.append("0 AS motorista_id")
+        if has_mcod:
+            select_parts.append("COALESCE(motorista_codigo,'') AS motorista_codigo")
+        else:
+            select_parts.append("'' AS motorista_codigo")
+        if has_cmot:
+            select_parts.append("COALESCE(codigo_motorista,'') AS codigo_motorista")
+        else:
+            select_parts.append("'' AS codigo_motorista")
+
+        missing_predicates = []
+        if has_mid:
+            missing_predicates.append("COALESCE(motorista_id,0)=0")
+        if has_mcod:
+            missing_predicates.append("TRIM(COALESCE(motorista_codigo,''))=''")
+        if has_cmot:
+            missing_predicates.append("TRIM(COALESCE(codigo_motorista,''))=''")
+        missing_sql = " OR ".join(missing_predicates) or "1=1"
+
         cur.execute(
-            """
-            SELECT id, COALESCE(motorista,''), COALESCE(motorista_id,0), 
-                   COALESCE(motorista_codigo,''), COALESCE(codigo_motorista,'')
+            f"""
+            SELECT {", ".join(select_parts)}
             FROM programacoes
             WHERE UPPER(TRIM(COALESCE(status,''))) NOT IN ('FINALIZADA','FINALIZADO','CANCELADA','CANCELADO')
-              AND (
-                    COALESCE(motorista_id,0)=0
-                    OR TRIM(COALESCE(motorista_codigo,''))=''
-                    OR TRIM(COALESCE(codigo_motorista,''))=''
-                  )
+              AND ({missing_sql})
             ORDER BY id DESC
             LIMIT 5000
             """
