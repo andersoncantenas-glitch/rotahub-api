@@ -316,7 +316,41 @@ def _decorate_rota_row(row: Dict[str, Any], cur: Optional[sqlite3.Cursor] = None
     if cf is not None:
         row["caixa_final"] = cf
 
+    tipo_estimativa = str(row.get("tipo_estimativa") or "KG").strip().upper()
+    if tipo_estimativa not in ("KG", "CX"):
+        tipo_estimativa = "KG"
+    row["tipo_estimativa"] = tipo_estimativa
+    row["unidade_estimativa"] = "CAIXAS" if tipo_estimativa == "CX" else "KG"
+    row["tipo_operacao"] = "CIF" if tipo_estimativa == "CX" else "FOB"
+    if tipo_estimativa == "CX":
+        try:
+            row["estimativa_valor"] = int(float(row.get("caixas_estimado") or 0))
+        except Exception:
+            row["estimativa_valor"] = 0
+    else:
+        try:
+            row["estimativa_valor"] = float(row.get("kg_estimado") or 0.0)
+        except Exception:
+            row["estimativa_valor"] = 0.0
+
     return row
+
+
+def _status_operacional_normalizado(v: Any) -> str:
+    return str(v or "").strip().upper().replace(" ", "_")
+
+
+def _status_operacional_especial(row: Dict[str, Any], pend_substituicao: bool = False) -> Optional[str]:
+    if pend_substituicao:
+        return "EM_TRANSFERENCIA"
+    st = _status_operacional_normalizado(row.get("status_operacional"))
+    # Blindagem contra legado inconsistente:
+    # status_operacional nao deve carregar estados finais de rota.
+    if st in ("FINALIZADA", "FINALIZADO", "CANCELADA", "CANCELADO"):
+        return None
+    if st in ("", "NORMAL", "OK", "SEM_PROBLEMA"):
+        return None
+    return st
 
 
 def _norm_pedido_key(v: Any) -> str:
@@ -749,6 +783,18 @@ def ensure_tables():
             add_prog_col("media_3", "media_3 REAL")
             add_prog_col("carregamento_fechado", "carregamento_fechado INTEGER DEFAULT 0")
             add_prog_col("carregamento_salvo_em", "carregamento_salvo_em TEXT")
+            add_prog_col("motorista_id", "motorista_id INTEGER")
+            add_prog_col("motorista_codigo", "motorista_codigo TEXT")
+            add_prog_col("codigo_motorista", "codigo_motorista TEXT")
+            # FOB/CIF + auditoria (compatível com desktop)
+            add_prog_col("tipo_estimativa", "tipo_estimativa TEXT DEFAULT 'KG'")
+            add_prog_col("caixas_estimado", "caixas_estimado INTEGER DEFAULT 0")
+            add_prog_col("usuario_criacao", "usuario_criacao TEXT")
+            add_prog_col("usuario_ultima_edicao", "usuario_ultima_edicao TEXT")
+            add_prog_col("status_operacional", "status_operacional TEXT")
+            add_prog_col("status_operacional_obs", "status_operacional_obs TEXT")
+            add_prog_col("status_operacional_em", "status_operacional_em TEXT")
+            add_prog_col("status_operacional_por", "status_operacional_por TEXT")
         except Exception:
             pass
 
@@ -763,7 +809,8 @@ def ensure_tables():
                 if "acesso_liberado" not in cols_m:
                     cur.execute("SELECT id FROM motoristas")
                     existing_ids = [int(r[0]) for r in (cur.fetchall() or []) if r[0] is not None]
-                    cur.execute("ALTER TABLE motoristas ADD COLUMN acesso_liberado INTEGER DEFAULT 0")
+                    # Novos cadastros devem entrar aptos ao app por padrão.
+                    cur.execute("ALTER TABLE motoristas ADD COLUMN acesso_liberado INTEGER DEFAULT 1")
 
                 if "acesso_liberado_por" not in cols_m:
                     cur.execute("ALTER TABLE motoristas ADD COLUMN acesso_liberado_por TEXT")
@@ -772,8 +819,7 @@ def ensure_tables():
                 if "acesso_obs" not in cols_m:
                     cur.execute("ALTER TABLE motoristas ADD COLUMN acesso_obs TEXT")
 
-                # Nao derruba operacao atual: cadastros existentes ficam liberados
-                # e novos cadastros entram bloqueados por default (acesso_liberado=0).
+                # Nao derruba operacao atual: cadastros existentes ficam liberados.
                 if existing_ids:
                     qmarks = ",".join(["?"] * len(existing_ids))
                     cur.execute(
@@ -816,6 +862,17 @@ def ensure_tables():
                 FOREIGN KEY(transferencia_id) REFERENCES transferencias(id) ON DELETE CASCADE
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS mobile_sync_idempotency (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                motorista_codigo TEXT NOT NULL,
+                codigo_programacao TEXT NOT NULL,
+                endpoint TEXT NOT NULL,
+                idem_key TEXT NOT NULL,
+                created_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(motorista_codigo, codigo_programacao, endpoint, idem_key)
+            )
+        """)
 
         # substituicoes de motorista/veiculo em rota (handover)
         cur.execute("""
@@ -841,6 +898,55 @@ def ensure_tables():
                 atualizado_em TEXT DEFAULT (datetime('now'))
             )
         """)
+
+        # programacao avulsa (vendedor) para uso em fim de semana
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS programacoes_avulsas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                codigo_avulsa TEXT NOT NULL UNIQUE,
+                data_programada TEXT DEFAULT NULL,
+                status TEXT NOT NULL DEFAULT 'AVULSA_ATIVA',
+                motorista_id INTEGER DEFAULT NULL,
+                motorista_codigo TEXT DEFAULT NULL,
+                motorista_nome TEXT DEFAULT NULL,
+                veiculo TEXT DEFAULT NULL,
+                equipe TEXT DEFAULT NULL,
+                local_rota TEXT DEFAULT NULL,
+                observacao TEXT DEFAULT NULL,
+                origem TEXT DEFAULT 'APP_VENDEDOR',
+                criado_por TEXT DEFAULT NULL,
+                criado_em TEXT DEFAULT (datetime('now')),
+                conciliada_em TEXT DEFAULT NULL,
+                programacao_oficial_codigo TEXT DEFAULT NULL
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS programacoes_avulsas_itens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                avulsa_id INTEGER NOT NULL,
+                cod_cliente TEXT NOT NULL,
+                nome_cliente TEXT NOT NULL,
+                endereco TEXT DEFAULT NULL,
+                cidade TEXT DEFAULT NULL,
+                bairro TEXT DEFAULT NULL,
+                ordem INTEGER DEFAULT 0,
+                status_item TEXT DEFAULT 'PENDENTE',
+                pedido TEXT DEFAULT NULL,
+                nf TEXT DEFAULT NULL,
+                caixas INTEGER DEFAULT 0,
+                preco REAL DEFAULT NULL,
+                observacao TEXT DEFAULT NULL,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY(avulsa_id) REFERENCES programacoes_avulsas(id) ON DELETE CASCADE
+            )
+        """)
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_avulsas_status_data ON programacoes_avulsas(status, data_programada)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_avulsas_itens_avulsa ON programacoes_avulsas_itens(avulsa_id, ordem, id)"
+        )
 
         conn.commit()
 
@@ -988,6 +1094,153 @@ def reconcile_transferencias_status() -> int:
     return fixed
 
 
+def sanitize_status_operacional_legado() -> int:
+    """
+    Limpa status_operacional terminal herdado em rotas que ainda estao ativas.
+    Evita cenário: status=ATIVA e status_operacional=FINALIZADA.
+    """
+    fixed = 0
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(programacoes)")
+        cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+        if "status_operacional" not in cols:
+            return 0
+
+        sets = [
+            "status_operacional=NULL",
+        ]
+        if "status_operacional_obs" in cols:
+            sets.append("status_operacional_obs=NULL")
+        if "status_operacional_em" in cols:
+            sets.append("status_operacional_em=NULL")
+        if "status_operacional_por" in cols:
+            sets.append("status_operacional_por=NULL")
+        if "finalizada_no_app" in cols:
+            sets.append("finalizada_no_app=0")
+
+        sql = f"""
+            UPDATE programacoes
+               SET {", ".join(sets)}
+             WHERE UPPER(TRIM(COALESCE(status, ''))) NOT IN ('FINALIZADA', 'FINALIZADO', 'CANCELADA', 'CANCELADO')
+               AND UPPER(TRIM(COALESCE(status_operacional, ''))) IN ('FINALIZADA', 'FINALIZADO', 'CANCELADA', 'CANCELADO')
+        """
+        cur.execute(sql)
+        fixed = int(cur.rowcount or 0)
+        conn.commit()
+    return fixed
+
+
+def reconcile_programacoes_motorista_links() -> int:
+    """
+    Preenche motorista_id/motorista_codigo/codigo_motorista em programacoes abertas,
+    usando cadastro de motoristas. Evita roteamento incorreto no app mobile.
+    """
+    fixed = 0
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(programacoes)")
+        cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+        if not cols:
+            return 0
+
+        has_mid = "motorista_id" in cols
+        has_mcod = "motorista_codigo" in cols
+        has_cmot = "codigo_motorista" in cols
+        if not (has_mid or has_mcod or has_cmot):
+            return 0
+
+        sets = []
+        if has_mid:
+            sets.append("motorista_id=?")
+        if has_mcod:
+            sets.append("motorista_codigo=?")
+        if has_cmot:
+            sets.append("codigo_motorista=?")
+        set_sql = ", ".join(sets)
+        if not set_sql:
+            return 0
+
+        cur.execute(
+            """
+            SELECT id, COALESCE(motorista,''), COALESCE(motorista_id,0), 
+                   COALESCE(motorista_codigo,''), COALESCE(codigo_motorista,'')
+            FROM programacoes
+            WHERE UPPER(TRIM(COALESCE(status,''))) NOT IN ('FINALIZADA','FINALIZADO','CANCELADA','CANCELADO')
+              AND (
+                    COALESCE(motorista_id,0)=0
+                    OR TRIM(COALESCE(motorista_codigo,''))=''
+                    OR TRIM(COALESCE(codigo_motorista,''))=''
+                  )
+            ORDER BY id DESC
+            LIMIT 5000
+            """
+        )
+        rows = cur.fetchall() or []
+        for r in rows:
+            pid = int(r["id"] or 0)
+            mot_txt = str(r["motorista"] or "").strip()
+            mid_cur = int(r["motorista_id"] or 0)
+            mcod_cur = str(r["motorista_codigo"] or "").strip().upper()
+            cmot_cur = str(r["codigo_motorista"] or "").strip().upper()
+
+            mot_id = mid_cur if mid_cur > 0 else 0
+            mot_codigo = mcod_cur or cmot_cur
+
+            # 1) se tem ID, resolve codigo
+            if mot_id > 0 and not mot_codigo:
+                cur.execute("SELECT COALESCE(codigo,'') AS codigo FROM motoristas WHERE id=? LIMIT 1", (mot_id,))
+                rr = cur.fetchone()
+                mot_codigo = str((rr["codigo"] if rr else "") or "").strip().upper()
+
+            # 2) se nao tem ID/codigo, tenta bater por codigo em texto e depois por nome
+            if mot_id <= 0 or not mot_codigo:
+                probe_code = mot_txt.upper()
+                cur.execute(
+                    "SELECT id, COALESCE(codigo,'') AS codigo FROM motoristas WHERE UPPER(TRIM(codigo))=UPPER(TRIM(?)) LIMIT 1",
+                    (probe_code,),
+                )
+                rr = cur.fetchone()
+                if not rr and "(" in mot_txt and ")" in mot_txt:
+                    try:
+                        code_in_name = mot_txt[mot_txt.rfind("(") + 1: mot_txt.rfind(")")].strip().upper()
+                        cur.execute(
+                            "SELECT id, COALESCE(codigo,'') AS codigo FROM motoristas WHERE UPPER(TRIM(codigo))=UPPER(TRIM(?)) LIMIT 1",
+                            (code_in_name,),
+                        )
+                        rr = cur.fetchone()
+                    except Exception:
+                        rr = None
+                if not rr and mot_txt:
+                    cur.execute(
+                        "SELECT id, COALESCE(codigo,'') AS codigo FROM motoristas WHERE UPPER(TRIM(nome))=UPPER(TRIM(?)) LIMIT 1",
+                        (mot_txt,),
+                    )
+                    rr = cur.fetchone()
+                if rr:
+                    mot_id = int(rr["id"] or 0)
+                    mot_codigo = str(rr["codigo"] or "").strip().upper()
+
+            if mot_id <= 0 and not mot_codigo:
+                continue
+
+            params: List[Any] = []
+            if has_mid:
+                params.append(int(mot_id or 0))
+            if has_mcod:
+                params.append(mot_codigo)
+            if has_cmot:
+                params.append(mot_codigo)
+            params.append(pid)
+
+            cur.execute(f"UPDATE programacoes SET {set_sql} WHERE id=?", tuple(params))
+            if int(cur.rowcount or 0) > 0:
+                fixed += 1
+
+        conn.commit()
+    return fixed
+
+
 @app.on_event("startup")
 def _startup():
     ensure_tables()
@@ -996,6 +1249,16 @@ def _startup():
         logging.info("Reconciliacao de transferencias concluida. Itens ajustados: %s", fixed)
     except Exception:
         logging.exception("Falha na reconciliacao de transferencias no startup")
+    try:
+        fixed_st = sanitize_status_operacional_legado()
+        logging.info("Saneamento de status operacional legado concluido. Rotas ajustadas: %s", fixed_st)
+    except Exception:
+        logging.exception("Falha no saneamento de status operacional legado no startup")
+    try:
+        fixed_links = reconcile_programacoes_motorista_links()
+        logging.info("Reconciliacao de vinculos motorista/programacoes concluida. Rotas ajustadas: %s", fixed_links)
+    except Exception:
+        logging.exception("Falha na reconciliacao de vinculos motorista/programacoes no startup")
 
 # =========================================================
 # TOKEN HELPERS (HMAC + base64 urlsafe)
@@ -1097,6 +1360,13 @@ class RotaAtivaOut(BaseModel):
     equipe: str = ""
     local_rota: str = ""
     data_criacao: str = ""
+    tipo_estimativa: Optional[str] = None
+    unidade_estimativa: Optional[str] = None
+    tipo_operacao: Optional[str] = None
+    estimativa_valor: Optional[float] = None
+    caixas_estimado: Optional[int] = None
+    usuario_criacao: Optional[str] = None
+    usuario_ultima_edicao: Optional[str] = None
     capacidade_cx: Optional[int] = None
     total_caixas: Optional[int] = None
     caixas_saldo: Optional[int] = None
@@ -1118,6 +1388,7 @@ class IniciarRotaIn(BaseModel):
     hora_saida: str
     km_inicial: int
     override_reason: Optional[str] = None
+    idempotency_key: Optional[str] = None
 
 
 class RotaGpsPingIn(BaseModel):
@@ -1126,18 +1397,27 @@ class RotaGpsPingIn(BaseModel):
     speed: Optional[float] = None
     accuracy: Optional[float] = None
     timestamp: Optional[str] = None
+    idempotency_key: Optional[str] = None
 
 
 class FinalizarRotaIn(BaseModel):
     data_chegada: str
     hora_chegada: str
     km_final: int
+    idempotency_key: Optional[str] = None
+
+
+class RotaStatusOperacionalIn(BaseModel):
+    status_operacional: str
+    observacao: Optional[str] = None
+    evento_em: Optional[str] = None
+    idempotency_key: Optional[str] = None
 
 
 class CarregamentoIn(BaseModel):
     # O app (Carregamento2Page) manda isso:
     nf_numero: str = Field(..., min_length=1)
-    nf_kg: float = Field(..., gt=0)
+    nf_kg: float = Field(0.0, ge=0)
     kg_carregado: float = Field(..., ge=0)
 
     caixas_carregadas: int = Field(..., gt=0)
@@ -1158,6 +1438,7 @@ class CarregamentoIn(BaseModel):
     aves_caixa_final: Optional[int] = None
     qnt_aves_caixa_final: Optional[int] = None
     mortalidade_aves: int = Field(0, ge=0)  # aves mortas no transbordo
+    idempotency_key: Optional[str] = None
 
 
 class ClienteControleIn(BaseModel):
@@ -1179,6 +1460,8 @@ class ClienteControleIn(BaseModel):
     alterado_por: Optional[str] = None
     alteracao_tipo: Optional[str] = None
     alteracao_detalhe: Optional[str] = None
+    evento_em: Optional[str] = None
+    idempotency_key: Optional[str] = None
 
 
 class ClienteReservaIn(BaseModel):
@@ -1191,6 +1474,70 @@ class ClienteReservaIn(BaseModel):
     cidade: Optional[str] = None
     observacao: Optional[str] = None
     status_pedido: Optional[str] = "PENDENTE"
+
+
+class AvulsaItemIn(BaseModel):
+    cod_cliente: str
+    nome_cliente: str
+    endereco: Optional[str] = None
+    cidade: Optional[str] = None
+    bairro: Optional[str] = None
+    ordem: Optional[int] = 0
+    observacao: Optional[str] = None
+
+
+class ProgramacaoAvulsaIn(BaseModel):
+    data_programada: Optional[str] = None
+    motorista_id: Optional[int] = None
+    motorista_codigo: Optional[str] = None
+    motorista_nome: Optional[str] = None
+    veiculo: Optional[str] = None
+    equipe: Optional[str] = None
+    local_rota: Optional[str] = None
+    observacao: Optional[str] = None
+    criado_por: Optional[str] = None
+    itens: List[AvulsaItemIn] = Field(default_factory=list)
+
+
+class ProgramacaoAvulsaConciliarIn(BaseModel):
+    codigo_programacao_oficial: str
+    usuario: Optional[str] = None
+
+
+class DesktopRotaItemIn(BaseModel):
+    cod_cliente: str
+    nome_cliente: str
+    qnt_caixas: Optional[int] = 0
+    kg: Optional[float] = 0.0
+    preco: Optional[float] = 0.0
+    endereco: Optional[str] = None
+    vendedor: Optional[str] = None
+    pedido: Optional[str] = None
+    produto: Optional[str] = None
+    obs: Optional[str] = None
+
+
+class DesktopRotaUpsertIn(BaseModel):
+    codigo_programacao: str
+    data_criacao: Optional[str] = None
+    motorista: Optional[str] = None
+    motorista_id: Optional[int] = None
+    motorista_codigo: Optional[str] = None
+    codigo_motorista: Optional[str] = None
+    veiculo: Optional[str] = None
+    equipe: Optional[str] = None
+    kg_estimado: Optional[float] = 0.0
+    tipo_estimativa: Optional[str] = "KG"
+    caixas_estimado: Optional[int] = 0
+    status: Optional[str] = "ATIVA"
+    local_rota: Optional[str] = None
+    local_carregamento: Optional[str] = None
+    adiantamento: Optional[float] = 0.0
+    total_caixas: Optional[int] = 0
+    quilos: Optional[float] = 0.0
+    usuario_criacao: Optional[str] = None
+    usuario_ultima_edicao: Optional[str] = None
+    itens: List[DesktopRotaItemIn] = Field(default_factory=list)
 
 
 class SubstituicaoRotaIn(BaseModel):
@@ -1261,7 +1608,7 @@ def _owner_filter_for_programacoes(
     conds: List[str] = []
     params: List[Any] = []
 
-    # Prioriza chaves estáveis, mas mantém fallback para bancos/linhas legadas.
+    # Prioriza chaves estáveis.
     if "motorista_id" in cols:
         conds.append(f"{alias}.motorista_id=?")
         params.append(int(motorista["id"]))
@@ -1272,9 +1619,19 @@ def _owner_filter_for_programacoes(
         conds.append(f"UPPER(TRIM(COALESCE({alias}.codigo_motorista,'')))=UPPER(TRIM(?))")
         params.append(str(motorista["codigo"]))
 
-    # Fallback final por nome (compatibilidade com programacoes antigas).
-    conds.append(f"UPPER(TRIM(COALESCE({alias}.motorista,'')))=UPPER(TRIM(?))")
-    params.append(str(motorista["nome"]))
+    # Fallback por nome/campo legado somente quando base NÃO possui colunas estáveis.
+    if not conds:
+        conds.append(f"UPPER(TRIM(COALESCE({alias}.motorista,'')))=UPPER(TRIM(?))")
+        params.append(str(motorista["nome"]))
+        # Fallback adicional por codigo no campo motorista (bases legadas e dados mistos).
+        conds.append(f"UPPER(TRIM(COALESCE({alias}.motorista,'')))=UPPER(TRIM(?))")
+        params.append(str(motorista["codigo"]))
+        conds.append(f"UPPER(TRIM(COALESCE({alias}.motorista,''))) LIKE UPPER(TRIM(?))")
+        params.append(f"%({str(motorista['codigo'])})%")
+        conds.append(f"UPPER(TRIM(COALESCE({alias}.motorista,''))) LIKE UPPER(TRIM(?))")
+        params.append(f"{str(motorista['codigo'])} -%")
+        conds.append(f"UPPER(TRIM(COALESCE({alias}.motorista,''))) LIKE UPPER(TRIM(?))")
+        params.append(f"{str(motorista['codigo'])}/%")
 
     return "(" + " OR ".join(conds) + ")", tuple(params)
 
@@ -1291,6 +1648,7 @@ def _fetch_programacao_owned(
         FROM programacoes p
         WHERE p.codigo_programacao=?
           AND {owner_sql}
+        ORDER BY p.id DESC
         LIMIT 1
     """
     cur.execute(sql, ((codigo_programacao or "").strip(), *owner_params))
@@ -1305,12 +1663,720 @@ def _require_desktop_secret(
         raise HTTPException(status_code=401, detail="Desktop secret inválido")
     return True
 
+
+def _next_codigo_avulsa(cur: sqlite3.Cursor, data_ref: Optional[str] = None) -> str:
+    base = datetime.now().strftime("%Y%m%d")
+    txt = str(data_ref or "").strip()
+    if txt:
+        # aceita YYYY-MM-DD ou DD/MM/YYYY apenas para compor prefixo do código
+        try:
+            if "-" in txt:
+                d = datetime.fromisoformat(txt[:10])
+                base = d.strftime("%Y%m%d")
+            elif "/" in txt:
+                dd, mm, yy = txt.split("/")[:3]
+                yyyy = int(yy) + 2000 if len(yy) == 2 else int(yy)
+                d = datetime(yyyy, int(mm), int(dd))
+                base = d.strftime("%Y%m%d")
+        except Exception:
+            pass
+
+    prefix = f"PGA{base}"
+    cur.execute(
+        """
+        SELECT codigo_avulsa
+        FROM programacoes_avulsas
+        WHERE codigo_avulsa LIKE ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (f"{prefix}-%",),
+    )
+    row = cur.fetchone()
+    last_seq = 0
+    if row and row[0]:
+        s = str(row[0]).strip()
+        if "-" in s:
+            try:
+                last_seq = int(s.split("-")[-1])
+            except Exception:
+                last_seq = 0
+    return f"{prefix}-{last_seq + 1:03d}"
+
 # =========================================================
 # ENDPOINTS BÃSICOS
 # =========================================================
 @app.get("/ping")
 def ping():
     return {"ok": True, "db": DB_PATH}
+
+
+@app.get("/desktop/cadastros/motoristas")
+def desktop_motoristas(_ok: bool = Depends(_require_desktop_secret)):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='motoristas'")
+        if not cur.fetchone():
+            return []
+        cur.execute("PRAGMA table_info(motoristas)")
+        cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+        status_filter = (
+            "WHERE UPPER(COALESCE(status,'ATIVO')) IN ('ATIVO','DESATIVADO')"
+            if "status" in cols
+            else ""
+        )
+        cur.execute(
+            f"""
+            SELECT id, COALESCE(codigo,''), COALESCE(nome,''), COALESCE(status,'ATIVO')
+            FROM motoristas
+            {status_filter}
+            ORDER BY UPPER(COALESCE(nome,'')), id
+            """
+        )
+        out = []
+        for r in cur.fetchall() or []:
+            out.append(
+                {
+                    "id": int(r[0] or 0),
+                    "codigo": str(r[1] or "").strip().upper(),
+                    "nome": str(r[2] or "").strip().upper(),
+                    "status": str(r[3] or "ATIVO").strip().upper(),
+                }
+            )
+        return out
+
+
+@app.get("/desktop/cadastros/veiculos")
+def desktop_veiculos(_ok: bool = Depends(_require_desktop_secret)):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='veiculos'")
+        if not cur.fetchone():
+            return []
+        cur.execute(
+            """
+            SELECT id, COALESCE(placa,''), COALESCE(modelo,''), COALESCE(capacidade_cx, 0)
+            FROM veiculos
+            ORDER BY UPPER(COALESCE(placa,'')), id
+            """
+        )
+        out = []
+        for r in cur.fetchall() or []:
+            out.append(
+                {
+                    "id": int(r[0] or 0),
+                    "placa": str(r[1] or "").strip().upper(),
+                    "modelo": str(r[2] or "").strip().upper(),
+                    "capacidade_cx": int(r[3] or 0),
+                }
+            )
+        return out
+
+
+@app.get("/desktop/cadastros/ajudantes")
+def desktop_ajudantes(_ok: bool = Depends(_require_desktop_secret)):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='ajudantes'")
+        if not cur.fetchone():
+            return []
+        cur.execute("PRAGMA table_info(ajudantes)")
+        cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+        status_filter = "WHERE UPPER(COALESCE(status,'ATIVO'))='ATIVO'" if "status" in cols else ""
+        cur.execute(
+            f"""
+            SELECT id, COALESCE(nome,''), COALESCE(sobrenome,''), COALESCE(status,'ATIVO')
+            FROM ajudantes
+            {status_filter}
+            ORDER BY UPPER(COALESCE(nome,'')), UPPER(COALESCE(sobrenome,'')), id
+            """
+        )
+        out = []
+        for r in cur.fetchall() or []:
+            nome = f"{str(r[1] or '').strip()} {str(r[2] or '').strip()}".strip().upper()
+            out.append(
+                {
+                    "id": int(r[0] or 0),
+                    "nome": nome,
+                    "status": str(r[3] or "ATIVO").strip().upper(),
+                }
+            )
+        return out
+
+
+@app.get("/desktop/clientes/base")
+def desktop_clientes_base(
+    q: str = Query("", description="Busca por codigo/nome/cidade"),
+    vendedor: str = Query("", description="Filtro por vendedor"),
+    cidade: str = Query("", description="Filtro por cidade"),
+    ordem: str = Query("nome", description="nome|codigo"),
+    limit: int = Query(300, ge=1, le=1000),
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='clientes'")
+        if not cur.fetchone():
+            return []
+        cur.execute("PRAGMA table_info(clientes)")
+        cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+
+        col_cod = "cod_cliente" if "cod_cliente" in cols else "''"
+        col_nome = "nome_cliente" if "nome_cliente" in cols else "''"
+        col_end = "endereco" if "endereco" in cols else "''"
+        col_cid = "cidade" if "cidade" in cols else "''"
+        col_bai = "bairro" if "bairro" in cols else "''"
+        col_vend = "vendedor" if "vendedor" in cols else "''"
+        col_preco = "preco" if "preco" in cols else "''"
+        col_caixas = "caixas" if "caixas" in cols else "''"
+
+        term = (q or "").strip().upper()
+        vend_f = (vendedor or "").strip().upper()
+        cid_f = (cidade or "").strip().upper()
+        ordem_sql = (
+            "UPPER(TRIM(COALESCE(cod_cliente, ''))), UPPER(TRIM(COALESCE(nome_cliente, '')))"
+            if (ordem or "").strip().lower() == "codigo"
+            else "UPPER(TRIM(COALESCE(nome_cliente, ''))), UPPER(TRIM(COALESCE(cod_cliente, '')))"
+        )
+        like = f"%{term}%"
+        like_vend = f"%{vend_f}%"
+        like_cid = f"%{cid_f}%"
+        cur.execute(
+            f"""
+            SELECT
+                TRIM(COALESCE({col_cod}, '')) AS cod_cliente,
+                TRIM(COALESCE({col_nome}, '')) AS nome_cliente,
+                TRIM(COALESCE({col_end}, '')) AS endereco,
+                TRIM(COALESCE({col_cid}, '')) AS cidade,
+                TRIM(COALESCE({col_bai}, '')) AS bairro,
+                TRIM(COALESCE({col_vend}, '')) AS vendedor,
+                TRIM(COALESCE({col_preco}, '')) AS preco,
+                TRIM(COALESCE({col_caixas}, '')) AS caixas
+            FROM clientes
+            WHERE
+                (
+                    (? = '')
+                    OR UPPER(TRIM(COALESCE({col_cod}, ''))) LIKE ?
+                    OR UPPER(TRIM(COALESCE({col_nome}, ''))) LIKE ?
+                    OR UPPER(TRIM(COALESCE({col_cid}, ''))) LIKE ?
+                )
+            AND ((? = '') OR UPPER(TRIM(COALESCE({col_vend}, ''))) LIKE ?)
+            AND ((? = '') OR UPPER(TRIM(COALESCE({col_cid}, ''))) LIKE ?)
+            ORDER BY {ordem_sql}
+            LIMIT ?
+            """,
+            (term, like, like, like, vend_f, like_vend, cid_f, like_cid, int(limit)),
+        )
+        out: List[Dict[str, Any]] = []
+        for r in cur.fetchall() or []:
+            out.append(
+                {
+                    "cod_cliente": str(r["cod_cliente"] or "").strip(),
+                    "nome_cliente": str(r["nome_cliente"] or "").strip(),
+                    "endereco": str(r["endereco"] or "").strip(),
+                    "cidade": str(r["cidade"] or "").strip(),
+                    "bairro": str(r["bairro"] or "").strip(),
+                    "vendedor": str(r["vendedor"] or "").strip(),
+                    "preco": str(r["preco"] or "").strip(),
+                    "caixas": str(r["caixas"] or "").strip(),
+                }
+            )
+        return out
+
+
+@app.post("/desktop/programacoes/reconciliar-vinculos")
+def desktop_reconciliar_vinculos_motorista(_ok: bool = Depends(_require_desktop_secret)):
+    fixed = reconcile_programacoes_motorista_links()
+    return {"ok": True, "rotas_ajustadas": int(fixed)}
+
+
+@app.post("/desktop/rotas/upsert")
+def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_require_desktop_secret)):
+    codigo = str(payload.codigo_programacao or "").strip().upper()
+    if not codigo:
+        raise HTTPException(status_code=400, detail="codigo_programacao obrigatorio.")
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(programacoes)")
+        cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+
+        data_criacao = (payload.data_criacao or datetime.now().strftime("%Y-%m-%d %H:%M:%S")).strip()
+        motorista = str(payload.motorista or "").strip().upper()
+        motorista_id = int(payload.motorista_id or 0)
+        motorista_codigo = str(payload.motorista_codigo or payload.codigo_motorista or "").strip().upper()
+        veiculo = str(payload.veiculo or "").strip().upper()
+        equipe = str(payload.equipe or "").strip().upper()
+        status = str(payload.status or "ATIVA").strip().upper() or "ATIVA"
+        tipo_estimativa = str(payload.tipo_estimativa or "KG").strip().upper()
+        if tipo_estimativa not in ("KG", "CX"):
+            tipo_estimativa = "KG"
+
+        if (not motorista_codigo) and motorista_id > 0:
+            cur.execute("SELECT COALESCE(codigo,'') AS codigo FROM motoristas WHERE id=? LIMIT 1", (motorista_id,))
+            rr = cur.fetchone()
+            motorista_codigo = str((rr["codigo"] if rr else "") or "").strip().upper()
+
+        if (not motorista_id) and motorista_codigo:
+            cur.execute("SELECT id FROM motoristas WHERE UPPER(TRIM(codigo))=UPPER(TRIM(?)) LIMIT 1", (motorista_codigo,))
+            rr = cur.fetchone()
+            motorista_id = int(rr["id"] or 0) if rr else 0
+
+        if (not motorista_id) and motorista:
+            cur.execute("SELECT id, COALESCE(codigo,'') AS codigo FROM motoristas WHERE UPPER(TRIM(nome))=UPPER(TRIM(?)) LIMIT 1", (motorista,))
+            rr = cur.fetchone()
+            if rr:
+                motorista_id = int(rr["id"] or 0)
+                if not motorista_codigo:
+                    motorista_codigo = str(rr["codigo"] or "").strip().upper()
+
+        cur.execute("SELECT id FROM programacoes WHERE codigo_programacao=? ORDER BY id DESC LIMIT 1", (codigo,))
+        row = cur.fetchone()
+        pid = int(row["id"] or 0) if row else 0
+
+        if pid > 0:
+            sets = [
+                "motorista=?",
+                "veiculo=?",
+                "equipe=?",
+                "kg_estimado=?",
+                "status=?",
+            ]
+            vals: List[Any] = [
+                motorista,
+                veiculo,
+                equipe,
+                float(payload.kg_estimado or 0.0),
+                status,
+            ]
+            if "motorista_id" in cols_prog:
+                sets.append("motorista_id=?")
+                vals.append(int(motorista_id or 0))
+            if "motorista_codigo" in cols_prog:
+                sets.append("motorista_codigo=?")
+                vals.append(motorista_codigo)
+            if "codigo_motorista" in cols_prog:
+                sets.append("codigo_motorista=?")
+                vals.append(motorista_codigo)
+            if "tipo_estimativa" in cols_prog:
+                sets.append("tipo_estimativa=?")
+                vals.append(tipo_estimativa)
+            if "caixas_estimado" in cols_prog:
+                sets.append("caixas_estimado=?")
+                vals.append(int(payload.caixas_estimado or 0))
+            if "local_rota" in cols_prog:
+                sets.append("local_rota=?")
+                vals.append(str(payload.local_rota or "").strip().upper())
+            if "local_carregamento" in cols_prog:
+                sets.append("local_carregamento=?")
+                vals.append(str(payload.local_carregamento or "").strip().upper())
+            if "adiantamento" in cols_prog:
+                sets.append("adiantamento=?")
+                vals.append(float(payload.adiantamento or 0.0))
+            if "adiantamento_rota" in cols_prog:
+                sets.append("adiantamento_rota=?")
+                vals.append(float(payload.adiantamento or 0.0))
+            if "total_caixas" in cols_prog:
+                sets.append("total_caixas=?")
+                vals.append(int(payload.total_caixas or 0))
+            if "quilos" in cols_prog:
+                sets.append("quilos=?")
+                vals.append(float(payload.quilos or 0.0))
+            if "usuario_ultima_edicao" in cols_prog:
+                sets.append("usuario_ultima_edicao=?")
+                vals.append(str(payload.usuario_ultima_edicao or payload.usuario_criacao or "").strip().upper())
+
+            vals.append(pid)
+            cur.execute(f"UPDATE programacoes SET {', '.join(sets)} WHERE id=?", tuple(vals))
+        else:
+            col_names = ["codigo_programacao", "data_criacao", "motorista", "veiculo", "equipe", "kg_estimado", "status"]
+            values: List[Any] = [codigo, data_criacao, motorista, veiculo, equipe, float(payload.kg_estimado or 0.0), status]
+            if "motorista_id" in cols_prog:
+                col_names.append("motorista_id")
+                values.append(int(motorista_id or 0))
+            if "motorista_codigo" in cols_prog:
+                col_names.append("motorista_codigo")
+                values.append(motorista_codigo)
+            if "codigo_motorista" in cols_prog:
+                col_names.append("codigo_motorista")
+                values.append(motorista_codigo)
+            if "tipo_estimativa" in cols_prog:
+                col_names.append("tipo_estimativa")
+                values.append(tipo_estimativa)
+            if "caixas_estimado" in cols_prog:
+                col_names.append("caixas_estimado")
+                values.append(int(payload.caixas_estimado or 0))
+            if "local_rota" in cols_prog:
+                col_names.append("local_rota")
+                values.append(str(payload.local_rota or "").strip().upper())
+            if "local_carregamento" in cols_prog:
+                col_names.append("local_carregamento")
+                values.append(str(payload.local_carregamento or "").strip().upper())
+            if "adiantamento" in cols_prog:
+                col_names.append("adiantamento")
+                values.append(float(payload.adiantamento or 0.0))
+            if "adiantamento_rota" in cols_prog:
+                col_names.append("adiantamento_rota")
+                values.append(float(payload.adiantamento or 0.0))
+            if "total_caixas" in cols_prog:
+                col_names.append("total_caixas")
+                values.append(int(payload.total_caixas or 0))
+            if "quilos" in cols_prog:
+                col_names.append("quilos")
+                values.append(float(payload.quilos or 0.0))
+            if "usuario_criacao" in cols_prog:
+                col_names.append("usuario_criacao")
+                values.append(str(payload.usuario_criacao or "").strip().upper())
+            if "usuario_ultima_edicao" in cols_prog:
+                col_names.append("usuario_ultima_edicao")
+                values.append(str(payload.usuario_ultima_edicao or payload.usuario_criacao or "").strip().upper())
+
+            ph = ", ".join(["?"] * len(col_names))
+            cur.execute(
+                f"INSERT INTO programacoes ({', '.join(col_names)}) VALUES ({ph})",
+                tuple(values),
+            )
+
+        # Itens da programação: substitui snapshot no servidor.
+        cur.execute("DELETE FROM programacao_itens WHERE codigo_programacao=?", (codigo,))
+        for it in (payload.itens or []):
+            cod_cli = str(it.cod_cliente or "").strip().upper()
+            nome_cli = str(it.nome_cliente or "").strip().upper()
+            if not cod_cli or not nome_cli:
+                continue
+            cur.execute(
+                """
+                INSERT INTO programacao_itens
+                    (codigo_programacao, cod_cliente, nome_cliente, qnt_caixas, kg, preco, endereco, vendedor, pedido, produto)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    codigo,
+                    cod_cli,
+                    nome_cli,
+                    int(it.qnt_caixas or 0),
+                    float(it.kg or 0.0),
+                    float(it.preco or 0.0),
+                    str(it.endereco or "").strip().upper(),
+                    str(it.vendedor or "").strip().upper(),
+                    str(it.pedido or "").strip().upper(),
+                    str(it.produto or "").strip().upper(),
+                ),
+            )
+
+        conn.commit()
+
+    return {"ok": True, "codigo_programacao": codigo}
+
+
+@app.post("/desktop/avulsas")
+def desktop_avulsa_criar(payload: ProgramacaoAvulsaIn, _ok: bool = Depends(_require_desktop_secret)):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        codigo = _next_codigo_avulsa(cur, payload.data_programada)
+        cur.execute(
+            """
+            INSERT INTO programacoes_avulsas
+                (codigo_avulsa, data_programada, status, motorista_id, motorista_codigo, motorista_nome,
+                 veiculo, equipe, local_rota, observacao, origem, criado_por, criado_em)
+            VALUES (?, ?, 'AVULSA_ATIVA', ?, ?, ?, ?, ?, ?, ?, 'APP_VENDEDOR', ?, datetime('now'))
+            """,
+            (
+                codigo,
+                (payload.data_programada or None),
+                payload.motorista_id,
+                (payload.motorista_codigo or "").strip().upper() or None,
+                (payload.motorista_nome or "").strip().upper() or None,
+                (payload.veiculo or "").strip().upper() or None,
+                (payload.equipe or "").strip().upper() or None,
+                (payload.local_rota or "").strip().upper() or None,
+                (payload.observacao or "").strip() or None,
+                (payload.criado_por or "VENDEDOR_APP").strip().upper(),
+            ),
+        )
+        avulsa_id = int(cur.lastrowid or 0)
+        ordem_base = 1
+        for i, it in enumerate(payload.itens or [], start=ordem_base):
+            cod = (it.cod_cliente or "").strip()
+            nome = (it.nome_cliente or "").strip()
+            if not cod or not nome:
+                continue
+            cur.execute(
+                """
+                INSERT INTO programacoes_avulsas_itens
+                    (avulsa_id, cod_cliente, nome_cliente, endereco, cidade, bairro, ordem, observacao, status_item, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE', datetime('now'))
+                """,
+                (
+                    avulsa_id,
+                    cod,
+                    nome,
+                    (it.endereco or "").strip() or None,
+                    (it.cidade or "").strip() or None,
+                    (it.bairro or "").strip() or None,
+                    int(it.ordem if it.ordem is not None else i),
+                    (it.observacao or "").strip() or None,
+                ),
+            )
+        conn.commit()
+        return {"ok": True, "codigo_avulsa": codigo, "id": avulsa_id}
+
+
+@app.get("/desktop/avulsas")
+def desktop_avulsas_listar(
+    status: str = Query("", description="Filtro de status"),
+    data_de: str = Query("", description="YYYY-MM-DD"),
+    data_ate: str = Query("", description="YYYY-MM-DD"),
+    limit: int = Query(200, ge=1, le=1000),
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        where = []
+        params: List[Any] = []
+        st = (status or "").strip().upper()
+        if st:
+            where.append("UPPER(COALESCE(status,''))=?")
+            params.append(st)
+        if (data_de or "").strip():
+            where.append("COALESCE(data_programada,'') >= ?")
+            params.append((data_de or "").strip())
+        if (data_ate or "").strip():
+            where.append("COALESCE(data_programada,'') <= ?")
+            params.append((data_ate or "").strip())
+        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+        cur.execute(
+            f"""
+            SELECT
+                id, codigo_avulsa, COALESCE(data_programada,''), COALESCE(status,''),
+                COALESCE(motorista_codigo,''), COALESCE(motorista_nome,''),
+                COALESCE(veiculo,''), COALESCE(equipe,''), COALESCE(local_rota,''),
+                COALESCE(programacao_oficial_codigo,''), COALESCE(criado_por,''), COALESCE(criado_em,'')
+            FROM programacoes_avulsas
+            {where_sql}
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (*params, int(limit)),
+        )
+        out = []
+        for r in cur.fetchall() or []:
+            out.append(
+                {
+                    "id": int(r[0] or 0),
+                    "codigo_avulsa": str(r[1] or "").strip(),
+                    "data_programada": str(r[2] or "").strip(),
+                    "status": str(r[3] or "").strip().upper(),
+                    "motorista_codigo": str(r[4] or "").strip().upper(),
+                    "motorista_nome": str(r[5] or "").strip().upper(),
+                    "veiculo": str(r[6] or "").strip().upper(),
+                    "equipe": str(r[7] or "").strip().upper(),
+                    "local_rota": str(r[8] or "").strip().upper(),
+                    "programacao_oficial_codigo": str(r[9] or "").strip().upper(),
+                    "criado_por": str(r[10] or "").strip().upper(),
+                    "criado_em": str(r[11] or "").strip(),
+                }
+            )
+        return out
+
+
+@app.get("/desktop/avulsas/{codigo_avulsa}")
+def desktop_avulsa_detalhe(codigo_avulsa: str, _ok: bool = Depends(_require_desktop_secret)):
+    codigo = (codigo_avulsa or "").strip().upper()
+    if not codigo:
+        raise HTTPException(status_code=400, detail="codigo_avulsa invalido.")
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT *
+            FROM programacoes_avulsas
+            WHERE UPPER(COALESCE(codigo_avulsa,''))=?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (codigo,),
+        )
+        head = cur.fetchone()
+        if not head:
+            raise HTTPException(status_code=404, detail="Programacao avulsa nao encontrada.")
+        av = row_to_dict(head)
+        av_id = int(av.get("id") or 0)
+        cur.execute(
+            """
+            SELECT *
+            FROM programacoes_avulsas_itens
+            WHERE avulsa_id=?
+            ORDER BY ordem, id
+            """,
+            (av_id,),
+        )
+        itens = [row_to_dict(r) for r in (cur.fetchall() or [])]
+        return {"avulsa": av, "itens": itens}
+
+
+@app.post("/desktop/avulsas/{codigo_avulsa}/conciliar")
+def desktop_avulsa_conciliar(
+    codigo_avulsa: str,
+    payload: ProgramacaoAvulsaConciliarIn,
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    codigo = (codigo_avulsa or "").strip().upper()
+    oficial = (payload.codigo_programacao_oficial or "").strip().upper()
+    usuario = (payload.usuario or "DESKTOP").strip().upper()
+    if not codigo or not oficial:
+        raise HTTPException(status_code=400, detail="codigo_avulsa e codigo_programacao_oficial sao obrigatorios.")
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, COALESCE(status,'') AS status
+            FROM programacoes_avulsas
+            WHERE UPPER(COALESCE(codigo_avulsa,''))=?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (codigo,),
+        )
+        av = cur.fetchone()
+        if not av:
+            raise HTTPException(status_code=404, detail="Programacao avulsa nao encontrada.")
+        st = str(av["status"] or "").strip().upper()
+        if st in ("CONCILIADA", "CANCELADA"):
+            raise HTTPException(status_code=409, detail=f"Programacao avulsa bloqueada para conciliacao (status={st}).")
+
+        cur.execute(
+            """
+            SELECT id, COALESCE(num_nf, COALESCE(nf_numero, '')) AS nf_numero
+            FROM programacoes
+            WHERE UPPER(COALESCE(codigo_programacao,''))=?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (oficial,),
+        )
+        row_prog = cur.fetchone()
+        if not row_prog:
+            raise HTTPException(status_code=404, detail="Programacao oficial nao encontrada.")
+
+        prog_id = int(row_prog["id"])
+        nf_oficial = str(row_prog["nf_numero"] or "").strip()
+
+        # Itens da programação oficial (fonte de pedido/caixas/preço).
+        cur.execute("PRAGMA table_info(programacao_itens)")
+        cols_pi = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+        has_obs = "observacao" in cols_pi
+        select_obs = ", COALESCE(observacao,'') AS observacao" if has_obs else ", '' AS observacao"
+        cur.execute(
+            f"""
+            SELECT
+                id,
+                UPPER(TRIM(COALESCE(cod_cliente,''))) AS cod_cliente_u,
+                COALESCE(cod_cliente,'') AS cod_cliente,
+                COALESCE(nome_cliente,'') AS nome_cliente,
+                COALESCE(pedido,'') AS pedido,
+                COALESCE(qnt_caixas,0) AS qnt_caixas,
+                COALESCE(preco,0) AS preco
+                {select_obs}
+            FROM programacao_itens
+            WHERE codigo_programacao=?
+            ORDER BY id ASC
+            """,
+            (oficial,),
+        )
+        oficial_itens = cur.fetchall() or []
+
+        # Itens avulsos a conciliar.
+        cur.execute(
+            """
+            SELECT id, UPPER(TRIM(COALESCE(cod_cliente,''))) AS cod_cliente_u, COALESCE(cod_cliente,'') AS cod_cliente
+            FROM programacoes_avulsas_itens
+            WHERE avulsa_id=?
+            ORDER BY ordem, id
+            """,
+            (int(av["id"]),),
+        )
+        avulsos = cur.fetchall() or []
+
+        # Mapa por cliente (com fila para suportar pedidos repetidos do mesmo cliente).
+        fila_por_cliente: Dict[str, List[sqlite3.Row]] = {}
+        for it in oficial_itens:
+            key = str(it["cod_cliente_u"] or "").strip()
+            if not key:
+                continue
+            fila_por_cliente.setdefault(key, []).append(it)
+
+        matched = 0
+        pendentes = 0
+        pendentes_codigos: List[str] = []
+        for av_item in avulsos:
+            key = str(av_item["cod_cliente_u"] or "").strip()
+            fila = fila_por_cliente.get(key) or []
+            if fila:
+                src = fila.pop(0)
+                cur.execute(
+                    """
+                    UPDATE programacoes_avulsas_itens
+                    SET pedido=?,
+                        nf=?,
+                        caixas=?,
+                        preco=?,
+                        status_item='CONCILIADO',
+                        updated_at=datetime('now')
+                    WHERE id=?
+                    """,
+                    (
+                        str(src["pedido"] or "").strip() or None,
+                        nf_oficial or None,
+                        int(src["qnt_caixas"] or 0),
+                        float(src["preco"] or 0.0),
+                        int(av_item["id"]),
+                    ),
+                )
+                matched += 1
+            else:
+                cur.execute(
+                    """
+                    UPDATE programacoes_avulsas_itens
+                    SET status_item='PENDENTE_CONCILIACAO',
+                        updated_at=datetime('now')
+                    WHERE id=?
+                    """,
+                    (int(av_item["id"]),),
+                )
+                pendentes += 1
+                pendentes_codigos.append(str(av_item["cod_cliente"] or "").strip())
+
+        # Status final da avulsa conforme resultado.
+        novo_status = "CONCILIADA" if pendentes == 0 else "CONCILIADA_PARCIAL"
+        cur.execute(
+            """
+            UPDATE programacoes_avulsas
+            SET status=?,
+                conciliada_em=datetime('now'),
+                programacao_oficial_codigo=?,
+                observacao=COALESCE(observacao,'') || CASE WHEN COALESCE(observacao,'')='' THEN '' ELSE ' | ' END || ?
+            WHERE id=?
+            """,
+            (
+                novo_status,
+                oficial,
+                f"CONCILIADA POR {usuario} (MATCH={matched} PEND={pendentes})",
+                int(av["id"]),
+            ),
+        )
+        conn.commit()
+        return {
+            "ok": True,
+            "codigo_avulsa": codigo,
+            "codigo_programacao_oficial": oficial,
+            "status_avulsa": novo_status,
+            "itens_total": len(avulsos),
+            "itens_conciliados": matched,
+            "itens_pendentes": pendentes,
+            "pendentes_cod_cliente": pendentes_codigos[:100],
+            "programacao_id": prog_id,
+        }
 
 
 @app.get("/clientes/base")
@@ -1698,6 +2764,10 @@ def listar_rotas_ativas_todas(m=Depends(get_current_motorista)):
                 """ + caixas_carregadas_expr + """,
                 """ + caixa_final_expr + """,
                 p.data_criacao,
+                COALESCE(p.tipo_estimativa, 'KG') AS tipo_estimativa,
+                COALESCE(p.caixas_estimado, 0) AS caixas_estimado,
+                COALESCE(p.usuario_criacao, '') AS usuario_criacao,
+                COALESCE(p.usuario_ultima_edicao, '') AS usuario_ultima_edicao,
                 p.total_caixas,
                 (
                     SELECT CAST(NULLIF(TRIM(v.capacidade_cx), '') AS INTEGER)
@@ -1711,6 +2781,7 @@ def listar_rotas_ativas_todas(m=Depends(get_current_motorista)):
             LEFT JOIN equipes e
             """ + equipe_join_on + """
             WHERE UPPER(TRIM(COALESCE(p.status,''))) NOT IN ('FINALIZADA','FINALIZADO','CANCELADA','CANCELADO')
+              AND UPPER(TRIM(COALESCE(p.status_operacional,''))) NOT IN ('FINALIZADA','FINALIZADO','CANCELADA','CANCELADO')
             ORDER BY p.id DESC
             LIMIT 200
             """
@@ -1722,8 +2793,7 @@ def listar_rotas_ativas_todas(m=Depends(get_current_motorista)):
             codigo = str(d.get("codigo_programacao") or "").strip()
             pend_sub = _has_pending_substituicao(cur, codigo) if codigo else False
             d["substituicao_pendente"] = 1 if pend_sub else 0
-            if pend_sub:
-                d["status_operacional"] = "EM_TRANSFERENCIA"
+            d["status_operacional"] = _status_operacional_especial(d, pend_substituicao=pend_sub)
             response_rows.append(d)
 
     return response_rows
@@ -1772,6 +2842,10 @@ def rotas_ativas(m=Depends(get_current_motorista)):
                 """ + caixas_carregadas_expr + """,
                 """ + caixa_final_expr + """,
                 p.data_criacao,
+                COALESCE(p.tipo_estimativa, 'KG') AS tipo_estimativa,
+                COALESCE(p.caixas_estimado, 0) AS caixas_estimado,
+                COALESCE(p.usuario_criacao, '') AS usuario_criacao,
+                COALESCE(p.usuario_ultima_edicao, '') AS usuario_ultima_edicao,
                 p.total_caixas,
                 (
                     SELECT CAST(NULLIF(TRIM(v.capacidade_cx), '') AS INTEGER)
@@ -1786,6 +2860,7 @@ def rotas_ativas(m=Depends(get_current_motorista)):
             """ + equipe_join_on + """
             WHERE """ + owner_sql + """
               AND UPPER(TRIM(COALESCE(p.status,''))) NOT IN ('FINALIZADA','FINALIZADO','CANCELADA','CANCELADO')
+              AND UPPER(TRIM(COALESCE(p.status_operacional,''))) NOT IN ('FINALIZADA','FINALIZADO','CANCELADA','CANCELADO')
             ORDER BY p.id DESC
             LIMIT 200
             """,
@@ -1798,8 +2873,7 @@ def rotas_ativas(m=Depends(get_current_motorista)):
             codigo = str(d.get("codigo_programacao") or "").strip()
             pend_sub = _has_pending_substituicao(cur, codigo) if codigo else False
             d["substituicao_pendente"] = 1 if pend_sub else 0
-            if pend_sub:
-                d["status_operacional"] = "EM_TRANSFERENCIA"
+            d["status_operacional"] = _status_operacional_especial(d, pend_substituicao=pend_sub)
             response_rows.append(d)
 
     return response_rows
@@ -1829,6 +2903,7 @@ def rota_detalhe(codigo_programacao: str, m=Depends(get_current_motorista)):
             FROM programacoes p
             WHERE p.codigo_programacao=?
               AND """ + owner_sql + """
+            ORDER BY p.id DESC
             LIMIT 1
             """,
             (codigo_programacao, *owner_params),
@@ -1868,8 +2943,7 @@ def rota_detalhe(codigo_programacao: str, m=Depends(get_current_motorista)):
         rota = _decorate_rota_row(rota, cur)
         pend_sub = _has_pending_substituicao(cur, codigo_programacao)
         rota["substituicao_pendente"] = 1 if pend_sub else 0
-        if pend_sub:
-            rota["status_operacional"] = "EM_TRANSFERENCIA"
+        rota["status_operacional"] = _status_operacional_especial(rota, pend_substituicao=pend_sub)
         rota["substituicoes"] = _list_substituicoes_por_rota(cur, codigo_programacao, limit=20)
 
         controle_map = {}
@@ -1929,6 +3003,7 @@ def rota_detalhe_desktop(codigo_programacao: str, _ok: bool = Depends(_require_d
                 """ + caixas_saldo_expr + """
             FROM programacoes p
             WHERE p.codigo_programacao=?
+            ORDER BY p.id DESC
             LIMIT 1
             """,
             (codigo_programacao,),
@@ -1967,8 +3042,7 @@ def rota_detalhe_desktop(codigo_programacao: str, _ok: bool = Depends(_require_d
         rota = _decorate_rota_row(rota, cur)
         pend_sub = _has_pending_substituicao(cur, codigo_programacao)
         rota["substituicao_pendente"] = 1 if pend_sub else 0
-        if pend_sub:
-            rota["status_operacional"] = "EM_TRANSFERENCIA"
+        rota["status_operacional"] = _status_operacional_especial(rota, pend_substituicao=pend_sub)
         rota["substituicoes"] = _list_substituicoes_por_rota(cur, codigo_programacao, limit=20)
 
         controle_map = {}
@@ -2006,6 +3080,69 @@ def rota_detalhe_desktop(codigo_programacao: str, _ok: bool = Depends(_require_d
         return {"rota": rota, "clientes": clientes}
 
 
+@app.get("/desktop/monitoramento/rotas")
+def desktop_rotas_monitoramento(_ok: bool = Depends(_require_desktop_secret)):
+    """
+    Retorna monitoramento consolidado para o desktop:
+    - rotas ativas
+    - último ping GPS (lat/lon/velocidade/precisão/horário)
+    """
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                p.codigo_programacao,
+                COALESCE(p.motorista, '') AS motorista,
+                COALESCE(p.veiculo, '') AS veiculo,
+                COALESCE(p.status, '') AS status,
+                COALESCE(p.status_operacional, '') AS status_operacional,
+                g.lat,
+                g.lon,
+                g.speed,
+                g.accuracy,
+                g.recorded_at
+            FROM programacoes p
+            LEFT JOIN (
+                SELECT r1.codigo_programacao, r1.lat, r1.lon, r1.speed, r1.accuracy, r1.recorded_at
+                FROM rota_gps_pings r1
+                INNER JOIN (
+                    SELECT codigo_programacao, MAX(id) AS max_id
+                    FROM rota_gps_pings
+                    GROUP BY codigo_programacao
+                ) r2 ON r2.max_id = r1.id
+            ) g ON g.codigo_programacao = p.codigo_programacao
+            WHERE UPPER(TRIM(COALESCE(p.status, ''))) NOT IN ('FINALIZADA', 'FINALIZADO', 'CANCELADA', 'CANCELADO')
+            ORDER BY p.id DESC
+            LIMIT 500
+            """
+        )
+        rows = cur.fetchall() or []
+
+        out = []
+        for r in rows:
+            codigo = str(r["codigo_programacao"] or "").strip()
+            pend_sub = _has_pending_substituicao(cur, codigo) if codigo else False
+            status_operacional = _status_operacional_especial(dict(r), pend_substituicao=pend_sub)
+            status_base = str(r["status"] or "").strip()
+            out.append(
+                {
+                    "codigo_programacao": codigo,
+                    "motorista": str(r["motorista"] or "").strip(),
+                    "veiculo": str(r["veiculo"] or "").strip(),
+                    "status": status_operacional or status_base,
+                    "status_base": status_base,
+                    "status_operacional": status_operacional,
+                    "lat": r["lat"],
+                    "lon": r["lon"],
+                    "speed": r["speed"],
+                    "accuracy": r["accuracy"],
+                    "recorded_at": str(r["recorded_at"] or "").strip(),
+                }
+            )
+        return {"rotas": out}
+
+
 @app.post("/rotas/{codigo_programacao}/clientes/controle")
 def salvar_controle_cliente(
     codigo_programacao: str,
@@ -2013,6 +3150,7 @@ def salvar_controle_cliente(
     m=Depends(get_current_motorista),
 ):
     nome_motorista = (m["nome"] or "").strip()
+    codigo_motorista = (m.get("codigo") or "").strip().upper()
     codigo_programacao = (codigo_programacao or "").strip()
 
     cod_cliente = (payload.cod_cliente or "").strip()
@@ -2117,6 +3255,7 @@ def salvar_controle_cliente(
                 LEFT JOIN programacao_itens_controle pc
                   ON pc.codigo_programacao = pi.codigo_programacao
                  AND UPPER(TRIM(pc.cod_cliente)) = UPPER(TRIM(pi.cod_cliente))
+                 AND COALESCE(TRIM(pc.pedido), '') = COALESCE(TRIM(pi.pedido), '')
                 WHERE pi.codigo_programacao=?
                   AND UPPER(TRIM(pi.cod_cliente))=UPPER(TRIM(?))
                   AND COALESCE(TRIM(pi.pedido), '')=COALESCE(TRIM(?), '')
@@ -2141,6 +3280,7 @@ def salvar_controle_cliente(
                 LEFT JOIN programacao_itens_controle pc
                   ON pc.codigo_programacao = pi.codigo_programacao
                  AND UPPER(TRIM(pc.cod_cliente)) = UPPER(TRIM(pi.cod_cliente))
+                 AND COALESCE(TRIM(pc.pedido), '') = COALESCE(TRIM(pi.pedido), '')
                 WHERE pi.codigo_programacao=?
                   AND UPPER(TRIM(pi.cod_cliente))=UPPER(TRIM(?))
                 LIMIT 1
@@ -2179,7 +3319,8 @@ def salvar_controle_cliente(
             else:
                 status = "PENDENTE"
 
-        alterado_em = datetime.now().isoformat(timespec="seconds") if status == "ALTERADO" else None
+        evento_em = _evento_iso_or_now(payload.evento_em)
+        alterado_em = evento_em if status == "ALTERADO" else None
 
         # valida faixa de caixas para evitar manipulaÃ§Ã£o indevida
         if caixas_atual is not None:
@@ -2428,7 +3569,12 @@ def listar_logs_cliente(
         cur = conn.cursor()
 
         # garante que a rota pertence ao motorista
-        pr = _fetch_programacao_owned(cur, codigo_programacao, m, "p.id, p.status, p.carregamento_fechado")
+        pr = _fetch_programacao_owned(
+            cur,
+            codigo_programacao,
+            m,
+            "p.id, p.status, p.carregamento_fechado, COALESCE(p.tipo_estimativa, 'KG') AS tipo_estimativa, COALESCE(p.caixas_estimado, 0) AS caixas_estimado",
+        )
         if not pr:
             raise HTTPException(status_code=404, detail="Rota nÃ£o encontrada para este motorista")
 
@@ -2468,6 +3614,7 @@ def salvar_gps(
     m=Depends(get_current_motorista),
 ):
     nome_motorista = (m["nome"] or "").strip()
+    codigo_motorista = (m.get("codigo") or "").strip().upper()
     codigo_programacao = (codigo_programacao or "").strip()
 
     if not codigo_programacao:
@@ -2475,6 +3622,8 @@ def salvar_gps(
 
     with get_conn() as conn:
         cur = conn.cursor()
+        if _idempotency_seen(cur, codigo_motorista, codigo_programacao, "gps", payload.idempotency_key):
+            return {"ok": True, "deduplicado": True}
 
         pr = _fetch_programacao_owned(cur, codigo_programacao, m, "p.id, p.status, p.carregamento_fechado")
         if not pr:
@@ -2505,9 +3654,84 @@ def salvar_gps(
                 ts.isoformat(timespec="seconds"),
             ),
         )
+        _idempotency_mark(cur, codigo_motorista, codigo_programacao, "gps", payload.idempotency_key)
+        _idempotency_mark(cur, codigo_motorista, codigo_programacao, "clientes_controle", payload.idempotency_key)
         conn.commit()
 
     return {"ok": True}
+
+
+@app.post("/rotas/{codigo_programacao}/status-operacional")
+def atualizar_status_operacional_rota(
+    codigo_programacao: str,
+    payload: RotaStatusOperacionalIn,
+    m=Depends(get_current_motorista),
+):
+    codigo_programacao = (codigo_programacao or "").strip()
+    nome_motorista = str(m.get("nome") or "").strip().upper()
+    codigo_motorista = (m.get("codigo") or "").strip().upper()
+    status_in = _status_operacional_normalizado(payload.status_operacional)
+    observacao = str(payload.observacao or "").strip()
+
+    allowed = {
+        "NORMAL",
+        "CAMINHAO_QUEBROU",
+        "PROBLEMA_NA_ROTA",
+        "PNEU_FURADO",
+        "ACIDENTE",
+        "ATRASO",
+    }
+    if status_in not in allowed:
+        raise HTTPException(status_code=400, detail=f"status_operacional invalido: {status_in or '-'}")
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        if _idempotency_seen(cur, codigo_motorista, codigo_programacao, "status_operacional", payload.idempotency_key):
+            return {"ok": True, "deduplicado": True, "codigo_programacao": codigo_programacao}
+        pr = _fetch_programacao_owned(cur, codigo_programacao, m, "p.id, p.status")
+        if not pr:
+            raise HTTPException(status_code=404, detail="Rota não encontrada para este motorista")
+
+        status_rota = str(pr["status"] or "").strip().upper()
+        if status_rota in ("FINALIZADA", "FINALIZADO", "CANCELADA", "CANCELADO"):
+            raise HTTPException(status_code=409, detail=f"Rota encerrada (status={status_rota}).")
+
+        now_iso = _evento_iso_or_now(payload.evento_em)
+        if status_in == "NORMAL":
+            cur.execute(
+                """
+                UPDATE programacoes
+                   SET status_operacional=NULL,
+                       status_operacional_obs=NULL,
+                       status_operacional_em=?,
+                       status_operacional_por=?
+                 WHERE id=?
+                """,
+                (now_iso, nome_motorista, pr["id"]),
+            )
+            status_out = None
+        else:
+            cur.execute(
+                """
+                UPDATE programacoes
+                   SET status_operacional=?,
+                       status_operacional_obs=?,
+                       status_operacional_em=?,
+                       status_operacional_por=?
+                 WHERE id=?
+                """,
+                (status_in, (observacao or None), now_iso, nome_motorista, pr["id"]),
+            )
+            status_out = status_in
+        _idempotency_mark(cur, codigo_motorista, codigo_programacao, "status_operacional", payload.idempotency_key)
+        conn.commit()
+
+    return {
+        "ok": True,
+        "codigo_programacao": codigo_programacao,
+        "status_rota": status_rota,
+        "status_operacional": status_out,
+    }
 
 
 @app.post("/rotas/{codigo_programacao}/iniciar")
@@ -2518,10 +3742,13 @@ def iniciar_rota(
     override_token_hdr: Optional[str] = Header(default=None, alias="X-Override-Token"),
 ):
     nome_motorista = (m["nome"] or "").strip()
+    codigo_motorista = (m.get("codigo") or "").strip().upper()
     codigo_programacao = (codigo_programacao or "").strip()
 
     with get_conn() as conn:
         cur = conn.cursor()
+        if _idempotency_seen(cur, codigo_motorista, codigo_programacao, "iniciar_rota", payload.idempotency_key):
+            return {"ok": True, "status": "EM_ROTA", "deduplicado": True}
         pr = _fetch_programacao_owned(cur, codigo_programacao, m, "p.id, p.status")
         if not pr:
             raise HTTPException(status_code=404, detail="Rota nÃ£o encontrada para este motorista")
@@ -2533,6 +3760,29 @@ def iniciar_rota(
             raise HTTPException(status_code=409, detail="Rota jÃ¡ estÃ¡ em andamento.")
         if status_atual in ("FINALIZADA", "FINALIZADO", "CANCELADA", "CANCELADO"):
             raise HTTPException(status_code=409, detail=f"Rota encerrada (status={status_atual}).")
+
+        # Bloqueia iniciar uma nova rota se já houver outra em andamento para o mesmo motorista.
+        owner_sql, owner_params = _owner_filter_for_programacoes(conn, m, "p")
+        cur.execute(
+            """
+            SELECT p.codigo_programacao, COALESCE(p.status,'') AS status
+            FROM programacoes p
+            WHERE p.codigo_programacao <> ?
+              AND """ + owner_sql + """
+              AND UPPER(TRIM(COALESCE(p.status,''))) IN ('EM_ROTA', 'EM ROTA', 'INICIADA', 'EM_ENTREGAS', 'EM ENTREGAS', 'CARREGADA')
+            ORDER BY p.id DESC
+            LIMIT 1
+            """,
+            (codigo_programacao, *owner_params),
+        )
+        rota_em_andamento = cur.fetchone()
+        if rota_em_andamento:
+            cod_busy = str(rota_em_andamento["codigo_programacao"] or "").strip()
+            st_busy = str(rota_em_andamento["status"] or "").strip().upper()
+            raise HTTPException(
+                status_code=409,
+                detail=f"Motorista já possui rota em andamento ({cod_busy}, status={st_busy}). Finalize a anterior antes de iniciar nova rota.",
+            )
 
         # valida GPS: minimo 5 km nos ultimos 15 minutos (opcional por flag)
         override_token = os.environ.get("ROTA_OVERRIDE_TOKEN")
@@ -2567,6 +3817,7 @@ def iniciar_rota(
             """,
             (payload.data_saida, payload.hora_saida, payload.km_inicial, pr["id"]),
         )
+        _idempotency_mark(cur, codigo_motorista, codigo_programacao, "iniciar_rota", payload.idempotency_key)
         conn.commit()
 
     return {"ok": True, "status": "EM_ROTA"}
@@ -2575,9 +3826,12 @@ def iniciar_rota(
 @app.post("/rotas/{codigo_programacao}/finalizar")
 def finalizar_rota(codigo_programacao: str, payload: FinalizarRotaIn, m=Depends(get_current_motorista)):
     codigo_programacao = (codigo_programacao or "").strip()
+    codigo_motorista = (m.get("codigo") or "").strip().upper()
 
     with get_conn() as conn:
         cur = conn.cursor()
+        if _idempotency_seen(cur, codigo_motorista, codigo_programacao, "finalizar_rota", payload.idempotency_key):
+            return {"ok": True, "status": "FINALIZADA", "deduplicado": True}
         pr = _fetch_programacao_owned(cur, codigo_programacao, m, "p.id, p.status, p.km_inicial")
         if not pr:
             raise HTTPException(status_code=404, detail="Rota n?o encontrada para este motorista")
@@ -2765,6 +4019,7 @@ def finalizar_rota(codigo_programacao: str, payload: FinalizarRotaIn, m=Depends(
             """,
             (payload.data_chegada, payload.hora_chegada, payload.km_final, pr["id"]),
         )
+        _idempotency_mark(cur, codigo_motorista, codigo_programacao, "finalizar_rota", payload.idempotency_key)
         conn.commit()
 
     return {"ok": True, "status": "FINALIZADA"}
@@ -2777,12 +4032,29 @@ def salvar_carregamento(
     m=Depends(get_current_motorista),
 ):
     codigo_programacao = (codigo_programacao or "").strip()
+    codigo_motorista = (m.get("codigo") or "").strip().upper()
 
     with get_conn() as conn:
         cur = conn.cursor()
+        if _idempotency_seen(cur, codigo_motorista, codigo_programacao, "carregamento", payload.idempotency_key):
+            return {"ok": True, "deduplicado": True}
+
+        cur.execute("PRAGMA table_info(programacoes)")
+        cols = {row[1] for row in cur.fetchall()}
+
+        def has(col: str) -> bool:
+            return col in cols
+
+        carregamento_fechado_sel = "p.carregamento_fechado" if has("carregamento_fechado") else "0 AS carregamento_fechado"
+        tipo_estimativa_sel = "p.tipo_estimativa" if has("tipo_estimativa") else "'KG' AS tipo_estimativa"
 
         # garante que a programaÃ§Ã£o Ã© do motorista logado
-        pr = _fetch_programacao_owned(cur, codigo_programacao, m, "p.id, p.status, p.carregamento_fechado")
+        pr = _fetch_programacao_owned(
+            cur,
+            codigo_programacao,
+            m,
+            f"p.id, p.status, {carregamento_fechado_sel}, {tipo_estimativa_sel}",
+        )
         if not pr:
             raise HTTPException(status_code=404, detail="Rota nÃ£o encontrada para este motorista")
         status_atual = str(pr["status"] or "").strip().upper()
@@ -2796,13 +4068,6 @@ def salvar_carregamento(
                 status_code=409,
                 detail=f"Rota ainda nao iniciada (status={status_atual or 'N/D'}). Inicie a rota antes do carregamento.",
             )
-
-        # detecta colunas existentes
-        cur.execute("PRAGMA table_info(programacoes)")
-        cols = {row[1] for row in cur.fetchall()}
-
-        def has(col: str) -> bool:
-            return col in cols
 
         # apos o primeiro salvamento, o carregamento fica fechado para edicoes
         if has("carregamento_fechado"):
@@ -2852,6 +4117,15 @@ def salvar_carregamento(
         caixa_final = int(caixa_final_raw or 0)
         if caixa_final < 0:
             caixa_final = 0
+
+        tipo_estimativa = str(pr["tipo_estimativa"] or "KG").strip().upper()
+        if tipo_estimativa not in ("KG", "CX"):
+            tipo_estimativa = "KG"
+        if tipo_estimativa == "KG" and nf_kg <= 0 and kg_carregado <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="FOB exige peso informado (nf_kg ou kg_carregado maior que zero).",
+            )
 
         sets = []
         params: List[Any] = []
@@ -2934,6 +4208,7 @@ def salvar_carregamento(
         sql = f"UPDATE programacoes SET {', '.join(sets)} WHERE id=?"
         params.append(pr["id"])
         cur.execute(sql, tuple(params))
+        _idempotency_mark(cur, codigo_motorista, codigo_programacao, "carregamento", payload.idempotency_key)
         conn.commit()
 
     return {"ok": True, "status": status_result}
@@ -2941,6 +4216,72 @@ def salvar_carregamento(
 
 def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _evento_iso_or_now(raw: Optional[str]) -> str:
+    txt = str(raw or "").strip()
+    if not txt:
+        return _now_iso()
+    try:
+        return datetime.fromisoformat(txt).isoformat(timespec="seconds")
+    except Exception:
+        return _now_iso()
+
+
+def _idempotency_seen(
+    cur: sqlite3.Cursor,
+    motorista_codigo: str,
+    codigo_programacao: str,
+    endpoint: str,
+    idem_key: Optional[str],
+) -> bool:
+    key = str(idem_key or "").strip()
+    if not key:
+        return False
+    cur.execute(
+        """
+        SELECT 1
+        FROM mobile_sync_idempotency
+        WHERE motorista_codigo=?
+          AND codigo_programacao=?
+          AND endpoint=?
+          AND idem_key=?
+        LIMIT 1
+        """,
+        (
+            str(motorista_codigo or "").strip().upper(),
+            str(codigo_programacao or "").strip(),
+            str(endpoint or "").strip(),
+            key,
+        ),
+    )
+    return cur.fetchone() is not None
+
+
+def _idempotency_mark(
+    cur: sqlite3.Cursor,
+    motorista_codigo: str,
+    codigo_programacao: str,
+    endpoint: str,
+    idem_key: Optional[str],
+) -> None:
+    key = str(idem_key or "").strip()
+    if not key:
+        return
+    cur.execute(
+        """
+        INSERT OR IGNORE INTO mobile_sync_idempotency
+            (motorista_codigo, codigo_programacao, endpoint, idem_key, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            str(motorista_codigo or "").strip().upper(),
+            str(codigo_programacao or "").strip(),
+            str(endpoint or "").strip(),
+            key,
+            _now_iso(),
+        ),
+    )
 
 
 def _parse_snapshot(snapshot_raw: Optional[str]) -> Dict[str, Any]:
@@ -3092,6 +4433,137 @@ class TransferenciaCreateIn(BaseModel):
     qtd_caixas: int
     snapshot: Optional[Dict[str, Any]] = None
     obs: Optional[str] = None
+
+
+def _recalcular_origem_transferencia(
+    cur: sqlite3.Cursor,
+    codigo_origem: str,
+    cod_cliente: str,
+    pedido_ref: str,
+    alterado_por: str,
+    evento: str,
+) -> None:
+    codigo_origem = (codigo_origem or "").strip()
+    cod_cliente = (cod_cliente or "").strip()
+    pedido_norm = _norm_pedido_key(pedido_ref)
+    if not codigo_origem or not cod_cliente:
+        return
+
+    cur.execute("PRAGMA table_info(programacao_itens)")
+    cols_itens = {row[1] for row in (cur.fetchall() or [])}
+    has_pedido_col = "pedido" in cols_itens
+
+    base = None
+    if has_pedido_col:
+        cur.execute(
+            """
+            SELECT rowid AS rid, codigo_programacao, cod_cliente, pedido, qnt_caixas
+            FROM programacao_itens
+            WHERE codigo_programacao=? AND UPPER(TRIM(cod_cliente))=UPPER(TRIM(?))
+            """,
+            (codigo_origem, cod_cliente),
+        )
+        cands = cur.fetchall() or []
+        for r in cands:
+            if _norm_pedido_key(r["pedido"]) == pedido_norm:
+                base = r
+                break
+    else:
+        cur.execute(
+            """
+            SELECT rowid AS rid, codigo_programacao, cod_cliente, NULL AS pedido, qnt_caixas
+            FROM programacao_itens
+            WHERE codigo_programacao=? AND UPPER(TRIM(cod_cliente))=UPPER(TRIM(?))
+            LIMIT 1
+            """,
+            (codigo_origem, cod_cliente),
+        )
+        base = cur.fetchone()
+
+    if not base:
+        return
+
+    # Soma transferências ainda ativas (pendentes/aceitas) para este pedido.
+    qtd_ativa = 0
+    cur.execute(
+        """
+        SELECT pedido, qtd_caixas
+        FROM transferencias
+        WHERE codigo_origem=?
+          AND UPPER(TRIM(cod_cliente))=UPPER(TRIM(?))
+          AND UPPER(TRIM(COALESCE(status, ''))) IN ('PENDENTE', 'ACEITA')
+        """,
+        (codigo_origem, cod_cliente),
+    )
+    for tr in (cur.fetchall() or []):
+        if _norm_pedido_key(tr["pedido"]) == pedido_norm:
+            qtd_ativa += int(tr["qtd_caixas"] or 0)
+
+    base_qtd = int(base["qnt_caixas"] or 0)
+    novo_caixas = max(base_qtd - qtd_ativa, 0)
+    if qtd_ativa <= 0:
+        novo_status = "PENDENTE"
+        detalhe = f"Transferencia {evento}: saldo restaurado ({novo_caixas} cx)."
+    else:
+        novo_status = "CANCELADO" if novo_caixas == 0 else "ALTERADO"
+        detalhe = f"Transferencia {evento}: saldo em transferencia {qtd_ativa} cx."
+
+    now = _now_iso()
+    sets = []
+    params: List[Any] = []
+    if "status_pedido" in cols_itens:
+        sets.append("status_pedido=?"); params.append(novo_status)
+    if "alteracao_tipo" in cols_itens:
+        sets.append("alteracao_tipo=?"); params.append("QUANTIDADE")
+    if "alteracao_detalhe" in cols_itens:
+        sets.append("alteracao_detalhe=?"); params.append(detalhe)
+    if "caixas_atual" in cols_itens:
+        sets.append("caixas_atual=?"); params.append(novo_caixas)
+    if "alterado_em" in cols_itens:
+        sets.append("alterado_em=?"); params.append(now)
+    if "alterado_por" in cols_itens:
+        sets.append("alterado_por=?"); params.append(alterado_por or "SISTEMA")
+
+    if sets:
+        params.append(base["rid"])
+        cur.execute(f"UPDATE programacao_itens SET {', '.join(sets)} WHERE rowid=?", tuple(params))
+
+    pedido_db = base["pedido"] if has_pedido_col else None
+    cur.execute(
+        """
+        UPDATE programacao_itens_controle
+           SET status_pedido=?,
+               alteracao_tipo='QUANTIDADE',
+               alteracao_detalhe=?,
+               caixas_atual=?,
+               alterado_em=?,
+               alterado_por=?,
+               updated_at=datetime('now')
+         WHERE codigo_programacao=? AND UPPER(TRIM(cod_cliente))=UPPER(TRIM(?))
+           AND COALESCE(TRIM(pedido), '')=COALESCE(TRIM(?), '')
+        """,
+        (novo_status, detalhe, novo_caixas, now, (alterado_por or "SISTEMA"), codigo_origem, cod_cliente, pedido_db),
+    )
+    if cur.rowcount == 0:
+        cur.execute(
+            """
+            INSERT INTO programacao_itens_controle
+                (codigo_programacao, cod_cliente, pedido, status_pedido,
+                 alteracao_tipo, alteracao_detalhe, caixas_atual,
+                 alterado_em, alterado_por, updated_at)
+            VALUES (?, ?, ?, ?, 'QUANTIDADE', ?, ?, ?, ?, datetime('now'))
+            """,
+            (
+                codigo_origem,
+                cod_cliente,
+                pedido_db,
+                novo_status,
+                detalhe,
+                novo_caixas,
+                now,
+                (alterado_por or "SISTEMA"),
+            ),
+        )
 
 
 def _rota_pertence_ao_motorista(codigo_programacao: str, motorista: Dict[str, Any]) -> bool:
@@ -3382,7 +4854,7 @@ def aceitar_substituicao_rota(
         # fallback: se ownership antigo nao bater, tenta por codigo direto
         if not pr:
             cur.execute(
-                "SELECT id, status FROM programacoes WHERE codigo_programacao=? LIMIT 1",
+                "SELECT id, status FROM programacoes WHERE codigo_programacao=? ORDER BY id DESC LIMIT 1",
                 (item["codigo_programacao"],),
             )
             pr = cur.fetchone()
@@ -3544,6 +5016,57 @@ def criar_transferencia(
                 status_code=409,
                 detail="Transferencias bloqueadas enquanto houver substituicao de motorista pendente.",
             )
+        # valida rota destino e regra de disponibilidade em rota
+        caixas_saldo_expr_dest = _caixas_saldo_subquery(conn, "p")
+        cur.execute(
+            """
+            SELECT
+                p.codigo_programacao,
+                COALESCE(p.status, '') AS status,
+                (
+                    SELECT CAST(NULLIF(TRIM(v.capacidade_cx), '') AS INTEGER)
+                    FROM veiculos v
+                    WHERE UPPER(TRIM(v.placa)) = UPPER(TRIM(p.veiculo))
+                       OR UPPER(TRIM(v.modelo)) = UPPER(TRIM(p.veiculo))
+                    LIMIT 1
+                ) AS capacidade_cx,
+                """
+            + caixas_saldo_expr_dest
+            + """
+            FROM programacoes p
+            WHERE p.codigo_programacao=?
+            LIMIT 1
+            """,
+            (codigo_destino,),
+        )
+        destino_row = cur.fetchone()
+        if not destino_row:
+            raise HTTPException(status_code=404, detail="Rota destino nao encontrada.")
+
+        status_dest = str(destino_row["status"] or "").strip().upper()
+        if status_dest in ("FINALIZADA", "FINALIZADO", "CANCELADA", "CANCELADO"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Rota destino encerrada (status={status_dest}).",
+            )
+
+        # Se destino estiver em rota, só recebe transferência se tiver saldo no veículo.
+        em_rota_dest = status_dest in ("EM_ROTA", "EM ROTA", "INICIADA", "EM_ENTREGAS", "EM ENTREGAS", "CARREGADA")
+        if em_rota_dest:
+            try:
+                saldo_dest = int(float(destino_row["caixas_saldo"] or 0))
+            except Exception:
+                saldo_dest = 0
+            if saldo_dest <= 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Motorista destino esta em rota sem saldo de caixas para receber transferencia.",
+                )
+            if qtd > saldo_dest:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Transferencia excede saldo do destino em rota. Saldo destino: {saldo_dest} cx.",
+                )
         # valida disponibilidade no pedido de origem
         cur.execute("PRAGMA table_info(programacao_itens)")
         cols_itens = {row[1] for row in cur.fetchall() or []}
@@ -3831,6 +5354,17 @@ def recusar_transferencia(
             """,
             ("RECUSADA", nome_motorista, _now_iso(), tid),
         )
+
+        # Ao recusar, recalcula imediatamente o pedido da origem para evitar caixas "soltas".
+        _recalcular_origem_transferencia(
+            cur,
+            codigo_origem=str(item.get("codigo_origem") or "").strip(),
+            cod_cliente=str(item.get("cod_cliente") or "").strip(),
+            pedido_ref=str(item.get("pedido") or "").strip(),
+            alterado_por=nome_motorista or "SISTEMA",
+            evento="RECUSADA",
+        )
+
         conn.commit()
         return _fetch_transferencia_by_id(conn, tid)
 
