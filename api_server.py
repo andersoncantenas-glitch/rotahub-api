@@ -478,6 +478,26 @@ def _caixas_saldo_subquery(conn: sqlite3.Connection, prog_alias: str = "p") -> s
                 ) AS caixas_saldo"""
 
 
+def _rotas_not_finalizadas_clause(conn: sqlite3.Connection, alias: str = "p") -> str:
+    """
+    Filtro defensivo para não exibir rotas já encerradas.
+    Cobre status legado inconsistente (ex.: status aberto com sinais de finalização).
+    """
+    parts = [
+        f"UPPER(TRIM(COALESCE({alias}.status,''))) NOT IN ('FINALIZADA','FINALIZADO','CANCELADA','CANCELADO')",
+        f"UPPER(TRIM(COALESCE({alias}.status_operacional,''))) NOT IN ('FINALIZADA','FINALIZADO','CANCELADA','CANCELADO')",
+    ]
+    if col_exists(conn, "programacoes", "finalizada_no_app"):
+        parts.append(f"COALESCE({alias}.finalizada_no_app,0)=0")
+    if col_exists(conn, "programacoes", "data_chegada"):
+        parts.append(f"TRIM(COALESCE({alias}.data_chegada,''))=''")
+    if col_exists(conn, "programacoes", "hora_chegada"):
+        parts.append(f"TRIM(COALESCE({alias}.hora_chegada,''))=''")
+    if col_exists(conn, "programacoes", "km_final"):
+        parts.append(f"COALESCE({alias}.km_final,0)=0")
+    return " AND ".join(parts)
+
+
 def _equipe_cols_expr(conn: sqlite3.Connection, alias: str = "e") -> str:
     def col_or_null(col: str) -> str:
         if col_exists(conn, "equipes", col):
@@ -2836,6 +2856,7 @@ def listar_rotas_ativas_todas(m=Depends(get_current_motorista)):
         caixas_carregadas_expr = _caixas_carregadas_expr(conn)
         caixa_final_expr = _caixa_final_expr(conn)
         caixas_saldo_expr = _caixas_saldo_subquery(conn, "p")
+        not_finalized_sql = _rotas_not_finalizadas_clause(conn, "p")
         equipe_cols_expr = _equipe_cols_expr(conn, "e")
         has_equipe_id = col_exists(conn, "programacoes", "equipe_id")
         equipe_id_select = "p.equipe_id," if has_equipe_id else "NULL AS equipe_id,"
@@ -2884,8 +2905,7 @@ def listar_rotas_ativas_todas(m=Depends(get_current_motorista)):
             FROM programacoes p
             LEFT JOIN equipes e
             """ + equipe_join_on + """
-            WHERE UPPER(TRIM(COALESCE(p.status,''))) NOT IN ('FINALIZADA','FINALIZADO','CANCELADA','CANCELADO')
-              AND UPPER(TRIM(COALESCE(p.status_operacional,''))) NOT IN ('FINALIZADA','FINALIZADO','CANCELADA','CANCELADO')
+            WHERE """ + not_finalized_sql + """
             ORDER BY p.id DESC
             LIMIT 200
             """
@@ -2913,6 +2933,7 @@ def rotas_ativas(m=Depends(get_current_motorista)):
         caixas_carregadas_expr = _caixas_carregadas_expr(conn)
         caixa_final_expr = _caixa_final_expr(conn)
         caixas_saldo_expr = _caixas_saldo_subquery(conn, "p")
+        not_finalized_sql = _rotas_not_finalizadas_clause(conn, "p")
         equipe_cols_expr = _equipe_cols_expr(conn, "e")
         has_equipe_id = col_exists(conn, "programacoes", "equipe_id")
         equipe_id_select = "p.equipe_id," if has_equipe_id else "NULL AS equipe_id,"
@@ -2963,8 +2984,7 @@ def rotas_ativas(m=Depends(get_current_motorista)):
             LEFT JOIN equipes e
             """ + equipe_join_on + """
             WHERE """ + owner_sql + """
-              AND UPPER(TRIM(COALESCE(p.status,''))) NOT IN ('FINALIZADA','FINALIZADO','CANCELADA','CANCELADO')
-              AND UPPER(TRIM(COALESCE(p.status_operacional,''))) NOT IN ('FINALIZADA','FINALIZADO','CANCELADA','CANCELADO')
+              AND """ + not_finalized_sql + """
             ORDER BY p.id DESC
             LIMIT 200
             """,
