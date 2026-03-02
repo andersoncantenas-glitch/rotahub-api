@@ -18435,8 +18435,31 @@ def abrir_login():
 
 
 if __name__ == "__main__":
-    db_init()  # garante migraÃ§Ãµes
-    abrir_login()
+    # Detecta se está sendo executado em um ambiente de servidor (Render.com)
+    is_server = os.environ.get("RENDER", "") == "true" or os.environ.get("PORT") is not None
+    
+    if is_server:
+        # Ambiente de servidor: inicia o FastAPI
+        try:
+            import uvicorn
+            from fastapi import FastAPI
+            
+            # Verifica se o app FastAPI já foi criado
+            if 'app' not in locals():
+                app = FastAPI()
+            
+            # Inicia o servidor
+            port = int(os.environ.get("PORT", 8000))
+            print(f"Iniciando servidor FastAPI na porta {port}...")
+            uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+        except Exception as e:
+            print(f"Erro ao iniciar servidor: {e}")
+            import traceback
+            traceback.print_exc()
+    else:
+        # Ambiente local: inicia a aplicação desktop
+        db_init()  # garante migrações
+        abrir_login()
 
 # ==========================
 # ===== FIM DA PARTE 10 (ATUALIZADA) =====
