@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+﻿﻿# -*- coding: utf-8 -*-
 # ==========================
 # ===== INCIO DA PARTE 1 =====
 # ==========================
@@ -403,13 +403,76 @@ def get_db():
         conn.close()
 
 def db_connect():
-    """FunÃ§Ã£o compatÃ­vel para cÃ³digo existente"""
+    """Função compatível para código existente"""
     conn = sqlite3.connect(DB_PATH)
     _configure_sqlite(conn)
     return conn
 
 # =========================================================
-# FUNÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ES UTILITÃƒÆ’Ã†â€™Ãƒâ€šÃ‚ÂRIAS
+# ENDPOINT DE RESET DO BANCO DE DADOS (PARA DEBUG)
+# =========================================================
+try:
+    from fastapi import FastAPI, HTTPException, Depends
+    from fastapi.security import HTTPBasic, HTTPBasicCredentials
+    import secrets
+
+    # Usaremos a mesma instância 'app' se ela já existir no escopo do servidor
+    # Caso contrário, criamos uma nova para o endpoint de reset.
+    if 'app' not in locals():
+        app = FastAPI()
+
+    security = HTTPBasic()
+    RESET_USER = "admin"
+    # Esta senha será usada para autorizar o reset. Guarde-a.
+    # Em um cenário real, isso viria de uma variável de ambiente.
+    RESET_PASSWORD = os.environ.get("ROTA_RESET_PASSWORD", "super-senha-secreta-123")
+
+    def get_current_username(credentials: HTTPBasicCredentials = Depends(security)):
+        correct_username = secrets.compare_digest(credentials.username, RESET_USER)
+        correct_password = secrets.compare_digest(credentials.password, RESET_PASSWORD)
+        if not (correct_username and correct_password):
+            raise HTTPException(
+                status_code=401,
+                detail="Credenciais incorretas",
+                headers={"WWW-Authenticate": "Basic"},
+            )
+        return credentials.username
+
+    @app.post("/admin/reset-database", tags=["Admin"])
+    def reset_database_endpoint(username: str = Depends(get_current_username)):
+        """
+        Endpoint para apagar e recriar o banco de dados.
+        Requer autenticação Basic Auth.
+        """
+        db_path = DB_PATH # Usa a variável global já definida
+        logging.warning(f"Requisição de reset para o banco de dados: {db_path}")
+        
+        try:
+            if os.path.exists(db_path):
+                # Fecha conexões existentes antes de apagar
+                # (Em um app real, seria necessário um gerenciamento de pool de conexão)
+                os.remove(db_path)
+                logging.info(f"Banco de dados '{db_path}' apagado com sucesso.")
+                # A lógica de criação/seed já é tratada no início do script
+                return {"message": f"Banco de dados '{os.path.basename(db_path)}' foi resetado com sucesso. O serviço pode precisar ser reiniciado."}
+            else:
+                return {"message": "Banco de dados não encontrado. Nada a fazer."}
+        except Exception as e:
+            logging.error(f"Erro ao tentar resetar o banco de dados: {e}")
+            raise HTTPException(status_code=500, detail=f"Erro no servidor ao resetar o banco: {e}")
+
+except ImportError:
+    logging.info("FastAPI não instalado. O endpoint de reset não estará disponível.")
+    if 'app' not in locals():
+        class DummyApp:
+            def post(self, *args, **kwargs):
+                def decorator(func):
+                    return func
+                return decorator
+        app = DummyApp()
+
+# =========================================================
+# FUNÇÕES UTILITÁRIAS
 # =========================================================
 def upper(s):
     return str(s).strip().upper() if s is not None else ""
@@ -18378,5 +18441,3 @@ if __name__ == "__main__":
 # ==========================
 # ===== FIM DA PARTE 10 (ATUALIZADA) =====
 # ==========================
-
-
