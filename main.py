@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 # ==========================
 # ===== INCIO DA PARTE 1 =====
 # ==========================
@@ -96,7 +96,7 @@ def is_desktop_api_sync_enabled() -> bool:
     return raw in {"1", "true", "yes", "y", "sim", "on"}
 
 # Versao/update/suporte (customizavel via variaveis de ambiente no servidor/estacao)
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.3"
 UPDATE_MANIFEST_URL = os.environ.get("ROTA_UPDATE_MANIFEST_URL", "").strip()
 SETUP_DOWNLOAD_URL = os.environ.get("ROTA_SETUP_URL", "").strip()
 CHANGELOG_URL = os.environ.get("ROTA_CHANGELOG_URL", "").strip()
@@ -1068,11 +1068,26 @@ def generate_usuario_password(length: int = 6) -> str:
 
 def guess_col(cols, candidates):
     """Tenta adivinhar o nome da coluna no Excel"""
-    cols_lower = {str(c).strip().lower(): c for c in cols}
+    def _norm(s: str) -> str:
+        s = str(s or "").strip().lower()
+        repl = {
+            "á": "a", "à": "a", "â": "a", "ã": "a",
+            "é": "e", "è": "e", "ê": "e",
+            "í": "i", "ì": "i", "î": "i",
+            "ó": "o", "ò": "o", "ô": "o", "õ": "o",
+            "ú": "u", "ù": "u", "û": "u",
+            "ç": "c",
+        }
+        for k, v in repl.items():
+            s = s.replace(k, v)
+        s = re.sub(r"[^a-z0-9]+", " ", s).strip()
+        return s
+
+    cols_lower = {_norm(c): c for c in cols}
     for cand in candidates:
-        cand_low = cand.strip().lower()
+        cand_low = _norm(cand)
         for col_low, original in cols_lower.items():
-            if cand_low in col_low:
+            if cand_low and (cand_low == col_low or cand_low in col_low):
                 return original
     return None
 
@@ -2270,6 +2285,163 @@ class CadastroCRUD(ttk.Frame):
         except Exception:
             return False
 
+    def _sync_motorista_upsert_api(self, data: dict):
+        if self.table != "motoristas":
+            return
+        if not is_desktop_api_sync_enabled():
+            return
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if not desktop_secret:
+            return
+        codigo = self._norm(data.get("codigo"))
+        nome = self._norm(data.get("nome"))
+        if not codigo or not nome:
+            return
+        payload = {
+            "codigo": codigo,
+            "nome": nome,
+            "telefone": self._norm(data.get("telefone")),
+            "cpf": self._norm(data.get("cpf")),
+            "status": self._norm(data.get("status") or "ATIVO"),
+            "senha": data.get("senha") or None,
+            "acesso_liberado": bool(int(data.get("acesso_liberado", 1) or 0)),
+            "acesso_liberado_por": self._norm(data.get("acesso_liberado_por") or "DESKTOP_SYNC"),
+            "acesso_obs": self._norm(data.get("acesso_obs") or "Sincronizado via Desktop"),
+        }
+        _call_api(
+            "POST",
+            "desktop/cadastros/motoristas/upsert",
+            payload=payload,
+            extra_headers={"X-Desktop-Secret": desktop_secret},
+        )
+
+    def _sync_veiculo_upsert_api(self, data: dict):
+        if self.table != "veiculos":
+            return
+        if not is_desktop_api_sync_enabled():
+            return
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if not desktop_secret:
+            return
+        placa = self._norm(data.get("placa"))
+        modelo = self._norm(data.get("modelo"))
+        if not placa or not modelo:
+            return
+        payload = {
+            "placa": placa,
+            "modelo": modelo,
+            "capacidade_cx": int(safe_int(data.get("capacidade_cx"), 0)),
+        }
+        _call_api(
+            "POST",
+            "desktop/cadastros/veiculos/upsert",
+            payload=payload,
+            extra_headers={"X-Desktop-Secret": desktop_secret},
+        )
+
+    def _sync_ajudante_upsert_api(self, data: dict):
+        if self.table != "ajudantes":
+            return
+        if not is_desktop_api_sync_enabled():
+            return
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if not desktop_secret:
+            return
+        nome = self._norm(data.get("nome"))
+        sobrenome = self._norm(data.get("sobrenome"))
+        if not nome or not sobrenome:
+            return
+        payload = {
+            "nome": nome,
+            "sobrenome": sobrenome,
+            "telefone": self._norm(data.get("telefone")),
+            "status": self._norm(data.get("status") or "ATIVO"),
+        }
+        _call_api(
+            "POST",
+            "desktop/cadastros/ajudantes/upsert",
+            payload=payload,
+            extra_headers={"X-Desktop-Secret": desktop_secret},
+        )
+
+    def _has_delete_references(self, cur) -> str:
+        if not self.selected_id:
+            return ""
+        try:
+            if self.table == "motoristas":
+                cod = self._norm(self._get("codigo"))
+                nome = self._norm(self._get("nome"))
+                if not cod and not nome:
+                    return ""
+                cur.execute("PRAGMA table_info(programacoes)")
+                cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+                wh = []
+                params = []
+                if "motorista_codigo" in cols and cod:
+                    wh.append("UPPER(COALESCE(motorista_codigo,''))=UPPER(?)")
+                    params.append(cod)
+                if "codigo_motorista" in cols and cod:
+                    wh.append("UPPER(COALESCE(codigo_motorista,''))=UPPER(?)")
+                    params.append(cod)
+                if "motorista" in cols:
+                    if cod:
+                        wh.append("UPPER(COALESCE(motorista,''))=UPPER(?)")
+                        params.append(cod)
+                    if nome:
+                        wh.append("UPPER(COALESCE(motorista,''))=UPPER(?)")
+                        params.append(nome)
+                if wh:
+                    cur.execute(
+                        "SELECT COUNT(*) FROM programacoes WHERE " + " OR ".join(wh),
+                        tuple(params),
+                    )
+                    if int((cur.fetchone() or [0])[0] or 0) > 0:
+                        return "Motorista vinculado a programação/rota."
+            elif self.table == "veiculos":
+                placa = self._norm(self._get("placa"))
+                if placa:
+                    cur.execute("SELECT COUNT(*) FROM programacoes WHERE UPPER(COALESCE(veiculo,''))=UPPER(?)", (placa,))
+                    if int((cur.fetchone() or [0])[0] or 0) > 0:
+                        return "Veículo vinculado a programação/rota."
+            elif self.table == "clientes":
+                cod = self._norm(self._get("cod_cliente"))
+                if cod:
+                    cur.execute("SELECT COUNT(*) FROM programacao_itens WHERE UPPER(COALESCE(cod_cliente,''))=UPPER(?)", (cod,))
+                    if int((cur.fetchone() or [0])[0] or 0) > 0:
+                        return "Cliente vinculado a programação."
+                    try:
+                        cur.execute("SELECT COUNT(*) FROM recebimentos WHERE UPPER(COALESCE(cod_cliente,''))=UPPER(?)", (cod,))
+                        if int((cur.fetchone() or [0])[0] or 0) > 0:
+                            return "Cliente vinculado a recebimentos."
+                    except Exception:
+                        logging.debug("Falha ignorada")
+            elif self.table == "ajudantes":
+                aid = str(self.selected_id)
+                nome = self._norm(self._get("nome"))
+                sobrenome = self._norm(self._get("sobrenome"))
+                alvo = f"{nome} {sobrenome}".strip()
+                cur.execute("PRAGMA table_info(equipes)")
+                cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+                conds = []
+                params = []
+                for c in ("ajudante1", "ajudante2", "ajudante_1", "ajudante_2"):
+                    if c in cols:
+                        conds.append(f"UPPER(COALESCE({c},''))=UPPER(?)")
+                        params.append(aid)
+                        if nome:
+                            conds.append(f"UPPER(COALESCE({c},''))=UPPER(?)")
+                            params.append(nome)
+                        if alvo:
+                            conds.append(f"UPPER(COALESCE({c},''))=UPPER(?)")
+                            params.append(alvo)
+                if conds:
+                    cur.execute("SELECT COUNT(*) FROM equipes WHERE " + " OR ".join(conds), tuple(params))
+                    if int((cur.fetchone() or [0])[0] or 0) > 0:
+                        return "Ajudante vinculado a equipe."
+        except Exception:
+            logging.debug("Falha na verificação de vínculos para exclusão", exc_info=True)
+        return ""
+
     # -------------------------
     # AÃ§Ãµes padrÃ£o
     # -------------------------
@@ -2596,6 +2768,34 @@ class CadastroCRUD(ttk.Frame):
             messagebox.showerror("ERRO", str(e))
             return
 
+        if self.table == "motoristas":
+            try:
+                self._sync_motorista_upsert_api(data)
+            except Exception as e:
+                messagebox.showwarning(
+                    "Sincronização",
+                    "Motorista salvo localmente, mas falhou ao sincronizar com a API.\n"
+                    f"Detalhe: {e}",
+                )
+        elif self.table == "veiculos":
+            try:
+                self._sync_veiculo_upsert_api(data)
+            except Exception as e:
+                messagebox.showwarning(
+                    "Sincronização",
+                    "Veículo salvo localmente, mas falhou ao sincronizar com a API.\n"
+                    f"Detalhe: {e}",
+                )
+        elif self.table == "ajudantes":
+            try:
+                self._sync_ajudante_upsert_api(data)
+            except Exception as e:
+                messagebox.showwarning(
+                    "Sincronização",
+                    "Ajudante salvo localmente, mas falhou ao sincronizar com a API.\n"
+                    f"Detalhe: {e}",
+                )
+
         self.carregar()
         self.limpar()
 
@@ -2612,6 +2812,10 @@ class CadastroCRUD(ttk.Frame):
 
         with get_db() as conn:
             cur = conn.cursor()
+            bloqueio = self._has_delete_references(cur)
+            if bloqueio:
+                messagebox.showwarning("ATENÇÃO", f"Exclusão bloqueada.\n\n{bloqueio}\nUse status DESATIVADO.")
+                return
             cur.execute(f"DELETE FROM {self.table} WHERE id=?", (self.selected_id,))
 
         self.carregar()
@@ -2672,8 +2876,13 @@ class CadastroCRUD(ttk.Frame):
             col_rota = guess_col(df.columns, ["rota"])
 
             if not col_cod or not col_nome:
-                messagebox.showerror("ERRO", "NÃƒO IDENTIFIQUEI AS COLUNAS DE CÃ“DIGO E NOME DO CLIENTE NO EXCEL.")
-                return
+                cols = list(df.columns or [])
+                if len(cols) >= 2:
+                    col_cod = col_cod or cols[0]
+                    col_nome = col_nome or cols[1]
+                else:
+                    messagebox.showerror("ERRO", "NÃO IDENTIFIQUEI AS COLUNAS DE CÓDIGO E NOME DO CLIENTE NO EXCEL.")
+                    return
 
             total = 0
             with get_db() as conn:
@@ -2964,24 +3173,30 @@ class CadastroCRUD(ttk.Frame):
             f"motoristas/acesso/{urllib.parse.quote(codigo)}",
             f"admin/motoristas/acesso?codigo={urllib.parse.quote(codigo)}",
         ]
+        methods = ["POST", "PUT", "PATCH"]
         last_err = ""
         for ep in endpoints:
-            try:
-                _call_api(
-                    "POST",
-                    ep,
-                    payload=payload,
-                    extra_headers={"X-Desktop-Secret": desktop_secret},
-                )
-                messagebox.showinfo("OK", f"Acesso ao app atualizado para {codigo}.")
-                return
-            except Exception as exc:
-                err = str(exc or "")
-                last_err = err
-                if "404" in err and "Not Found" in err:
-                    continue
-                messagebox.showerror("ERRO", f"Falha ao atualizar acesso do motorista:\n{err}")
-                return
+            for method in methods:
+                try:
+                    _call_api(
+                        method,
+                        ep,
+                        payload=payload,
+                        extra_headers={"X-Desktop-Secret": desktop_secret},
+                    )
+                    messagebox.showinfo("OK", f"Acesso ao app atualizado para {codigo}.")
+                    return
+                except Exception as exc:
+                    err = str(exc or "")
+                    last_err = err
+                    # Tenta próxima combinação quando a API não expõe essa rota/método.
+                    if (
+                        ("404" in err and "Not Found" in err)
+                        or ("405" in err and "Method Not Allowed" in err)
+                    ):
+                        continue
+                    messagebox.showerror("ERRO", f"Falha ao atualizar acesso do motorista:\n{err}")
+                    return
 
         endpoint = _build_api_url(endpoints[0])
         messagebox.showerror(
@@ -3527,7 +3742,7 @@ class HomePage(PageBase):
 
         ttk.Label(card_rotas, text="Rotas Ativas", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
 
-        cols = ["COD", "MOTORISTA", "VECULO", "DATA"]
+        cols = ["COD", "MOTORISTA", "VEICULO", "DATA"]
         self.tree_rotas = ttk.Treeview(card_rotas, columns=cols, show="headings", height=10)
         self.tree_rotas.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
 
@@ -4069,22 +4284,81 @@ class HomePage(PageBase):
 
         self._clock_job = self.after(1000, self._update_clock)
 
+    def _home_api_rows(self):
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if not desktop_secret or not is_desktop_api_sync_enabled():
+            return []
+        try:
+            resp = _call_api(
+                "GET",
+                "desktop/monitoramento/rotas",
+                extra_headers={"X-Desktop-Secret": desktop_secret},
+            )
+            api_rows = []
+            if isinstance(resp, dict):
+                api_rows = resp.get("rotas") if isinstance(resp.get("rotas"), list) else []
+            elif isinstance(resp, list):
+                api_rows = resp
+            out = []
+            finais = {"FINALIZADA", "FINALIZADO", "CANCELADA", "CANCELADO"}
+            for r in (api_rows or []):
+                if not isinstance(r, dict):
+                    continue
+                st = upper(str(r.get("status_operacional") or r.get("status") or "").strip())
+                if st in finais:
+                    continue
+                codigo = upper(str(r.get("codigo_programacao") or "").strip())
+                if not codigo:
+                    continue
+                motorista = upper(str(r.get("motorista") or "").strip())
+                veiculo = upper(str(r.get("veiculo") or "").strip())
+                data_ref = str(r.get("recorded_at") or r.get("data_criacao") or "").strip()
+                out.append((codigo, motorista, veiculo, data_ref))
+            return out
+        except Exception:
+            logging.debug("Falha ao buscar rotas da Home na API", exc_info=True)
+            return []
+
+    @staticmethod
+    def _home_local_not_finalized_where(cols_prog: set) -> str:
+        clauses = [
+            "UPPER(TRIM(COALESCE(status, ''))) NOT IN ('FINALIZADA', 'FINALIZADO', 'CANCELADA', 'CANCELADO')",
+        ]
+        if "status_operacional" in cols_prog:
+            clauses.append(
+                "UPPER(TRIM(COALESCE(status_operacional, ''))) NOT IN ('FINALIZADA', 'FINALIZADO', 'CANCELADA', 'CANCELADO')"
+            )
+        if "finalizada_no_app" in cols_prog:
+            clauses.append("COALESCE(finalizada_no_app, 0) = 0")
+        if "data_chegada" in cols_prog:
+            clauses.append("TRIM(COALESCE(data_chegada, '')) = ''")
+        if "hora_chegada" in cols_prog:
+            clauses.append("TRIM(COALESCE(hora_chegada, '')) = ''")
+        if "km_final" in cols_prog:
+            clauses.append("COALESCE(km_final, 0) = 0")
+        return " AND ".join(clauses)
+
     def on_show(self):
         total_prog = 0
         total_vendas = 0
         total_clientes_ativos = 0
         rows = []
+        source = "LOCAL"
 
         with get_db() as conn:
             cur = conn.cursor()
+            try:
+                cur.execute("PRAGMA table_info(programacoes)")
+                cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+            except Exception:
+                cols_prog = set()
+            where_ativas = self._home_local_not_finalized_where(cols_prog)
 
             try:
                 cur.execute("""
                     SELECT COUNT(*)
                     FROM programacoes
-                    WHERE UPPER(TRIM(COALESCE(status, ''))) NOT IN
-                          ('FINALIZADA', 'FINALIZADO', 'CANCELADA', 'CANCELADO')
-                """)
+                    WHERE """ + where_ativas)
                 r = cur.fetchone()
                 total_prog = (r[0] if r else 0) or 0
             except Exception:
@@ -4109,8 +4383,7 @@ class HomePage(PageBase):
                     WHERE codigo_programacao IN (
                         SELECT codigo_programacao
                         FROM programacoes
-                        WHERE UPPER(TRIM(COALESCE(status, ''))) NOT IN
-                              ('FINALIZADA', 'FINALIZADO', 'CANCELADA', 'CANCELADO')
+                        WHERE """ + where_ativas + """
                     )
                 """)
                 r = cur.fetchone()
@@ -4121,27 +4394,32 @@ class HomePage(PageBase):
             for i in self.tree_rotas.get_children():
                 self.tree_rotas.delete(i)
 
-            try:
-                cur.execute("""
-                    SELECT codigo_programacao, motorista, veiculo, data_criacao
-                    FROM programacoes
-                    WHERE UPPER(TRIM(COALESCE(status, ''))) NOT IN
-                          ('FINALIZADA', 'FINALIZADO', 'CANCELADA', 'CANCELADO')
-                    ORDER BY id DESC
-                    LIMIT 80
-                """)
-                rows = cur.fetchall() or []
-            except Exception:
+            api_rows = self._home_api_rows()
+            if api_rows:
+                rows = api_rows
+                total_prog = len(api_rows)
+                source = "API CENTRAL"
+            else:
                 try:
                     cur.execute("""
                         SELECT codigo_programacao, motorista, veiculo, data_criacao
                         FROM programacoes
+                        WHERE """ + where_ativas + """
                         ORDER BY id DESC
                         LIMIT 80
                     """)
                     rows = cur.fetchall() or []
                 except Exception:
-                    rows = []
+                    try:
+                        cur.execute("""
+                            SELECT codigo_programacao, motorista, veiculo, data_criacao
+                            FROM programacoes
+                            ORDER BY id DESC
+                            LIMIT 80
+                        """)
+                        rows = cur.fetchall() or []
+                    except Exception:
+                        rows = []
 
             for r in rows:
                 tree_insert_aligned(self.tree_rotas, "", "end", (r[0], r[1], r[2], r[3]))
@@ -4152,7 +4430,7 @@ class HomePage(PageBase):
 
         nome = self.app.user.get("nome", "")
         is_admin = bool(self.app.user.get("is_admin", False))
-        self.set_status(f"STATUS: Logado como {nome} (ADMIN: {is_admin}).")
+        self.set_status(f"STATUS: Logado como {nome} (ADMIN: {is_admin}). Fonte Home: {source}.")
 
     # =========================================================
     # PREVIEW ROTA ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬ PUXA DADOS REAIS DA PROGRAMAÃƒÆ’Ã¢â‚¬Â¡ÃƒÆ’Ã†â€™O ATIVA
@@ -4466,8 +4744,10 @@ class HomePage(PageBase):
             mortalidade = safe_int(item_data.get("mortalidade"), 0)
             recebido_valor = safe_float(item_data.get("recebido_valor"), 0.0)
             peso_previsto = safe_float(item_data.get("peso_previsto"), 0.0)
-            forma_receb = str(item_data.get("forma_recebimento") or "")
-            obs_receb = str(item_data.get("obs_recebimento") or "")
+            forma_receb = str(item_data.get("forma_recebimento") or item_data.get("recebido_forma") or "")
+            obs_receb = str(item_data.get("obs_recebimento") or item_data.get("recebido_obs") or "")
+            alteracao_tipo = str(item_data.get("alteracao_tipo") or "")
+            alteracao_detalhe = str(item_data.get("alteracao_detalhe") or "")
 
             media_cli = (kg / cx_orig) if cx_orig > 0 else 0.0
             valor_orig = float(cx_orig) * float(preco_orig)
@@ -4497,6 +4777,8 @@ class HomePage(PageBase):
             linhas.append(f"STATUS PEDIDO: {status_item or '-'}")
             linhas.append(f"HORA ALTERAÇÃO/ENTREGA: {alterado_em or '-'}")
             linhas.append(f"ALTERADO POR: {alterado_por or '-'}")
+            linhas.append(f"TIPO ALTERAÇÃO: {alteracao_tipo or '-'}")
+            linhas.append(f"DETALHE ALTERAÇÃO: {alteracao_detalhe or '-'}")
             linhas.append("-" * 110)
             linhas.append("[CARREGAMENTO / ENTREGA]")
             linhas.append(f"CAIXAS ORIGEM: {cx_orig}")
@@ -4606,8 +4888,10 @@ class HomePage(PageBase):
             peso_previsto = safe_float(item_data.get("peso_previsto"), 0.0)
             alterado_em = str(item_data.get("alterado_em") or "")
             alterado_por = str(item_data.get("alterado_por") or "")
-            forma_receb = str(item_data.get("forma_recebimento") or "")
-            obs_receb = str(item_data.get("obs_recebimento") or "")
+            forma_receb = str(item_data.get("forma_recebimento") or item_data.get("recebido_forma") or "")
+            obs_receb = str(item_data.get("obs_recebimento") or item_data.get("recebido_obs") or "")
+            alteracao_tipo = str(item_data.get("alteracao_tipo") or "")
+            alteracao_detalhe = str(item_data.get("alteracao_detalhe") or "")
             media_cli = (kg / cx_orig) if cx_orig > 0 else 0.0
             valor_orig = float(cx_orig) * float(preco_orig)
             valor_atual = float(cx_atual) * float(preco_atual)
@@ -4694,6 +4978,8 @@ class HomePage(PageBase):
                 f"Equipe: {resolve_equipe_nomes(cabecalho_ctx.get('equipe') or '') or (cabecalho_ctx.get('equipe') or '-')}",
                 f"Hora da entrega/alteração: {alterado_em or '-'}",
                 f"Alterado por: {alterado_por or '-'}",
+                f"Tipo de alteração: {alteracao_tipo or '-'}",
+                f"Detalhe da alteração: {alteracao_detalhe or '-'}",
                 f"Observação recebimento: {obs_receb or '-'}",
                 f"Transferências encontradas: {len(transferencias)}",
                 f"Ocorrências/logs: {len(logs_item)}",
@@ -5074,23 +5360,22 @@ class HomePage(PageBase):
                 logging.debug("Falha ignorada")
 
             # 1.2) opcional: fonte central (API) para refletir status/carregamento do app
-            if is_desktop_api_sync_enabled():
-                try:
-                    desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-                    if desktop_secret:
-                        resposta = _call_api(
-                            "GET",
-                            f"desktop/rotas/{codigo}",
-                            extra_headers={"X-Desktop-Secret": desktop_secret},
-                        )
-                        if isinstance(resposta, dict):
-                            api_rota = resposta.get("rota") if isinstance(resposta.get("rota"), dict) else None
-                            api_clientes = resposta.get("clientes") if isinstance(resposta.get("clientes"), list) else None
-                            if api_rota is not None:
-                                fonte_dados = "API CENTRAL"
-                except Exception:
-                    api_erro = "API indisponivel"
-                    logging.debug("Falha ao puxar preview da API central", exc_info=True)
+            try:
+                desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+                if desktop_secret:
+                    resposta = _call_api(
+                        "GET",
+                        f"desktop/rotas/{codigo}",
+                        extra_headers={"X-Desktop-Secret": desktop_secret},
+                    )
+                    if isinstance(resposta, dict):
+                        api_rota = resposta.get("rota") if isinstance(resposta.get("rota"), dict) else None
+                        api_clientes = resposta.get("clientes") if isinstance(resposta.get("clientes"), list) else None
+                        if api_rota is not None:
+                            fonte_dados = "API CENTRAL"
+            except Exception:
+                api_erro = "API indisponivel"
+                logging.debug("Falha ao puxar preview da API central", exc_info=True)
 
             if api_rota:
                 try:
@@ -5164,16 +5449,45 @@ class HomePage(PageBase):
             except Exception:
                 logging.debug("Falha ignorada")
 
-            # 2) ITENS (fallback se helper nÃ£o existir ainda)
+            # 2) ITENS: base local + merge com API (sem perder campos locais)
+            itens_local = []
             try:
-                if isinstance(api_clientes, list):
-                    itens = api_clientes
-                elif "fetch_programacao_itens" in globals():
-                    itens = fetch_programacao_itens(codigo)
-                else:
-                    itens = []
+                if "fetch_programacao_itens" in globals():
+                    itens_local = fetch_programacao_itens(codigo) or []
             except Exception:
-                itens = []
+                itens_local = []
+
+            def _item_key(raw):
+                if not isinstance(raw, dict):
+                    return ("", "", "", 0)
+                cod = upper((raw.get("cod_cliente") or "").strip())
+                pedido_k = _fmt_pedido(raw.get("pedido", ""))
+                nome = upper((raw.get("nome_cliente") or "").strip())
+                cx = safe_int(raw.get("qnt_caixas", 0), 0)
+                return (cod, pedido_k, nome, cx)
+
+            itens = itens_local
+            if isinstance(api_clientes, list):
+                try:
+                    local_map = {}
+                    for it_loc in itens_local:
+                        if isinstance(it_loc, dict):
+                            local_map[_item_key(it_loc)] = dict(it_loc)
+                    merged = []
+                    for it_api in api_clientes:
+                        if not isinstance(it_api, dict):
+                            continue
+                        k = _item_key(it_api)
+                        base = local_map.pop(k, {})
+                        it_m = dict(base)
+                        it_m.update(it_api)
+                        merged.append(it_m)
+                    for it_rest in local_map.values():
+                        merged.append(it_rest)
+                    if merged:
+                        itens = merged
+                except Exception:
+                    logging.debug("Falha ao mesclar itens locais/API no preview", exc_info=True)
 
             total_cx_programado = 0
             total_cx_entregue = 0
@@ -5256,8 +5570,14 @@ class HomePage(PageBase):
                     "recebido_valor": recebido_valor,
                     "mortalidade": mortalidade,
                     "peso_previsto": kg_previsto,
-                    "forma_recebimento": it.get("forma_recebimento", "") if isinstance(it, dict) else "",
-                    "obs_recebimento": it.get("obs_recebimento", "") if isinstance(it, dict) else "",
+                    "forma_recebimento": (
+                        it.get("forma_recebimento", it.get("recebido_forma", "")) if isinstance(it, dict) else ""
+                    ),
+                    "obs_recebimento": (
+                        it.get("obs_recebimento", it.get("recebido_obs", "")) if isinstance(it, dict) else ""
+                    ),
+                    "alteracao_tipo": it.get("alteracao_tipo", "") if isinstance(it, dict) else "",
+                    "alteracao_detalhe": it.get("alteracao_detalhe", "") if isinstance(it, dict) else "",
                 }
 
             # 3) labels
@@ -5482,9 +5802,24 @@ class RotasPage(PageBase):
                 status_expr = "COALESCE(NULLIF(TRIM(p.status_operacional), ''), COALESCE(p.status, ''))"
             else:
                 status_expr = "COALESCE(p.status, '')"
-            # Regra de visibilidade no monitoramento: usa status base da programação.
-            # status_operacional é apenas informativo e não deve esconder rota ATIVA.
-            status_where = "UPPER(TRIM(COALESCE(p.status, ''))) NOT IN ('FINALIZADA', 'FINALIZADO', 'CANCELADA', 'CANCELADO')"
+
+            # Filtro defensivo: não listar rotas já encerradas mesmo em bases legadas.
+            conds = [
+                "UPPER(TRIM(COALESCE(p.status, ''))) NOT IN ('FINALIZADA', 'FINALIZADO', 'CANCELADA', 'CANCELADO')"
+            ]
+            if "status_operacional" in cols_prog:
+                conds.append(
+                    "UPPER(TRIM(COALESCE(p.status_operacional, ''))) NOT IN ('FINALIZADA', 'FINALIZADO', 'CANCELADA', 'CANCELADO')"
+                )
+            if "finalizada_no_app" in cols_prog:
+                conds.append("COALESCE(p.finalizada_no_app, 0)=0")
+            if "data_chegada" in cols_prog:
+                conds.append("TRIM(COALESCE(p.data_chegada, ''))=''")
+            if "hora_chegada" in cols_prog:
+                conds.append("TRIM(COALESCE(p.hora_chegada, ''))=''")
+            if "km_final" in cols_prog:
+                conds.append("COALESCE(p.km_final, 0)=0")
+            status_where = " AND ".join(conds)
 
             if has_gps:
                 sql = """
@@ -6512,6 +6847,30 @@ class ClientesImportPage(ttk.Frame):
     def _normalize_cod(self, cod):
         return str(cod or "").strip()
 
+    def _sync_cliente_upsert_api(self, cod: str, nome: str, endereco: str, telefone: str, vendedor: str):
+        if not is_desktop_api_sync_enabled():
+            return
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if not desktop_secret:
+            return
+        cod_n = upper(str(cod or "").strip())
+        nome_n = upper(str(nome or "").strip())
+        if not cod_n or not nome_n:
+            return
+        payload = {
+            "cod_cliente": cod_n,
+            "nome_cliente": nome_n,
+            "endereco": upper(str(endereco or "").strip()),
+            "telefone": upper(str(telefone or "").strip()),
+            "vendedor": upper(str(vendedor or "").strip()),
+        }
+        _call_api(
+            "POST",
+            "desktop/cadastros/clientes/upsert",
+            payload=payload,
+            extra_headers={"X-Desktop-Secret": desktop_secret},
+        )
+
     def carregar(self):
         with get_db() as conn:
             cur = conn.cursor()
@@ -6647,6 +7006,7 @@ class ClientesImportPage(ttk.Frame):
             return
 
         total = 0
+        sync_falhas = 0
         try:
             with get_db() as conn:
                 cur = conn.cursor()
@@ -6661,8 +7021,15 @@ class ClientesImportPage(ttk.Frame):
                             vendedor=excluded.vendedor
                     """, (cod, nome, endereco, telefone, vendedor))
                     total += 1
+                    try:
+                        self._sync_cliente_upsert_api(cod, nome, endereco, telefone, vendedor)
+                    except Exception:
+                        sync_falhas += 1
 
-            messagebox.showinfo("OK", f"Clientes salvos/atualizados: {total}")
+            msg = f"Clientes salvos/atualizados: {total}"
+            if sync_falhas:
+                msg += f"\nFalhas de sincronização API: {sync_falhas}"
+            messagebox.showinfo("OK", msg)
 
         except Exception as e:
             messagebox.showerror("ERRO", str(e))
@@ -6690,10 +7057,17 @@ class ClientesImportPage(ttk.Frame):
             col_vendedor = guess_col(df.columns, ["vendedor", "vend", "representante"])
 
             if not col_cod or not col_nome:
-                messagebox.showerror("ERRO", "NÃƒO IDENTIFIQUEI AS COLUNAS DE CÃ“DIGO E NOME DO CLIENTE NO EXCEL.")
-                return
+                # Fallback: usa as duas primeiras colunas como codigo/nome quando o cabecalho vier fora do padrao.
+                cols = list(df.columns or [])
+                if len(cols) >= 2:
+                    col_cod = col_cod or cols[0]
+                    col_nome = col_nome or cols[1]
+                else:
+                    messagebox.showerror("ERRO", "NÃO IDENTIFIQUEI AS COLUNAS DE CÓDIGO E NOME DO CLIENTE NO EXCEL.")
+                    return
 
             total = 0
+            sync_falhas = 0
             with get_db() as conn:
                 cur = conn.cursor()
                 for _, r in df.iterrows():
@@ -6716,8 +7090,15 @@ class ClientesImportPage(ttk.Frame):
                             vendedor=excluded.vendedor
                     """, (upper(cod), upper(nome), upper(endereco), upper(telefone), upper(vendedor)))
                     total += 1
+                    try:
+                        self._sync_cliente_upsert_api(cod, nome, endereco, telefone, vendedor)
+                    except Exception:
+                        sync_falhas += 1
 
-            messagebox.showinfo("OK", f"CLIENTES IMPORTADOS/ATUALIZADOS: {total}")
+            msg = f"CLIENTES IMPORTADOS/ATUALIZADOS: {total}"
+            if sync_falhas:
+                msg += f"\nFalhas de sincronização API: {sync_falhas}"
+            messagebox.showinfo("OK", msg)
             self.carregar()
 
         except Exception as e:
@@ -6951,6 +7332,19 @@ class ImportarVendasPage(PageBase):
         except Exception:
             return s
 
+    def _normalize_data_venda(self, v):
+        """
+        Normaliza data da venda para chave estável (YYYY-MM-DD quando possível).
+        Evita duplicidade falsa por diferença de formato no Excel.
+        """
+        raw = self._excel_text(v)
+        if not raw:
+            return ""
+        nd = normalize_date(raw)
+        if nd:
+            return nd
+        return raw
+
     def _ensure_vendas_usada_cols(self):
         """Garante colunas para evitar reutilizaÃ§Ã£o (nÃ£o quebra bases antigas)."""
         try:
@@ -7039,7 +7433,7 @@ class ImportarVendasPage(PageBase):
                         continue
 
                     # Campos opcionais com fallback seguro
-                    data_venda = self._excel_text(r.get(col_data, "")) if col_data else ""
+                    data_venda = self._normalize_data_venda(r.get(col_data, "")) if col_data else ""
                     cliente = self._excel_text(r.get(col_cliente, ""))
 
                     nome_cliente = self._excel_text(r.get(col_nome, "")) if col_nome else ""
@@ -7066,7 +7460,10 @@ class ImportarVendasPage(PageBase):
                         cur.execute("""
                             SELECT 1
                             FROM vendas_importadas
-                            WHERE pedido=? AND cliente=? AND produto=? AND data_venda=?
+                            WHERE UPPER(TRIM(COALESCE(pedido,'')))=UPPER(TRIM(?))
+                              AND UPPER(TRIM(COALESCE(cliente,'')))=UPPER(TRIM(?))
+                              AND UPPER(TRIM(COALESCE(produto,'')))=UPPER(TRIM(?))
+                              AND COALESCE(TRIM(data_venda),'')=COALESCE(TRIM(?),'')
                             LIMIT 1
                         """, (pedido_u, cliente_u, produto_u, data_venda))
                         exists = cur.fetchone()
@@ -7254,12 +7651,14 @@ class ImportarVendasPage(PageBase):
             return
 
         ids = []
+        seen = set()
         for iid in itens:
             vals = self.tree.item(iid, "values") or ()
             if not vals:
                 continue
             rid = safe_int(vals[0], 0)
-            if rid > 0:
+            if rid > 0 and rid not in seen:
+                seen.add(rid)
                 ids.append(rid)
 
         if not ids:
@@ -7307,6 +7706,7 @@ class ProgramacaoPage(PageBase):
         self._vendas_cols_checked = False  # evita PRAGMA/ALTER toda hora
         self._equipe_display_map = {}
         self._editing_programacao_codigo = ""
+        self._loaded_venda_ids = []
 
         # -------------------------
         # CabeÃ§alho (dados da programaÃ§Ã£o)
@@ -7954,6 +8354,7 @@ class ProgramacaoPage(PageBase):
             self.ent_codigo.delete(0, "end")
             self.ent_codigo.config(state="readonly")
             self._editing_programacao_codigo = ""
+            self._loaded_venda_ids = []
             self._ajudantes_selected_keys = []
             self._refresh_ajudantes_selected_label()
             self.limpar_itens()
@@ -7988,10 +8389,11 @@ class ProgramacaoPage(PageBase):
 
     def limpar_itens(self):
         self.tree.delete(*self.tree.get_children())
+        self._loaded_venda_ids = []
 
     def _status_permite_edicao_programacao(self, status_raw: str) -> bool:
         st = upper(str(status_raw or "").strip())
-        return st in {"", "ATIVA", "PENDENTE"}
+        return st in {"", "ATIVA", "PENDENTE", "ABERTA", "PROGRAMADA"}
 
     def _obter_status_programacao_para_edicao(self, codigo: str, status_local: str = ""):
         codigo = upper(str(codigo or "").strip())
@@ -7999,7 +8401,7 @@ class ProgramacaoPage(PageBase):
         st_api = ""
 
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-        if desktop_secret and codigo and is_desktop_api_sync_enabled():
+        if desktop_secret and codigo:
             try:
                 resposta = _call_api(
                     "GET",
@@ -8241,8 +8643,8 @@ class ProgramacaoPage(PageBase):
 
     def carregar_vendas_selecionadas(self):
         """
-        âœ… Melhorado: carrega tudo em 1 query (sem N+1).
-        TambÃ©m evita duplicar por (pedido + cod_cliente).
+        Carrega todas as vendas selecionadas em uma query única.
+        Evita duplicar item por chave (pedido + cod_cliente + produto).
         """
         def _is_bad(v):
             return upper(str(v or "").strip()) in {"", "NAN", "NAT", "NONE", "NULL", "<NA>"}
@@ -8263,6 +8665,7 @@ class ProgramacaoPage(PageBase):
             cur = conn.cursor()
             cur.execute("""
                 SELECT
+                    v.id,
                     v.pedido,
                     v.data_venda,
                     v.cliente AS cod_cliente,
@@ -8285,10 +8688,11 @@ class ProgramacaoPage(PageBase):
             vendas = cur.fetchall() or []
 
         self.limpar_itens()
+        self._loaded_venda_ids = []
 
         seen = set()
         ignorados_invalidos = 0
-        for (pedido, data_venda, cod_cliente, nome_cliente, vendedor, produto, vr_total, qnt, valor_unit, obs, cidade, endereco) in vendas:
+        for (venda_id, pedido, data_venda, cod_cliente, nome_cliente, vendedor, produto, vr_total, qnt, valor_unit, obs, cidade, endereco) in vendas:
             cod_cliente = upper(str(cod_cliente or "").strip())
             pedido_u = _clean_pedido_local(pedido)
             nome_u = upper(str(nome_cliente or "").strip())
@@ -8298,10 +8702,11 @@ class ProgramacaoPage(PageBase):
                 ignorados_invalidos += 1
                 continue
 
-            key = (pedido_u, cod_cliente)
+            key = (pedido_u, cod_cliente, produto_u)
             if key in seen:
                 continue
             seen.add(key)
+            self._loaded_venda_ids.append(safe_int(venda_id, 0))
 
             caixas = 1
             kg = 0.0
@@ -8934,19 +9339,25 @@ class ProgramacaoPage(PageBase):
                 # âœ… REGRA NOVA: Vendas selecionadas viram "usadas" e somem
                 # =========================================================
                 try:
-                    cur.execute("""
-                        UPDATE vendas_importadas
-                        SET
-                            usada = 1,
-                            usada_em = ?,
-                            codigo_programacao = ?,
-                            selecionada = 0
-                        WHERE selecionada = 1
-                          AND IFNULL(usada, 0) = 0
-                    """, (data_criacao, codigo))
+                    ids_carregados = [safe_int(x, 0) for x in (self._loaded_venda_ids or []) if safe_int(x, 0) > 0]
+                    if ids_carregados:
+                        qmarks = ",".join(["?"] * len(ids_carregados))
+                        cur.execute(
+                            f"""
+                            UPDATE vendas_importadas
+                            SET
+                                usada = 1,
+                                usada_em = ?,
+                                codigo_programacao = ?,
+                                selecionada = 0
+                            WHERE id IN ({qmarks})
+                              AND selecionada = 1
+                              AND IFNULL(usada, 0) = 0
+                            """,
+                            tuple([data_criacao, codigo] + ids_carregados),
+                        )
                 except Exception:
-                    # fallback: pelo menos zera selecionada se algo der ruim
-                    cur.execute("UPDATE vendas_importadas SET selecionada=0 WHERE selecionada=1")
+                    logging.debug("Falha ao marcar vendas importadas como usadas.", exc_info=True)
 
         except Exception as e:
             messagebox.showerror("ERRO", f"Erro ao salvar programaÃ§Ã£o: {str(e)}")
@@ -8967,61 +9378,70 @@ class ProgramacaoPage(PageBase):
             self.set_status(f"STATUS: ProgramaÃ§Ã£o salva: {codigo} (ABERTA/ATIVA)")
 
         # Sincroniza programação com a API central (para aparecer no app mobile).
-        if is_desktop_api_sync_enabled():
-            try:
-                desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-                if desktop_secret:
-                    itens_payload = []
-                    for (cod_cliente, nome_cliente, produto, endereco, caixas, kg, preco, vendedor, pedido, obs) in itens:
-                        itens_payload.append({
-                            "cod_cliente": upper(cod_cliente),
-                            "nome_cliente": upper(nome_cliente),
-                            "qnt_caixas": safe_int(caixas, 0),
-                            "kg": safe_float(kg, 0.0),
-                            "preco": safe_float(preco, 0.0),
-                            "endereco": upper(endereco),
-                            "vendedor": upper(vendedor),
-                            "pedido": upper(pedido),
-                            "produto": upper(produto),
-                            "obs": upper(obs),
-                        })
+        try:
+            desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+            if desktop_secret:
+                itens_payload = []
+                for (cod_cliente, nome_cliente, produto, endereco, caixas, kg, preco, vendedor, pedido, obs) in itens:
+                    itens_payload.append({
+                        "cod_cliente": upper(cod_cliente),
+                        "nome_cliente": upper(nome_cliente),
+                        "qnt_caixas": safe_int(caixas, 0),
+                        "kg": safe_float(kg, 0.0),
+                        "preco": safe_float(preco, 0.0),
+                        "endereco": upper(endereco),
+                        "vendedor": upper(vendedor),
+                        "pedido": upper(pedido),
+                        "produto": upper(produto),
+                        "obs": upper(obs),
+                    })
 
-                    payload_sync = {
-                        "codigo_programacao": codigo,
-                        "data_criacao": data_criacao,
-                        "motorista": motorista_nome,
-                        "motorista_id": safe_int(motorista_id, 0),
-                        "motorista_codigo": motorista_codigo,
-                        "codigo_motorista": motorista_codigo,
-                        "veiculo": veiculo,
-                        "equipe": equipe,
-                        "kg_estimado": safe_float(kg_estimado, 0.0),
-                        "tipo_estimativa": tipo_estimativa,
-                        "caixas_estimado": safe_int(caixas_estimado, 0),
-                        "status": "ATIVA",
-                        "local_rota": local_rota,
-                        "local_carregamento": local_carreg,
-                        "adiantamento": safe_float(adiantamento_val, 0.0),
-                        "total_caixas": safe_int(total_caixas, 0),
-                        "quilos": safe_float(total_quilos, 0.0),
-                        "usuario_criacao": usuario_logado,
-                        "usuario_ultima_edicao": usuario_logado,
-                        "itens": itens_payload,
-                    }
-                    _call_api(
-                        "POST",
-                        "desktop/rotas/upsert",
-                        payload=payload_sync,
-                        extra_headers={"X-Desktop-Secret": desktop_secret},
-                    )
-            except Exception as exc:
-                logging.warning("Falha ao sincronizar programacao %s com API: %s", codigo, exc)
+                payload_sync = {
+                    "codigo_programacao": codigo,
+                    "data_criacao": data_criacao,
+                    "motorista": motorista_nome,
+                    "motorista_id": safe_int(motorista_id, 0),
+                    "motorista_codigo": motorista_codigo,
+                    "codigo_motorista": motorista_codigo,
+                    "veiculo": veiculo,
+                    "equipe": equipe,
+                    "kg_estimado": safe_float(kg_estimado, 0.0),
+                    "tipo_estimativa": tipo_estimativa,
+                    "caixas_estimado": safe_int(caixas_estimado, 0),
+                    "status": "ATIVA",
+                    "local_rota": local_rota,
+                    "local_carregamento": local_carreg,
+                    "adiantamento": safe_float(adiantamento_val, 0.0),
+                    "total_caixas": safe_int(total_caixas, 0),
+                    "quilos": safe_float(total_quilos, 0.0),
+                    "usuario_criacao": usuario_logado,
+                    "usuario_ultima_edicao": usuario_logado,
+                    "itens": itens_payload,
+                }
+                _call_api(
+                    "POST",
+                    "desktop/rotas/upsert",
+                    payload=payload_sync,
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+        except Exception as exc:
+            logging.warning("Falha ao sincronizar programacao %s com API: %s", codigo, exc)
 
         self.app.refresh_programacao_comboboxes()
         try:
             page_imp = self.app.pages.get("ImportarVendas") if hasattr(self.app, "pages") else None
             if page_imp and hasattr(page_imp, "carregar"):
                 page_imp.carregar()
+        except Exception:
+            logging.debug("Falha ignorada")
+        try:
+            if hasattr(self.app, "pages"):
+                page_home = self.app.pages.get("Home")
+                if page_home and hasattr(page_home, "on_show"):
+                    page_home.on_show()
+                page_rotas = self.app.pages.get("Rotas")
+                if page_rotas and hasattr(page_rotas, "_load_data"):
+                    page_rotas._load_data()
         except Exception:
             logging.debug("Falha ignorada")
 
@@ -10619,7 +11039,7 @@ class RecebimentosPage(PageBase):
             return False
 
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-        if not desktop_secret or not is_desktop_api_sync_enabled():
+        if not desktop_secret:
             return False
 
         try:
@@ -11005,6 +11425,16 @@ class RecebimentosPage(PageBase):
             synced_api = self._sync_programacao_from_api(prog, silent=True)
         except Exception:
             logging.debug("Falha ignorada")
+
+        # Revalida após sincronizar com API para impedir abertura indevida.
+        if not self._rota_apt_para_recebimentos(prog):
+            messagebox.showwarning(
+                "ATENCAO",
+                "Esse codigo nao esta mais liberado para Recebimentos apos sincronizacao.\n\n"
+                "Regra: so libera quando a rota estiver FINALIZADA no celular e pendente de prestacao.",
+            )
+            self.refresh_comboboxes()
+            return
 
         self._current_prog = prog
 
@@ -12863,10 +13293,16 @@ class DespesasPage(PageBase):
                 vals = list(self.cb_prog["values"])
             except Exception:
                 vals = []
-            if prog not in vals:
+            cods_existentes = {upper(str(v or "").split(" ")[0].strip()) for v in vals}
+            if prog not in cods_existentes:
                 vals = [prog] + vals
                 self.cb_prog["values"] = vals
-            self.cb_prog.set(prog)
+            alvo = None
+            for v in vals:
+                if upper(str(v or "").split(" ")[0].strip()) == prog:
+                    alvo = v
+                    break
+            self.cb_prog.set(alvo or prog)
             self._load_by_programacao()
         except Exception:
             logging.debug("Falha ignorada")
@@ -14116,19 +14552,41 @@ class DespesasPage(PageBase):
         with get_db() as conn:
             cur = conn.cursor()
             try:
-                cur.execute("""
+                cur.execute("PRAGMA table_info(programacoes)")
+                cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+                has_status = "status" in cols
+                has_status_op = "status_operacional" in cols
+                has_finalizada_app = "finalizada_no_app" in cols
+                has_prest = "prestacao_status" in cols
+
+                status_base_expr = "UPPER(TRIM(COALESCE(status,'')))" if has_status else "''"
+                status_op_expr = "UPPER(TRIM(COALESCE(status_operacional,'')))" if has_status_op else "''"
+                finalizada_expr = "COALESCE(finalizada_no_app,0)" if has_finalizada_app else "0"
+                prest_expr = "UPPER(TRIM(COALESCE(prestacao_status,'PENDENTE')))" if has_prest else "'PENDENTE'"
+
+                where_parts = []
+                if has_status_op:
+                    part = f"{status_op_expr} IN ('FINALIZADA','FINALIZADO')"
+                    if has_finalizada_app:
+                        part = f"({part} AND {finalizada_expr}=1)"
+                    where_parts.append(part)
+                if has_status:
+                    where_parts.append(f"{status_base_expr} IN ('FINALIZADA','FINALIZADO')")
+                where_sql = " OR ".join(where_parts) if where_parts else "1=0"
+
+                prest_where = ""
+                if has_prest:
+                    prest_where = f" AND {prest_expr} IN ('PENDENTE','FECHADA')"
+
+                cur.execute(
+                    f"""
                     SELECT codigo_programacao, data_criacao
                     FROM programacoes
-                    WHERE (
-                        status='ATIVA'
-                        OR status='EM_ROTA'
-                        OR status='INICIADA'
-                        OR status='CARREGADA'
-                        OR status='FINALIZADA'
-                    )
+                    WHERE ({where_sql}){prest_where}
                     ORDER BY id DESC
                     LIMIT 300
-                """)
+                    """
+                )
             except Exception:
                 cur.execute("SELECT codigo_programacao, data_criacao FROM programacoes ORDER BY id DESC LIMIT 300")
 
@@ -14215,11 +14673,21 @@ class DespesasPage(PageBase):
         try:
             with get_db() as conn:
                 cur = conn.cursor()
-                cur.execute("""
+                cur.execute("PRAGMA table_info(programacoes)")
+                cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+                sets = ["prestacao_status='FECHADA'", "status='FINALIZADA'"]
+                if "status_operacional" in cols_prog:
+                    sets.append("status_operacional='FINALIZADA'")
+                if "finalizada_no_app" in cols_prog:
+                    sets.append("finalizada_no_app=1")
+                cur.execute(
+                    f"""
                     UPDATE programacoes
-                    SET prestacao_status='FECHADA', status='FINALIZADA'
+                    SET {', '.join(sets)}
                     WHERE codigo_programacao=?
-                """, (prog,))
+                    """,
+                    (prog,),
+                )
 
             messagebox.showinfo("OK", f"PrestaÃ§Ã£o finalizada: {prog}")
             try:
@@ -15541,6 +16009,32 @@ class EscalaPage(PageBase):
         resumo.grid(row=1, column=0, sticky="ew", pady=(10, 10))
         resumo.grid_columnconfigure(0, weight=1)
         ttk.Label(resumo, text="Resumo de distribuicao", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+
+        kpi_row = ttk.Frame(resumo, style="Card.TFrame")
+        kpi_row.grid(row=1, column=0, sticky="ew", pady=(8, 4))
+        for c in range(4):
+            kpi_row.grid_columnconfigure(c, weight=1)
+
+        kpi_1 = ttk.LabelFrame(kpi_row, text=" Rotas no Período ", padding=8)
+        kpi_1.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.lbl_esc_kpi_rotas = ttk.Label(kpi_1, text="0", font=("Segoe UI", 13, "bold"), foreground="#1D4ED8")
+        self.lbl_esc_kpi_rotas.grid(row=0, column=0, sticky="w")
+
+        kpi_2 = ttk.LabelFrame(kpi_row, text=" Motoristas ", padding=8)
+        kpi_2.grid(row=0, column=1, sticky="ew", padx=6)
+        self.lbl_esc_kpi_mot = ttk.Label(kpi_2, text="0", font=("Segoe UI", 13, "bold"), foreground="#0F766E")
+        self.lbl_esc_kpi_mot.grid(row=0, column=0, sticky="w")
+
+        kpi_3 = ttk.LabelFrame(kpi_row, text=" KM Médio/Motorista ", padding=8)
+        kpi_3.grid(row=0, column=2, sticky="ew", padx=6)
+        self.lbl_esc_kpi_km = ttk.Label(kpi_3, text="0,0", font=("Segoe UI", 13, "bold"), foreground="#B45309")
+        self.lbl_esc_kpi_km.grid(row=0, column=0, sticky="w")
+
+        kpi_4 = ttk.LabelFrame(kpi_row, text=" Horas Médias/Motorista ", padding=8)
+        kpi_4.grid(row=0, column=3, sticky="ew", padx=(6, 0))
+        self.lbl_esc_kpi_horas = ttk.Label(kpi_4, text="0,00", font=("Segoe UI", 13, "bold"), foreground="#7C3AED")
+        self.lbl_esc_kpi_horas.grid(row=0, column=0, sticky="w")
+
         self.lbl_resumo = ttk.Label(
             resumo,
             text="-",
@@ -15548,7 +16042,7 @@ class EscalaPage(PageBase):
             justify="left",
             wraplength=980,
         )
-        self.lbl_resumo.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.lbl_resumo.grid(row=2, column=0, sticky="w", pady=(6, 0))
         self.lbl_recomendacoes = ttk.Label(
             resumo,
             text="-",
@@ -15557,7 +16051,7 @@ class EscalaPage(PageBase):
             wraplength=980,
             foreground="#1E3A8A",
         )
-        self.lbl_recomendacoes.grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.lbl_recomendacoes.grid(row=3, column=0, sticky="w", pady=(8, 0))
 
         tabs = ttk.Notebook(self.body)
         tabs.grid(row=2, column=0, sticky="nsew")
@@ -15572,7 +16066,7 @@ class EscalaPage(PageBase):
         tab_a.grid_rowconfigure(0, weight=1)
         tabs.add(tab_a, text="Ajudantes")
 
-        cols = ("NOME", "ROTAS", "EM_ROTA", "ATIVAS", "FINALIZADAS", "CANCELADAS", "LOCAL", "KM_RODADO")
+        cols = ("NOME", "ROTAS", "EM_ROTA", "ATIVAS", "FINALIZADAS", "CANCELADAS", "LOCAL", "KM_RODADO", "HORAS_TRAB")
         self.tree_m = ttk.Treeview(tab_m, columns=cols, show="headings")
         self.tree_m.grid(row=0, column=0, sticky="nsew")
         vsb_m = ttk.Scrollbar(tab_m, orient="vertical", command=self.tree_m.yview)
@@ -15594,26 +16088,32 @@ class EscalaPage(PageBase):
                 w = 120
             elif c == "KM_RODADO":
                 w = 110
+            elif c == "HORAS_TRAB":
+                w = 105
             else:
                 w = 95
             self.tree_m.column(c, anchor="w" if c in ("NOME", "LOCAL") else "center", width=w)
         enable_treeview_sorting(
             self.tree_m,
-            numeric_cols={"ROTAS", "EM_ROTA", "ATIVAS", "FINALIZADAS", "CANCELADAS", "KM_RODADO"},
+            numeric_cols={"ROTAS", "EM_ROTA", "ATIVAS", "FINALIZADAS", "CANCELADAS", "KM_RODADO", "HORAS_TRAB"},
         )
 
+        cols_a = ("NOME", "ROTAS", "EM_ROTA", "ATIVAS", "FINALIZADAS", "CANCELADAS", "KM_RODADO", "HORAS_TRAB")
+        self.tree_a.configure(columns=cols_a)
         for c in cols_a:
             self.tree_a.heading(c, text=c)
             if c == "NOME":
                 w = 280
             elif c == "KM_RODADO":
                 w = 120
+            elif c == "HORAS_TRAB":
+                w = 110
             else:
                 w = 115
             self.tree_a.column(c, anchor="w" if c == "NOME" else "center", width=w)
         enable_treeview_sorting(
             self.tree_a,
-            numeric_cols={"ROTAS", "EM_ROTA", "ATIVAS", "FINALIZADAS", "CANCELADAS", "KM_RODADO"},
+            numeric_cols={"ROTAS", "EM_ROTA", "ATIVAS", "FINALIZADAS", "CANCELADAS", "KM_RODADO", "HORAS_TRAB"},
         )
 
         # Indicadores visuais de carga (sobrecarga)
@@ -15636,12 +16136,75 @@ class EscalaPage(PageBase):
 
         self.cb_periodo.bind("<<ComboboxSelected>>", lambda _e: self.refresh_data())
         self.cb_status.bind("<<ComboboxSelected>>", lambda _e: self.refresh_data())
+        self.tree_m.bind("<Double-1>", lambda _e: self._mostrar_detalhe_carga(self.tree_m, "MOTORISTA"))
+        self.tree_a.bind("<Double-1>", lambda _e: self._mostrar_detalhe_carga(self.tree_a, "AJUDANTE"))
 
     def on_show(self):
         self.refresh_data()
 
+    def _set_kpi_escala(self, rotas: int, motoristas: int, km_medio: float, horas_medias: float):
+        try:
+            self.lbl_esc_kpi_rotas.config(text=str(max(safe_int(rotas, 0), 0)))
+            self.lbl_esc_kpi_mot.config(text=str(max(safe_int(motoristas, 0), 0)))
+            self.lbl_esc_kpi_km.config(text=f"{safe_float(km_medio, 0.0):.1f}".replace(".", ","))
+            self.lbl_esc_kpi_horas.config(text=f"{safe_float(horas_medias, 0.0):.2f}".replace(".", ","))
+        except Exception:
+            logging.debug("Falha ignorada")
+
+    def _mostrar_detalhe_carga(self, tree: ttk.Treeview, perfil: str):
+        try:
+            sel = tree.selection()
+            if not sel:
+                return
+            vals = tree.item(sel[0], "values") or ()
+            if not vals:
+                return
+            nome = str(vals[0] if len(vals) > 0 else "-")
+            rotas = safe_int(vals[1] if len(vals) > 1 else 0, 0)
+            em_rota = safe_int(vals[2] if len(vals) > 2 else 0, 0)
+            ativas = safe_int(vals[3] if len(vals) > 3 else 0, 0)
+            finalizadas = safe_int(vals[4] if len(vals) > 4 else 0, 0)
+            canceladas = safe_int(vals[5] if len(vals) > 5 else 0, 0)
+            if perfil == "MOTORISTA":
+                local = str(vals[6] if len(vals) > 6 else "-")
+                km = safe_float(vals[7] if len(vals) > 7 else 0.0, 0.0)
+                horas = safe_float(vals[8] if len(vals) > 8 else 0.0, 0.0)
+                detalhe = (
+                    f"{perfil}: {nome}\n\n"
+                    f"Rotas: {rotas}\nEm rota: {em_rota}\nAtivas: {ativas}\n"
+                    f"Finalizadas: {finalizadas}\nCanceladas: {canceladas}\n"
+                    f"Local predominante: {local or '-'}\nKM rodado: {km:.1f}\nHoras trabalhadas: {horas:.2f}"
+                )
+            else:
+                km = safe_float(vals[6] if len(vals) > 6 else 0.0, 0.0)
+                horas = safe_float(vals[7] if len(vals) > 7 else 0.0, 0.0)
+                detalhe = (
+                    f"{perfil}: {nome}\n\n"
+                    f"Rotas: {rotas}\nEm rota: {em_rota}\nAtivas: {ativas}\n"
+                    f"Finalizadas: {finalizadas}\nCanceladas: {canceladas}\n"
+                    f"KM rodado: {km:.1f}\nHoras trabalhadas: {horas:.2f}"
+                )
+            messagebox.showinfo("Detalhe de Carga", detalhe)
+        except Exception:
+            logging.debug("Falha ignorada")
+
     def _status_normalizado(self, v) -> str:
         return upper(str(v or "").strip())
+
+    def _status_match_filter(self, status: str, filtro: str) -> bool:
+        st = self._status_normalizado(status)
+        ff = self._status_normalizado(filtro)
+        if ff == "TODOS":
+            return True
+        if ff == "ATIVAS":
+            return self._is_ativa(st)
+        if ff in {"FINALIZADA", "FINALIZADO"}:
+            return self._is_finalizada(st)
+        if ff in {"CANCELADA", "CANCELADO"}:
+            return self._is_cancelada(st)
+        if ff in {"EM_ROTA", "EM ROTA"}:
+            return self._is_em_rota(st)
+        return st == ff
 
     def _is_em_rota(self, s: str) -> bool:
         return s in ("EM_ROTA", "EM ROTA", "INICIADA")
@@ -15686,10 +16249,53 @@ class EscalaPage(PageBase):
                 out.append(up)
         return out
 
-    def _tag_por_carga(self, rotas: int, media_rotas: float, km_rodado: float = 0.0, media_km: float = 0.0) -> str:
+    def _parse_data_hora(self, data_raw: str, hora_raw: str):
+        data_txt = str(data_raw or "").strip()
+        hora_txt = str(hora_raw or "").strip()
+        if not data_txt:
+            return None
+        dt_data = self._parse_data_programacao(data_txt)
+        if dt_data is None:
+            return None
+        hh = 0
+        mm = 0
+        ss = 0
+        if hora_txt:
+            nt = normalize_time(hora_txt)
+            if nt:
+                try:
+                    p = (nt + ":00:00").split(":")
+                    hh = safe_int(p[0], 0)
+                    mm = safe_int(p[1], 0)
+                    ss = safe_int(p[2], 0)
+                except Exception:
+                    hh = mm = ss = 0
+        return dt_data.replace(hour=hh, minute=mm, second=ss, microsecond=0)
+
+    def _calc_horas_trabalhadas(self, data_saida: str, hora_saida: str, data_chegada: str, hora_chegada: str) -> float:
+        dt_saida = self._parse_data_hora(data_saida, hora_saida)
+        dt_chegada = self._parse_data_hora(data_chegada, hora_chegada)
+        if not dt_saida or not dt_chegada:
+            return 0.0
+        diff = (dt_chegada - dt_saida).total_seconds() / 3600.0
+        if diff <= 0:
+            return 0.0
+        # Evita valores absurdos por dado corrompido.
+        return min(round(diff, 2), 72.0)
+
+    def _tag_por_carga(
+        self,
+        rotas: int,
+        media_rotas: float,
+        km_rodado: float = 0.0,
+        media_km: float = 0.0,
+        horas_trab: float = 0.0,
+        media_horas: float = 0.0,
+    ) -> str:
         idx_rotas = (float(rotas) / float(media_rotas)) if media_rotas and media_rotas > 0 else 0.0
         idx_km = (float(km_rodado) / float(media_km)) if media_km and media_km > 0 else 0.0
-        idx = max(idx_rotas, idx_km)
+        idx_horas = (float(horas_trab) / float(media_horas)) if media_horas and media_horas > 0 else 0.0
+        idx = max(idx_rotas, idx_km, idx_horas)
         if idx > 1.25:
             return "carga_sobrecarga"
         if idx > 1.05:
@@ -15715,13 +16321,21 @@ class EscalaPage(PageBase):
             media_rotas = max(qtd_rotas / float(len(mot_rows)), 1.0)
             media_kg = max(sum(float(d.get("kg", 0.0) or 0.0) for _n, d in mot_rows) / float(len(mot_rows)), 1.0)
             media_km = max(sum(float(d.get("km_rodado", 0.0) or 0.0) for _n, d in mot_rows) / float(len(mot_rows)), 1.0)
+            media_horas = max(sum(float(d.get("horas_trab", 0.0) or 0.0) for _n, d in mot_rows) / float(len(mot_rows)), 1.0)
 
             def _score_motorista(d):
                 rotas = float(d.get("rotas", 0) or 0)
                 em_rota = float(d.get("em_rota", 0) or 0)
                 kg = float(d.get("kg", 0.0) or 0.0)
                 km = float(d.get("km_rodado", 0.0) or 0.0)
-                score = (rotas / media_rotas) + (em_rota * 0.85) + (kg / media_kg) * 0.65 + (km / media_km) * 0.55
+                horas = float(d.get("horas_trab", 0.0) or 0.0)
+                score = (
+                    (rotas / media_rotas)
+                    + (em_rota * 0.85)
+                    + (kg / media_kg) * 0.65
+                    + (km / media_km) * 0.55
+                    + (horas / media_horas) * 0.70
+                )
 
                 last_dt = d.get("last_dt")
                 if isinstance(last_dt, datetime):
@@ -15749,19 +16363,28 @@ class EscalaPage(PageBase):
             recs.append(f"Próxima rota sugerida (motorista): {prox_mot}")
 
             media_mot = qtd_rotas / float(len(mot_rows))
-            sob_mot = [n for n, d in mot_rows if int(d.get("rotas", 0)) > media_mot * 1.25]
+            sob_mot = [
+                n for n, d in mot_rows
+                if (
+                    int(d.get("rotas", 0)) > media_mot * 1.25
+                    or float(d.get("km_rodado", 0.0) or 0.0) > media_km * 1.25
+                    or float(d.get("horas_trab", 0.0) or 0.0) > media_horas * 1.20
+                )
+            ]
             if sob_mot:
                 recs.append("Evitar novas rotas para motoristas sobrecarregados: " + ", ".join(sob_mot[:4]))
 
         if aj_rows:
             media_aj = max(qtd_rotas / float(len(aj_rows)), 1.0)
             media_km_aj = max(sum(float(d.get("km_rodado", 0.0) or 0.0) for _n, d in aj_rows) / float(len(aj_rows)), 1.0)
+            media_horas_aj = max(sum(float(d.get("horas_trab", 0.0) or 0.0) for _n, d in aj_rows) / float(len(aj_rows)), 1.0)
 
             def _score_ajudante(d):
                 rotas = float(d.get("rotas", 0) or 0)
                 em_rota = float(d.get("em_rota", 0) or 0)
                 km = float(d.get("km_rodado", 0.0) or 0.0)
-                score = (rotas / media_aj) + (em_rota * 0.90) + (km / media_km_aj) * 0.55
+                horas = float(d.get("horas_trab", 0.0) or 0.0)
+                score = (rotas / media_aj) + (em_rota * 0.90) + (km / media_km_aj) * 0.55 + (horas / media_horas_aj) * 0.65
                 last_dt = d.get("last_dt")
                 if isinstance(last_dt, datetime):
                     horas = max((now - last_dt).total_seconds() / 3600.0, 0.0)
@@ -15783,7 +16406,14 @@ class EscalaPage(PageBase):
                 recs.append("Ajudantes sugeridos para próxima equipe: " + " / ".join(prox_aj))
 
             media_aj = qtd_rotas / float(len(aj_rows))
-            sob_aj = [n for n, d in aj_rows if int(d.get("rotas", 0)) > media_aj * 1.25]
+            sob_aj = [
+                n for n, d in aj_rows
+                if (
+                    int(d.get("rotas", 0)) > media_aj * 1.25
+                    or float(d.get("km_rodado", 0.0) or 0.0) > media_km_aj * 1.25
+                    or float(d.get("horas_trab", 0.0) or 0.0) > media_horas_aj * 1.20
+                )
+            ]
             if sob_aj:
                 recs.append("Evitar escalar ajudantes sobrecarregados: " + ", ".join(sob_aj[:4]))
 
@@ -15812,10 +16442,33 @@ class EscalaPage(PageBase):
             else:
                 local_expr = "''"
             km_rodado_expr = "COALESCE(km_rodado,0)" if "km_rodado" in cols else "0"
+            status_op_expr = "COALESCE(status_operacional,'')" if "status_operacional" in cols else "''"
+            finalizada_app_expr = "COALESCE(finalizada_no_app,0)" if "finalizada_no_app" in cols else "0"
+            data_saida_expr = "COALESCE(data_saida,'')" if "data_saida" in cols else "''"
+            hora_saida_expr = "COALESCE(hora_saida,'')" if "hora_saida" in cols else "''"
+            data_chegada_expr = "COALESCE(data_chegada,'')" if "data_chegada" in cols else "''"
+            hora_chegada_expr = "COALESCE(hora_chegada,'')" if "hora_chegada" in cols else "''"
+            data_ref_expr = (
+                "COALESCE(data_saida,data_criacao,data,'')"
+                if "data_saida" in cols or "data_criacao" in cols or "data" in cols
+                else "''"
+            )
             cur.execute(
                 f"""
-                SELECT codigo_programacao, data_criacao, motorista, equipe, status, kg_estimado,
-                       {local_expr} AS local_rota, {km_rodado_expr} AS km_rodado
+                SELECT codigo_programacao,
+                       {data_ref_expr} AS data_ref,
+                       motorista,
+                       equipe,
+                       COALESCE(status,'') AS status,
+                       {status_op_expr} AS status_operacional,
+                       {finalizada_app_expr} AS finalizada_no_app,
+                       kg_estimado,
+                       {data_saida_expr} AS data_saida,
+                       {hora_saida_expr} AS hora_saida,
+                       {data_chegada_expr} AS data_chegada,
+                       {hora_chegada_expr} AS hora_chegada,
+                       {local_expr} AS local_rota,
+                       {km_rodado_expr} AS km_rodado
                   FROM programacoes
                  ORDER BY id DESC
                 """
@@ -15824,16 +16477,17 @@ class EscalaPage(PageBase):
 
         out = []
         for r in rows:
-            st = self._status_normalizado(r["status"] if hasattr(r, "keys") else r[4])
-            if status_filtro == "ATIVAS":
-                if not self._is_ativa(st):
-                    continue
-            elif status_filtro != "TODOS":
-                if st != status_filtro:
-                    continue
+            st_local = self._status_normalizado(r["status"] if hasattr(r, "keys") else r[4])
+            st_op = self._status_normalizado(r["status_operacional"] if hasattr(r, "keys") else r[5])
+            fin_app = safe_int(r["finalizada_no_app"] if hasattr(r, "keys") else r[6], 0)
+            st = st_op or st_local
+            if not st and fin_app == 1:
+                st = "FINALIZADA"
+            if not self._status_match_filter(st, status_filtro):
+                continue
 
             if cutoff is not None:
-                dt = self._parse_data_programacao(r["data_criacao"] if hasattr(r, "keys") else r[1])
+                dt = self._parse_data_programacao(r["data_ref"] if hasattr(r, "keys") else r[1])
                 if dt is not None and dt < cutoff:
                     continue
 
@@ -15850,11 +16504,21 @@ class EscalaPage(PageBase):
 
             for r in rows:
                 motorista = upper(str((r["motorista"] if hasattr(r, "keys") else r[2]) or "").strip()) or "SEM MOTORISTA"
-                st = self._status_normalizado(r["status"] if hasattr(r, "keys") else r[4])
-                kg = safe_float(r["kg_estimado"] if hasattr(r, "keys") else r[5], 0.0)
-                dt_prog = self._parse_data_programacao(r["data_criacao"] if hasattr(r, "keys") else r[1])
-                local_rota = upper(str((r["local_rota"] if hasattr(r, "keys") else r[6]) or "").strip())
-                km_rodado = safe_float(r["km_rodado"] if hasattr(r, "keys") else r[7], 0.0)
+                st_local = self._status_normalizado(r["status"] if hasattr(r, "keys") else r[4])
+                st_op = self._status_normalizado(r["status_operacional"] if hasattr(r, "keys") else r[5])
+                fin_app = safe_int(r["finalizada_no_app"] if hasattr(r, "keys") else r[6], 0)
+                st = st_op or st_local
+                if not st and fin_app == 1:
+                    st = "FINALIZADA"
+                kg = safe_float(r["kg_estimado"] if hasattr(r, "keys") else r[7], 0.0)
+                data_saida = (r["data_saida"] if hasattr(r, "keys") else r[8]) or ""
+                hora_saida = (r["hora_saida"] if hasattr(r, "keys") else r[9]) or ""
+                data_chegada = (r["data_chegada"] if hasattr(r, "keys") else r[10]) or ""
+                hora_chegada = (r["hora_chegada"] if hasattr(r, "keys") else r[11]) or ""
+                horas_trab = self._calc_horas_trabalhadas(data_saida, hora_saida, data_chegada, hora_chegada)
+                dt_prog = self._parse_data_programacao(r["data_ref"] if hasattr(r, "keys") else r[1])
+                local_rota = upper(str((r["local_rota"] if hasattr(r, "keys") else r[12]) or "").strip())
+                km_rodado = safe_float(r["km_rodado"] if hasattr(r, "keys") else r[13], 0.0)
 
                 m = mot.setdefault(
                     motorista,
@@ -15866,6 +16530,7 @@ class EscalaPage(PageBase):
                         "canceladas": 0,
                         "kg": 0.0,
                         "km_rodado": 0.0,
+                        "horas_trab": 0.0,
                         "local_ref": "-",
                         "last_dt": None,
                         "local_counts": {},
@@ -15874,6 +16539,7 @@ class EscalaPage(PageBase):
                 m["rotas"] += 1
                 m["kg"] += kg
                 m["km_rodado"] += km_rodado
+                m["horas_trab"] += horas_trab
                 if isinstance(dt_prog, datetime):
                     if m.get("last_dt") is None or dt_prog > m["last_dt"]:
                         m["last_dt"] = dt_prog
@@ -15902,11 +16568,13 @@ class EscalaPage(PageBase):
                             "finalizadas": 0,
                             "canceladas": 0,
                             "km_rodado": 0.0,
+                            "horas_trab": 0.0,
                             "last_dt": None,
                         },
                     )
                     a["rotas"] += 1
                     a["km_rodado"] += km_rodado
+                    a["horas_trab"] += horas_trab
                     if isinstance(dt_prog, datetime):
                         if a.get("last_dt") is None or dt_prog > a["last_dt"]:
                             a["last_dt"] = dt_prog
@@ -15930,12 +16598,17 @@ class EscalaPage(PageBase):
             media_km_mot = (
                 sum(float(d.get("km_rodado", 0.0) or 0.0) for _n, d in mot_rows) / float(len(mot_rows))
             ) if mot_rows else 0.0
+            media_horas_mot = (
+                sum(float(d.get("horas_trab", 0.0) or 0.0) for _n, d in mot_rows) / float(len(mot_rows))
+            ) if mot_rows else 0.0
             for nome, d in mot_rows:
                 tag = self._tag_por_carga(
                     int(d["rotas"]),
                     media_mot,
                     float(d.get("km_rodado", 0.0) or 0.0),
                     media_km_mot,
+                    float(d.get("horas_trab", 0.0) or 0.0),
+                    media_horas_mot,
                 )
                 tree_insert_aligned(
                     self.tree_m,
@@ -15950,6 +16623,7 @@ class EscalaPage(PageBase):
                         d["canceladas"],
                         d.get("local_ref", "-"),
                         round(float(d.get("km_rodado", 0.0) or 0.0), 1),
+                        round(float(d.get("horas_trab", 0.0) or 0.0), 2),
                     ),
                     tags=(tag,),
                 )
@@ -15959,12 +16633,17 @@ class EscalaPage(PageBase):
             media_km_aju = (
                 sum(float(d.get("km_rodado", 0.0) or 0.0) for _n, d in aj_rows) / float(len(aj_rows))
             ) if aj_rows else 0.0
+            media_horas_aju = (
+                sum(float(d.get("horas_trab", 0.0) or 0.0) for _n, d in aj_rows) / float(len(aj_rows))
+            ) if aj_rows else 0.0
             for nome, d in aj_rows:
                 tag = self._tag_por_carga(
                     int(d["rotas"]),
                     media_aju,
                     float(d.get("km_rodado", 0.0) or 0.0),
                     media_km_aju,
+                    float(d.get("horas_trab", 0.0) or 0.0),
+                    media_horas_aju,
                 )
                 tree_insert_aligned(
                     self.tree_a,
@@ -15978,6 +16657,7 @@ class EscalaPage(PageBase):
                         d["finalizadas"],
                         d["canceladas"],
                         round(float(d.get("km_rodado", 0.0) or 0.0), 1),
+                        round(float(d.get("horas_trab", 0.0) or 0.0), 2),
                     ),
                     tags=(tag,),
                 )
@@ -15985,22 +16665,38 @@ class EscalaPage(PageBase):
             qtd_motoristas = len(mot_rows)
             qtd_ajudantes = len(aj_rows)
             total_km = sum(float(d.get("km_rodado", 0.0) or 0.0) for _n, d in mot_rows)
+            total_horas = sum(float(d.get("horas_trab", 0.0) or 0.0) for _n, d in mot_rows)
             if qtd_motoristas > 0:
                 media = qtd_rotas / float(qtd_motoristas)
                 media_km = total_km / float(qtd_motoristas)
+                media_horas = total_horas / float(qtd_motoristas)
                 mais_sobrecarregado = mot_rows[0][0] if mot_rows else "-"
+                carga_max = float(mot_rows[0][1].get("rotas", 0) or 0) if mot_rows else 0.0
+                nivel = "EQUILIBRADA"
+                cor_nivel = "#14532D"
+                if media > 0 and carga_max > media * 1.25:
+                    nivel = "SOBRECARGA"
+                    cor_nivel = "#B91C1C"
+                elif media > 0 and carga_max > media * 1.05:
+                    nivel = "ALERTA"
+                    cor_nivel = "#9A3412"
                 msg = (
-                    f"Rotas no filtro: {qtd_rotas} | Motoristas: {qtd_motoristas} | Ajudantes: {qtd_ajudantes} | "
-                    f"Media por motorista: {media:.2f} | KM total: {total_km:.1f} | KM médio/motorista: {media_km:.1f} | "
-                    f"Maior carga atual: {mais_sobrecarregado} | "
-                    "Legenda: verde=equilibrado, laranja=alerta, vermelho=sobrecarga (por rotas ou km)"
+                    f"Nível da escala: {nivel} | Maior carga atual: {mais_sobrecarregado}\n"
+                    f"Rotas no filtro: {qtd_rotas} | Motoristas: {qtd_motoristas} | Ajudantes: {qtd_ajudantes}\n"
+                    f"Média por motorista: {media:.2f} | KM total: {total_km:.1f} | KM médio/motorista: {media_km:.1f}\n"
+                    f"Horas totais: {total_horas:.2f} | Horas médias/motorista: {media_horas:.2f}\n"
+                    "Legenda visual: verde=equilibrado | laranja=alerta | vermelho=sobrecarga"
                 )
+                self.lbl_resumo.config(foreground=cor_nivel)
+                self._set_kpi_escala(qtd_rotas, qtd_motoristas, media_km, media_horas)
             else:
                 msg = f"Rotas no filtro: {qtd_rotas} | Sem motoristas no periodo/filtro selecionado."
+                self.lbl_resumo.config(foreground="#6B7280")
+                self._set_kpi_escala(qtd_rotas, 0, 0.0, 0.0)
 
             self.lbl_resumo.config(text=msg)
             self.lbl_recomendacoes.config(
-                text=self._recomendacoes_distribuicao(qtd_rotas, mot_rows, aj_rows)
+                text=self._recomendacoes_distribuicao(qtd_rotas, mot_rows, aj_rows) + "\n\nDuplo clique em uma linha para abrir detalhe da carga."
             )
             self.set_status(
                 f"STATUS: Escala atualizada ({self.var_periodo.get()} dias / {self.var_status.get()}) - "

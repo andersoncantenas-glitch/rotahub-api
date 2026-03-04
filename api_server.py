@@ -1,4 +1,4 @@
-﻿# api_server.py
+# api_server.py
 import os
 import json
 import sqlite3
@@ -34,7 +34,7 @@ if not SECRET_KEY:
     raise RuntimeError("ROTA_SECRET nao definido. Configure a variavel de ambiente para iniciar a API.")
 TOKEN_TTL_SECONDS = 60 * 60 * 24 * 7  # 7 dias
 
-app = FastAPI(title="Rota Granja API", version="1.0.0")
+app = FastAPI(title="Rota Granja API", version="1.1.3")
 
 def _cors_origins_from_env() -> List[str]:
     raw = os.environ.get("ROTA_CORS_ORIGINS", "").strip()
@@ -1628,6 +1628,39 @@ class DesktopRotaUpsertIn(BaseModel):
     itens: List[DesktopRotaItemIn] = Field(default_factory=list)
 
 
+class DesktopMotoristaUpsertIn(BaseModel):
+    codigo: str
+    nome: str
+    telefone: Optional[str] = None
+    cpf: Optional[str] = None
+    status: Optional[str] = "ATIVO"
+    senha: Optional[str] = None
+    acesso_liberado: Optional[bool] = True
+    acesso_liberado_por: Optional[str] = None
+    acesso_obs: Optional[str] = None
+
+
+class DesktopVeiculoUpsertIn(BaseModel):
+    placa: str
+    modelo: str
+    capacidade_cx: Optional[int] = 0
+
+
+class DesktopAjudanteUpsertIn(BaseModel):
+    nome: str
+    sobrenome: str
+    telefone: Optional[str] = None
+    status: Optional[str] = "ATIVO"
+
+
+class DesktopClienteUpsertIn(BaseModel):
+    cod_cliente: str
+    nome_cliente: str
+    endereco: Optional[str] = None
+    telefone: Optional[str] = None
+    vendedor: Optional[str] = None
+
+
 class SubstituicaoRotaIn(BaseModel):
     motorista_destino_codigo: str
     veiculo_destino: str = ""
@@ -1890,6 +1923,277 @@ def desktop_ajudantes(_ok: bool = Depends(_require_desktop_secret)):
                 }
             )
         return out
+
+
+@app.post("/desktop/cadastros/motoristas/upsert")
+def desktop_motoristas_upsert(payload: DesktopMotoristaUpsertIn, _ok: bool = Depends(_require_desktop_secret)):
+    codigo = _clean_text(payload.codigo).upper()
+    nome = _clean_text(payload.nome).upper()
+    if not codigo or not nome:
+        raise HTTPException(status_code=400, detail="codigo e nome sao obrigatorios.")
+
+    status = _clean_text(payload.status or "ATIVO").upper()
+    if status not in {"ATIVO", "DESATIVADO"}:
+        status = "ATIVO"
+
+    telefone = _clean_text(payload.telefone)
+    cpf = _clean_text(payload.cpf)
+
+    senha_in = _clean_text(payload.senha)
+    senha_hash = ""
+    if senha_in:
+        senha_hash = senha_in if senha_in.startswith("pbkdf2_sha256$") else hash_password_pbkdf2(senha_in)
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(motoristas)")
+        cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+        if not cols:
+            raise HTTPException(status_code=500, detail="Tabela motoristas indisponivel.")
+
+        cur.execute("SELECT id, COALESCE(senha,'') AS senha FROM motoristas WHERE UPPER(TRIM(codigo))=? LIMIT 1", (codigo,))
+        existing = cur.fetchone()
+
+        set_parts: List[str] = []
+        params: List[Any] = []
+
+        if "nome" in cols:
+            set_parts.append("nome=?")
+            params.append(nome)
+        if "telefone" in cols:
+            set_parts.append("telefone=?")
+            params.append(telefone)
+        if "cpf" in cols:
+            set_parts.append("cpf=?")
+            params.append(cpf)
+        if "status" in cols:
+            set_parts.append("status=?")
+            params.append(status)
+        if "acesso_liberado" in cols:
+            set_parts.append("acesso_liberado=?")
+            params.append(1 if bool(payload.acesso_liberado) else 0)
+        if "acesso_liberado_por" in cols:
+            set_parts.append("acesso_liberado_por=?")
+            params.append(_clean_text(payload.acesso_liberado_por or "DESKTOP_SYNC").upper())
+        if "acesso_liberado_em" in cols:
+            set_parts.append("acesso_liberado_em=?")
+            params.append(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        if "acesso_obs" in cols:
+            set_parts.append("acesso_obs=?")
+            params.append(_clean_text(payload.acesso_obs or "Sincronizado via Desktop"))
+
+        if "senha" in cols:
+            current_hash = _clean_text(existing["senha"] if existing else "")
+            final_hash = senha_hash or current_hash
+            if final_hash:
+                set_parts.append("senha=?")
+                params.append(final_hash)
+
+        if existing:
+            if not set_parts:
+                return {"ok": True, "codigo": codigo, "updated": 0}
+            params.append(int(existing["id"]))
+            cur.execute(f"UPDATE motoristas SET {', '.join(set_parts)} WHERE id=?", tuple(params))
+            return {"ok": True, "codigo": codigo, "updated": int(cur.rowcount or 0)}
+
+        cols_ins: List[str] = ["codigo"]
+        vals_ins: List[Any] = [codigo]
+        if "nome" in cols:
+            cols_ins.append("nome"); vals_ins.append(nome)
+        if "telefone" in cols:
+            cols_ins.append("telefone"); vals_ins.append(telefone)
+        if "cpf" in cols:
+            cols_ins.append("cpf"); vals_ins.append(cpf)
+        if "status" in cols:
+            cols_ins.append("status"); vals_ins.append(status)
+        if "senha" in cols:
+            cols_ins.append("senha"); vals_ins.append(senha_hash or hash_password_pbkdf2("1234"))
+        if "acesso_liberado" in cols:
+            cols_ins.append("acesso_liberado"); vals_ins.append(1 if bool(payload.acesso_liberado) else 0)
+        if "acesso_liberado_por" in cols:
+            cols_ins.append("acesso_liberado_por"); vals_ins.append(_clean_text(payload.acesso_liberado_por or "DESKTOP_SYNC").upper())
+        if "acesso_liberado_em" in cols:
+            cols_ins.append("acesso_liberado_em"); vals_ins.append(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        if "acesso_obs" in cols:
+            cols_ins.append("acesso_obs"); vals_ins.append(_clean_text(payload.acesso_obs or "Sincronizado via Desktop"))
+
+        ph = ", ".join(["?"] * len(cols_ins))
+        cur.execute(f"INSERT INTO motoristas ({', '.join(cols_ins)}) VALUES ({ph})", tuple(vals_ins))
+        return {"ok": True, "codigo": codigo, "created": 1}
+
+
+@app.post("/desktop/cadastros/veiculos/upsert")
+def desktop_veiculos_upsert(payload: DesktopVeiculoUpsertIn, _ok: bool = Depends(_require_desktop_secret)):
+    placa = _clean_text(payload.placa).upper()
+    modelo = _clean_text(payload.modelo).upper()
+    capacidade_cx = int(payload.capacidade_cx or 0)
+    if not placa or not modelo:
+        raise HTTPException(status_code=400, detail="placa e modelo sao obrigatorios.")
+    if capacidade_cx < 0:
+        capacidade_cx = 0
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(veiculos)")
+        cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+        if not cols:
+            raise HTTPException(status_code=500, detail="Tabela veiculos indisponivel.")
+
+        cur.execute("SELECT id FROM veiculos WHERE UPPER(TRIM(placa))=? LIMIT 1", (placa,))
+        existing = cur.fetchone()
+
+        set_parts: List[str] = []
+        params: List[Any] = []
+        if "placa" in cols:
+            set_parts.append("placa=?"); params.append(placa)
+        if "modelo" in cols:
+            set_parts.append("modelo=?"); params.append(modelo)
+        if "capacidade_cx" in cols:
+            set_parts.append("capacidade_cx=?"); params.append(capacidade_cx)
+
+        if existing:
+            if not set_parts:
+                return {"ok": True, "placa": placa, "updated": 0}
+            params.append(int(existing["id"]))
+            cur.execute(f"UPDATE veiculos SET {', '.join(set_parts)} WHERE id=?", tuple(params))
+            return {"ok": True, "placa": placa, "updated": int(cur.rowcount or 0)}
+
+        cols_ins: List[str] = []
+        vals_ins: List[Any] = []
+        if "placa" in cols:
+            cols_ins.append("placa"); vals_ins.append(placa)
+        if "modelo" in cols:
+            cols_ins.append("modelo"); vals_ins.append(modelo)
+        if "capacidade_cx" in cols:
+            cols_ins.append("capacidade_cx"); vals_ins.append(capacidade_cx)
+        if not cols_ins:
+            raise HTTPException(status_code=500, detail="Colunas de veiculos indisponiveis.")
+        ph = ", ".join(["?"] * len(cols_ins))
+        cur.execute(f"INSERT INTO veiculos ({', '.join(cols_ins)}) VALUES ({ph})", tuple(vals_ins))
+        return {"ok": True, "placa": placa, "created": 1}
+
+
+@app.post("/desktop/cadastros/ajudantes/upsert")
+def desktop_ajudantes_upsert(payload: DesktopAjudanteUpsertIn, _ok: bool = Depends(_require_desktop_secret)):
+    nome = _clean_text(payload.nome).upper()
+    sobrenome = _clean_text(payload.sobrenome).upper()
+    telefone = _clean_text(payload.telefone)
+    status = _clean_text(payload.status or "ATIVO").upper()
+    if status not in {"ATIVO", "DESATIVADO"}:
+        status = "ATIVO"
+    if not nome or not sobrenome:
+        raise HTTPException(status_code=400, detail="nome e sobrenome sao obrigatorios.")
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(ajudantes)")
+        cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+        if not cols:
+            raise HTTPException(status_code=500, detail="Tabela ajudantes indisponivel.")
+
+        cur.execute(
+            """
+            SELECT id FROM ajudantes
+            WHERE UPPER(TRIM(COALESCE(nome,'')))=? AND UPPER(TRIM(COALESCE(sobrenome,'')))=?
+            LIMIT 1
+            """,
+            (nome, sobrenome),
+        )
+        existing = cur.fetchone()
+
+        set_parts: List[str] = []
+        params: List[Any] = []
+        if "nome" in cols:
+            set_parts.append("nome=?"); params.append(nome)
+        if "sobrenome" in cols:
+            set_parts.append("sobrenome=?"); params.append(sobrenome)
+        if "telefone" in cols:
+            set_parts.append("telefone=?"); params.append(telefone)
+        if "status" in cols:
+            set_parts.append("status=?"); params.append(status)
+
+        if existing:
+            if not set_parts:
+                return {"ok": True, "nome": nome, "sobrenome": sobrenome, "updated": 0}
+            params.append(int(existing["id"]))
+            cur.execute(f"UPDATE ajudantes SET {', '.join(set_parts)} WHERE id=?", tuple(params))
+            return {"ok": True, "nome": nome, "sobrenome": sobrenome, "updated": int(cur.rowcount or 0)}
+
+        cols_ins: List[str] = []
+        vals_ins: List[Any] = []
+        if "nome" in cols:
+            cols_ins.append("nome"); vals_ins.append(nome)
+        if "sobrenome" in cols:
+            cols_ins.append("sobrenome"); vals_ins.append(sobrenome)
+        if "telefone" in cols:
+            cols_ins.append("telefone"); vals_ins.append(telefone)
+        if "status" in cols:
+            cols_ins.append("status"); vals_ins.append(status)
+        if not cols_ins:
+            raise HTTPException(status_code=500, detail="Colunas de ajudantes indisponiveis.")
+        ph = ", ".join(["?"] * len(cols_ins))
+        cur.execute(f"INSERT INTO ajudantes ({', '.join(cols_ins)}) VALUES ({ph})", tuple(vals_ins))
+        return {"ok": True, "nome": nome, "sobrenome": sobrenome, "created": 1}
+
+
+@app.post("/desktop/cadastros/clientes/upsert")
+def desktop_clientes_upsert(payload: DesktopClienteUpsertIn, _ok: bool = Depends(_require_desktop_secret)):
+    cod_cliente = _clean_text(payload.cod_cliente).upper()
+    nome_cliente = _clean_text(payload.nome_cliente).upper()
+    if not cod_cliente or not nome_cliente:
+        raise HTTPException(status_code=400, detail="cod_cliente e nome_cliente sao obrigatorios.")
+
+    endereco = _clean_text(payload.endereco).upper()
+    telefone = _clean_text(payload.telefone).upper()
+    vendedor = _clean_text(payload.vendedor).upper()
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(clientes)")
+        cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+        if not cols:
+            raise HTTPException(status_code=500, detail="Tabela clientes indisponivel.")
+
+        cur.execute("SELECT id FROM clientes WHERE UPPER(TRIM(cod_cliente))=? LIMIT 1", (cod_cliente,))
+        existing = cur.fetchone()
+
+        set_parts: List[str] = []
+        params: List[Any] = []
+        if "cod_cliente" in cols:
+            set_parts.append("cod_cliente=?"); params.append(cod_cliente)
+        if "nome_cliente" in cols:
+            set_parts.append("nome_cliente=?"); params.append(nome_cliente)
+        if "endereco" in cols:
+            set_parts.append("endereco=?"); params.append(endereco)
+        if "telefone" in cols:
+            set_parts.append("telefone=?"); params.append(telefone)
+        if "vendedor" in cols:
+            set_parts.append("vendedor=?"); params.append(vendedor)
+
+        if existing:
+            if not set_parts:
+                return {"ok": True, "cod_cliente": cod_cliente, "updated": 0}
+            params.append(int(existing["id"]))
+            cur.execute(f"UPDATE clientes SET {', '.join(set_parts)} WHERE id=?", tuple(params))
+            return {"ok": True, "cod_cliente": cod_cliente, "updated": int(cur.rowcount or 0)}
+
+        cols_ins: List[str] = []
+        vals_ins: List[Any] = []
+        if "cod_cliente" in cols:
+            cols_ins.append("cod_cliente"); vals_ins.append(cod_cliente)
+        if "nome_cliente" in cols:
+            cols_ins.append("nome_cliente"); vals_ins.append(nome_cliente)
+        if "endereco" in cols:
+            cols_ins.append("endereco"); vals_ins.append(endereco)
+        if "telefone" in cols:
+            cols_ins.append("telefone"); vals_ins.append(telefone)
+        if "vendedor" in cols:
+            cols_ins.append("vendedor"); vals_ins.append(vendedor)
+        if not cols_ins:
+            raise HTTPException(status_code=500, detail="Colunas de clientes indisponiveis.")
+        ph = ", ".join(["?"] * len(cols_ins))
+        cur.execute(f"INSERT INTO clientes ({', '.join(cols_ins)}) VALUES ({ph})", tuple(vals_ins))
+        return {"ok": True, "cod_cliente": cod_cliente, "created": 1}
 
 
 @app.get("/desktop/clientes/base")
@@ -3213,6 +3517,7 @@ def desktop_rotas_monitoramento(_ok: bool = Depends(_require_desktop_secret)):
     """
     with get_conn() as conn:
         cur = conn.cursor()
+        where_not_finalizadas = _rotas_not_finalizadas_clause(conn, "p")
         cur.execute(
             """
             SELECT
@@ -3236,7 +3541,7 @@ def desktop_rotas_monitoramento(_ok: bool = Depends(_require_desktop_secret)):
                     GROUP BY codigo_programacao
                 ) r2 ON r2.max_id = r1.id
             ) g ON g.codigo_programacao = p.codigo_programacao
-            WHERE UPPER(TRIM(COALESCE(p.status, ''))) NOT IN ('FINALIZADA', 'FINALIZADO', 'CANCELADA', 'CANCELADO')
+            WHERE """ + where_not_finalizadas + """
             ORDER BY p.id DESC
             LIMIT 500
             """
