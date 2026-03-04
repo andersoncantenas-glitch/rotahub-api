@@ -2302,6 +2302,52 @@ class CadastroCRUD(ttk.Frame):
         nome = self._norm(data.get("nome"))
         if not codigo or not nome:
             return
+        acesso_liberado_raw = data.get("acesso_liberado", None)
+        acesso_liberado_por = data.get("acesso_liberado_por", None)
+        acesso_obs = data.get("acesso_obs", None)
+
+        # Regra de negócio:
+        # - se vier explícito no data, usa esse valor
+        # - se NÃO vier (caso comum no formulário), preserva estado atual no banco
+        #   para não desbloquear motorista sem clicar em "LIBERAR APP".
+        if acesso_liberado_raw in (None, ""):
+            try:
+                with get_db() as conn:
+                    cur = conn.cursor()
+                    cur.execute("PRAGMA table_info(motoristas)")
+                    cols_m = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+                    if "acesso_liberado" in cols_m:
+                        cur.execute(
+                            """
+                            SELECT
+                                COALESCE(acesso_liberado,1) AS acesso_liberado,
+                                COALESCE(acesso_liberado_por,'') AS acesso_liberado_por,
+                                COALESCE(acesso_obs,'') AS acesso_obs
+                            FROM motoristas
+                            WHERE UPPER(COALESCE(codigo,''))=UPPER(?)
+                            ORDER BY id DESC
+                            LIMIT 1
+                            """,
+                            (codigo,),
+                        )
+                        row = cur.fetchone()
+                        if row:
+                            acesso_liberado_raw = int(row[0] or 0)
+                            if not acesso_liberado_por:
+                                acesso_liberado_por = str(row[1] or "").strip()
+                            if not acesso_obs:
+                                acesso_obs = str(row[2] or "").strip()
+            except Exception:
+                logging.debug("Falha ao preservar acesso_liberado do motorista para sync", exc_info=True)
+
+        if acesso_liberado_raw in (None, ""):
+            acesso_liberado_payload = None
+        else:
+            try:
+                acesso_liberado_payload = bool(int(acesso_liberado_raw or 0))
+            except Exception:
+                acesso_liberado_payload = bool(acesso_liberado_raw)
+
         payload = {
             "codigo": codigo,
             "nome": nome,
@@ -2309,9 +2355,9 @@ class CadastroCRUD(ttk.Frame):
             "cpf": self._norm(data.get("cpf")),
             "status": self._norm(data.get("status") or "ATIVO"),
             "senha": data.get("senha") or None,
-            "acesso_liberado": bool(int(data.get("acesso_liberado", 1) or 0)),
-            "acesso_liberado_por": self._norm(data.get("acesso_liberado_por") or "DESKTOP_SYNC"),
-            "acesso_obs": self._norm(data.get("acesso_obs") or "Sincronizado via Desktop"),
+            "acesso_liberado": acesso_liberado_payload,
+            "acesso_liberado_por": self._norm(acesso_liberado_por or "DESKTOP_SYNC"),
+            "acesso_obs": self._norm(acesso_obs or "Sincronizado via Desktop"),
         }
         _call_api(
             "POST",
@@ -3202,6 +3248,31 @@ class CadastroCRUD(ttk.Frame):
                         continue
                     messagebox.showerror("ERRO", f"Falha ao atualizar acesso do motorista:\n{err}")
                     return
+
+        # Fallback de compatibilidade:
+        # algumas APIs antigas não expõem /admin/motoristas/acesso/{codigo} com método de escrita,
+        # mas aceitam upsert no endpoint desktop.
+        try:
+            payload_upsert = {
+                "codigo": codigo,
+                "nome": self._norm(self._get("nome")),
+                "telefone": self._norm(self._get("telefone")),
+                "cpf": self._norm(self._get("cpf")),
+                "status": self._norm(self._get("status") or "ATIVO"),
+                "acesso_liberado": bool(liberar),
+                "acesso_liberado_por": admin_nome,
+                "acesso_obs": "Definido via botão LIBERAR/BLOQUEAR no desktop",
+            }
+            _call_api(
+                "POST",
+                "desktop/cadastros/motoristas/upsert",
+                payload=payload_upsert,
+                extra_headers={"X-Desktop-Secret": desktop_secret},
+            )
+            messagebox.showinfo("OK", f"Acesso ao app atualizado para {codigo} (fallback desktop/upsert).")
+            return
+        except Exception as exc:
+            last_err = str(exc or last_err or "")
 
         endpoint = _build_api_url(endpoints[0])
         messagebox.showerror(
@@ -15122,10 +15193,31 @@ class DespesasPage(PageBase):
                     )
                     row = cur.fetchone() or [0, 0]
                     out["base_cx"] = safe_int(row[0], 0)
-                    out["atual_cx"] = safe_int(row[1], 0)
-                    out["esperado_cx"] = max(out["base_cx"] - out["transf_out"] + out["transf_in"], 0)
-                    out["delta_cx"] = out["esperado_cx"] - out["atual_cx"]
-                    out["itens_ok"] = (abs(out["delta_cx"]) == 0)
+                    atual_calc = safe_int(row[1], 0)
+
+                    # Fechamento de prestação: saldo da rota deve ser zero.
+                    # Em bases legadas, tenta obter caixas_atual do controle.
+                    if not has_cx_atual and _has_table("programacao_itens_controle"):
+                        try:
+                            cur.execute("PRAGMA table_info(programacao_itens_controle)")
+                            cols_ctl = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+                            if "caixas_atual" in cols_ctl:
+                                cur.execute(
+                                    """
+                                    SELECT COALESCE(SUM(COALESCE(caixas_atual,0)),0)
+                                    FROM programacao_itens_controle
+                                    WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))
+                                    """,
+                                    (prog,),
+                                )
+                                atual_calc = safe_int((cur.fetchone() or [0])[0], 0)
+                        except Exception:
+                            logging.debug("Falha ao calcular caixas_atual via controle", exc_info=True)
+
+                    out["atual_cx"] = max(atual_calc, 0)
+                    out["esperado_cx"] = 0
+                    out["delta_cx"] = out["atual_cx"] - out["esperado_cx"]
+                    out["itens_ok"] = (out["atual_cx"] == 0)
 
                 out["resumo"] = [
                     f"Substituições pendentes: {out['pend_substituicao']}",
@@ -15134,7 +15226,7 @@ class DespesasPage(PageBase):
                     f"Transferência caixas (destino): {out['transf_in']} cx",
                     f"Caixas base: {out['base_cx']} cx",
                     f"Caixas atuais: {out['atual_cx']} cx",
-                    f"Caixas esperadas (base - out + in): {out['esperado_cx']} cx",
+                    f"Caixas esperadas no fechamento: {out['esperado_cx']} cx",
                     f"Delta caixas: {out['delta_cx']} cx",
                 ]
         except Exception:

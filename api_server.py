@@ -235,6 +235,31 @@ def _resolve_ajudante_primeiro_nome(cur: Optional[sqlite3.Cursor], raw: Any) -> 
         except Exception:
             pass
 
+        # Fallback: valor pode ser id/codigo de equipe.
+        try:
+            cur.execute(
+                """
+                SELECT ajudante1, ajudante2, ajudante_1, ajudante_2
+                FROM equipes
+                WHERE UPPER(TRIM(CAST(id AS TEXT))) = UPPER(TRIM(?))
+                   OR UPPER(TRIM(codigo)) = UPPER(TRIM(?))
+                LIMIT 1
+                """,
+                (value, value),
+            )
+            eq = cur.fetchone()
+            if eq:
+                nomes_eq: List[str] = []
+                for k in ("ajudante1", "ajudante2", "ajudante_1", "ajudante_2"):
+                    if k in eq.keys():
+                        n = _resolve_ajudante_primeiro_nome(cur, eq[k])
+                        if n and n not in nomes_eq:
+                            nomes_eq.append(n)
+                if nomes_eq:
+                    return " / ".join(nomes_eq)
+        except Exception:
+            pass
+
     return _first_name(value)
 
 
@@ -273,7 +298,41 @@ def _format_equipe_ajudantes(row: Dict[str, Any], cur: Optional[sqlite3.Cursor] 
             names.append(candidate)
     if names:
         return " / ".join(names)
-    return _resolve_ajudante_primeiro_nome(cur, row.get("equipe"))
+
+    # Fallback robusto: quando "equipe" vier como codigo (ex.: EQP-01),
+    # tenta resolver na tabela equipes para retornar nomes dos ajudantes.
+    equipe_raw = _clean_text(row.get("equipe"))
+    if equipe_raw and cur is not None:
+        try:
+            cur.execute("PRAGMA table_info(equipes)")
+            cols_eq = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+            cand_cols = [c for c in ("ajudante1", "ajudante2", "ajudante_1", "ajudante_2") if c in cols_eq]
+            if not cand_cols:
+                return _resolve_ajudante_primeiro_nome(cur, equipe_raw)
+
+            select_cols = ", ".join(cand_cols)
+            cur.execute(
+                f"""
+                SELECT {select_cols}
+                FROM equipes
+                WHERE UPPER(TRIM(codigo)) = UPPER(TRIM(?))
+                LIMIT 1
+                """,
+                (equipe_raw,),
+            )
+            eq = cur.fetchone()
+            if eq:
+                nomes_eq: List[str] = []
+                for k in cand_cols:
+                    n = _resolve_ajudante_primeiro_nome(cur, eq[k] if k in eq.keys() else None)
+                    if n and n not in nomes_eq:
+                        nomes_eq.append(n)
+                if nomes_eq:
+                    return " / ".join(nomes_eq)
+        except Exception:
+            pass
+
+    return _resolve_ajudante_primeiro_nome(cur, equipe_raw)
 
 
 def _decorate_rota_row(row: Dict[str, Any], cur: Optional[sqlite3.Cursor] = None) -> Dict[str, Any]:
@@ -288,6 +347,22 @@ def _decorate_rota_row(row: Dict[str, Any], cur: Optional[sqlite3.Cursor] = None
                 if v is not None and str(v).strip() != "":
                     return v
         return None
+
+    # Alias de local de carregamento (prioridade mobile).
+    loc_car = _first_non_empty(
+        "local_carregamento",
+        "granja_carregada",
+        "local_carregado",
+        "local_carreg",
+        "carregou_em",
+        "local_rota",
+        "tipo_rota",
+        "local",
+    )
+    if loc_car is not None:
+        row["local_carregamento"] = str(loc_car).strip()
+    if not str(row.get("local_rota") or "").strip() and loc_car is not None:
+        row["local_rota"] = str(loc_car).strip()
 
     # Aliases esperados pelo desktop (compatibilidade retroativa).
     sd = _first_non_empty("saida_data", "data_saida")
@@ -373,14 +448,19 @@ def _norm_pedido_key(v: Any) -> str:
 
 def _local_rota_expr(conn: sqlite3.Connection) -> str:
     candidates: List[str] = []
+    # Regra para o app mobile: priorizar LOCAL DE CARREGAMENTO.
+    if col_exists(conn, "programacoes", "local_carregamento"):
+        candidates.append("NULLIF(TRIM(p.local_carregamento), '')")
+    if col_exists(conn, "programacoes", "granja_carregada"):
+        candidates.append("NULLIF(TRIM(p.granja_carregada), '')")
+    if col_exists(conn, "programacoes", "local_carregado"):
+        candidates.append("NULLIF(TRIM(p.local_carregado), '')")
+    if col_exists(conn, "programacoes", "local_carreg"):
+        candidates.append("NULLIF(TRIM(p.local_carreg), '')")
     if col_exists(conn, "programacoes", "local_rota"):
         candidates.append("NULLIF(TRIM(p.local_rota), '')")
     if col_exists(conn, "programacoes", "tipo_rota"):
         candidates.append("NULLIF(TRIM(p.tipo_rota), '')")
-    if col_exists(conn, "programacoes", "local_carregamento"):
-        candidates.append("NULLIF(TRIM(p.local_carregamento), '')")
-    if col_exists(conn, "programacoes", "local_carreg"):
-        candidates.append("NULLIF(TRIM(p.local_carreg), '')")
 
     if not candidates:
         return "'-' AS local_rota"
@@ -1635,7 +1715,7 @@ class DesktopMotoristaUpsertIn(BaseModel):
     cpf: Optional[str] = None
     status: Optional[str] = "ATIVO"
     senha: Optional[str] = None
-    acesso_liberado: Optional[bool] = True
+    acesso_liberado: Optional[bool] = None
     acesso_liberado_por: Optional[str] = None
     acesso_obs: Optional[str] = None
 
@@ -1969,18 +2049,21 @@ def desktop_motoristas_upsert(payload: DesktopMotoristaUpsertIn, _ok: bool = Dep
         if "status" in cols:
             set_parts.append("status=?")
             params.append(status)
-        if "acesso_liberado" in cols:
-            set_parts.append("acesso_liberado=?")
-            params.append(1 if bool(payload.acesso_liberado) else 0)
-        if "acesso_liberado_por" in cols:
-            set_parts.append("acesso_liberado_por=?")
-            params.append(_clean_text(payload.acesso_liberado_por or "DESKTOP_SYNC").upper())
-        if "acesso_liberado_em" in cols:
-            set_parts.append("acesso_liberado_em=?")
-            params.append(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        if "acesso_obs" in cols:
-            set_parts.append("acesso_obs=?")
-            params.append(_clean_text(payload.acesso_obs or "Sincronizado via Desktop"))
+        # Atualização de acesso só quando vier explícito no payload.
+        # Isso evita "desbloqueio automático" ao apenas editar cadastro.
+        if payload.acesso_liberado is not None:
+            if "acesso_liberado" in cols:
+                set_parts.append("acesso_liberado=?")
+                params.append(1 if bool(payload.acesso_liberado) else 0)
+            if "acesso_liberado_por" in cols:
+                set_parts.append("acesso_liberado_por=?")
+                params.append(_clean_text(payload.acesso_liberado_por or "DESKTOP_SYNC").upper())
+            if "acesso_liberado_em" in cols:
+                set_parts.append("acesso_liberado_em=?")
+                params.append(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            if "acesso_obs" in cols:
+                set_parts.append("acesso_obs=?")
+                params.append(_clean_text(payload.acesso_obs or "Sincronizado via Desktop"))
 
         if "senha" in cols:
             current_hash = _clean_text(existing["senha"] if existing else "")
@@ -2008,8 +2091,9 @@ def desktop_motoristas_upsert(payload: DesktopMotoristaUpsertIn, _ok: bool = Dep
             cols_ins.append("status"); vals_ins.append(status)
         if "senha" in cols:
             cols_ins.append("senha"); vals_ins.append(senha_hash or hash_password_pbkdf2("1234"))
+        acesso_novo = True if payload.acesso_liberado is None else bool(payload.acesso_liberado)
         if "acesso_liberado" in cols:
-            cols_ins.append("acesso_liberado"); vals_ins.append(1 if bool(payload.acesso_liberado) else 0)
+            cols_ins.append("acesso_liberado"); vals_ins.append(1 if acesso_novo else 0)
         if "acesso_liberado_por" in cols:
             cols_ins.append("acesso_liberado_por"); vals_ins.append(_clean_text(payload.acesso_liberado_por or "DESKTOP_SYNC").upper())
         if "acesso_liberado_em" in cols:
