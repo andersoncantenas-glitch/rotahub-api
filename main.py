@@ -96,7 +96,7 @@ def is_desktop_api_sync_enabled() -> bool:
     return raw in {"1", "true", "yes", "y", "sim", "on"}
 
 # Versao/update/suporte (customizavel via variaveis de ambiente no servidor/estacao)
-APP_VERSION = "1.1.3"
+APP_VERSION = "1.1.4"
 UPDATE_MANIFEST_URL = os.environ.get("ROTA_UPDATE_MANIFEST_URL", "").strip()
 SETUP_DOWNLOAD_URL = os.environ.get("ROTA_SETUP_URL", "").strip()
 CHANGELOG_URL = os.environ.get("ROTA_CHANGELOG_URL", "").strip()
@@ -1583,6 +1583,10 @@ def db_init():
         safe_add_column(cur, "programacoes", "nf_kg_carregado", "REAL DEFAULT 0")
         safe_add_column(cur, "programacoes", "nf_kg_vendido", "REAL DEFAULT 0")
         safe_add_column(cur, "programacoes", "nf_saldo", "REAL DEFAULT 0")
+        # Ocorrências do transbordo (mortalidade) - impactam o KG útil da NF.
+        safe_add_column(cur, "programacoes", "mortalidade_transbordo_aves", "INTEGER DEFAULT 0")
+        safe_add_column(cur, "programacoes", "mortalidade_transbordo_kg", "REAL DEFAULT 0")
+        safe_add_column(cur, "programacoes", "obs_transbordo", "TEXT")
 
         safe_add_column(cur, "programacoes", "km_inicial", "REAL DEFAULT 0")
         safe_add_column(cur, "programacoes", "km_final", "REAL DEFAULT 0")
@@ -4689,12 +4693,65 @@ class HomePage(PageBase):
                         if not d:
                             continue
                         evento = str(d.get("evento") or d.get("tipo") or d.get("acao") or "")
-                        payload = str(d.get("payload_json") or d.get("payload") or d.get("detalhes") or "")
-                        dt = str(d.get("criado_em") or d.get("alterado_em") or d.get("data_registro") or "")
-                        out.append({"evento": evento, "payload": payload, "quando": dt})
+                        payload_raw = d.get("payload_json") if "payload_json" in d else (d.get("payload") or d.get("detalhes") or "")
+                        payload_obj = {}
+                        if isinstance(payload_raw, dict):
+                            payload_obj = payload_raw
+                            payload_txt = json.dumps(payload_raw, ensure_ascii=False)
+                        else:
+                            payload_txt = str(payload_raw or "")
+                            if payload_txt:
+                                try:
+                                    tmp = json.loads(payload_txt)
+                                    if isinstance(tmp, dict):
+                                        payload_obj = tmp
+                                except Exception:
+                                    payload_obj = {}
+                        dt = str(
+                            d.get("created_at")
+                            or d.get("criado_em")
+                            or d.get("alterado_em")
+                            or d.get("data_registro")
+                            or ""
+                        )
+                        out.append({"evento": evento, "payload": payload_txt, "payload_obj": payload_obj, "quando": dt})
             except Exception:
                 logging.debug("Falha ao coletar logs do item", exc_info=True)
             return out
+
+        def _extract_event_context(logs_item):
+            """
+            Extrai horário/localização a partir dos logs do item.
+            Mantém fallback para múltiplos formatos de payload.
+            """
+            ctx = {"quando": "", "latitude": "", "longitude": "", "endereco": "", "cidade": "", "bairro": ""}
+            for lg in logs_item or []:
+                if not ctx["quando"]:
+                    ctx["quando"] = str(lg.get("quando") or "").strip()
+                payload_obj = lg.get("payload_obj") if isinstance(lg, dict) else {}
+                if not isinstance(payload_obj, dict):
+                    payload_obj = {}
+                for k in ("lat_evento", "latitude", "lat", "cliente_lat", "cliente_latitude"):
+                    if not ctx["latitude"] and payload_obj.get(k) not in (None, ""):
+                        ctx["latitude"] = str(payload_obj.get(k)).strip()
+                        break
+                for k in ("lon_evento", "longitude", "lon", "lng", "cliente_lon", "cliente_longitude"):
+                    if not ctx["longitude"] and payload_obj.get(k) not in (None, ""):
+                        ctx["longitude"] = str(payload_obj.get(k)).strip()
+                        break
+                for k in ("endereco", "endereco_cliente"):
+                    if not ctx["endereco"] and payload_obj.get(k):
+                        ctx["endereco"] = str(payload_obj.get(k)).strip()
+                        break
+                for k in ("cidade", "cidade_cliente"):
+                    if not ctx["cidade"] and payload_obj.get(k):
+                        ctx["cidade"] = str(payload_obj.get(k)).strip()
+                        break
+                for k in ("bairro", "bairro_cliente"):
+                    if not ctx["bairro"] and payload_obj.get(k):
+                        ctx["bairro"] = str(payload_obj.get(k)).strip()
+                        break
+            return ctx
 
         def _collect_cliente_location(cod_cli: str):
             loc = {"latitude": "", "longitude": "", "endereco": "", "cidade": "", "bairro": ""}
@@ -4758,6 +4815,22 @@ class HomePage(PageBase):
             local = _collect_cliente_location(cod_cli)
             transferencias = _collect_transferencias(cod_cli, pedido)
             logs_item = _collect_item_logs(cod_cli, pedido)
+            evt_ctx = _extract_event_context(logs_item)
+            if not alterado_em:
+                alterado_em = str(item_data.get("evento_datahora") or evt_ctx.get("quando", ""))
+            for lk in ("latitude", "longitude", "endereco", "cidade", "bairro"):
+                if not str(local.get(lk) or "").strip():
+                    local[lk] = str(evt_ctx.get(lk) or "").strip()
+            if not str(local.get("latitude") or "").strip():
+                local["latitude"] = str(item_data.get("lat_evento") or "").strip()
+            if not str(local.get("longitude") or "").strip():
+                local["longitude"] = str(item_data.get("lon_evento") or "").strip()
+            if not str(local.get("endereco") or "").strip():
+                local["endereco"] = str(item_data.get("endereco_evento") or "").strip()
+            if not str(local.get("cidade") or "").strip():
+                local["cidade"] = str(item_data.get("cidade_evento") or "").strip()
+            if not str(local.get("bairro") or "").strip():
+                local["bairro"] = str(item_data.get("bairro_evento") or "").strip()
 
             linhas = []
             linhas.append(f"PROGRAMAÇÃO: {cabecalho_ctx.get('codigo') or codigo}")
@@ -4901,6 +4974,22 @@ class HomePage(PageBase):
             local = _collect_cliente_location(cod_cli)
             transferencias = _collect_transferencias(cod_cli, pedido)
             logs_item = _collect_item_logs(cod_cli, pedido)
+            evt_ctx = _extract_event_context(logs_item)
+            if not alterado_em:
+                alterado_em = str(item_data.get("evento_datahora") or evt_ctx.get("quando", ""))
+            for lk in ("latitude", "longitude", "endereco", "cidade", "bairro"):
+                if not str(local.get(lk) or "").strip():
+                    local[lk] = str(evt_ctx.get(lk) or "").strip()
+            if not str(local.get("latitude") or "").strip():
+                local["latitude"] = str(item_data.get("lat_evento") or "").strip()
+            if not str(local.get("longitude") or "").strip():
+                local["longitude"] = str(item_data.get("lon_evento") or "").strip()
+            if not str(local.get("endereco") or "").strip():
+                local["endereco"] = str(item_data.get("endereco_evento") or "").strip()
+            if not str(local.get("cidade") or "").strip():
+                local["cidade"] = str(item_data.get("cidade_evento") or "").strip()
+            if not str(local.get("bairro") or "").strip():
+                local["bairro"] = str(item_data.get("bairro_evento") or "").strip()
             lat = _coord(local.get("latitude"))
             lon = _coord(local.get("longitude"))
 
@@ -5578,6 +5667,12 @@ class HomePage(PageBase):
                     ),
                     "alteracao_tipo": it.get("alteracao_tipo", "") if isinstance(it, dict) else "",
                     "alteracao_detalhe": it.get("alteracao_detalhe", "") if isinstance(it, dict) else "",
+                    "evento_datahora": it.get("evento_datahora", "") if isinstance(it, dict) else "",
+                    "lat_evento": it.get("lat_evento", "") if isinstance(it, dict) else "",
+                    "lon_evento": it.get("lon_evento", "") if isinstance(it, dict) else "",
+                    "endereco_evento": it.get("endereco_evento", "") if isinstance(it, dict) else "",
+                    "cidade_evento": it.get("cidade_evento", "") if isinstance(it, dict) else "",
+                    "bairro_evento": it.get("bairro_evento", "") if isinstance(it, dict) else "",
                 }
 
             # 3) labels
@@ -6630,6 +6725,9 @@ def fetch_programacao_itens(codigo_programacao: str, limit: int = 8000):
 
             # controle
             has_ctrl = db_has_column(cur, "programacao_itens_controle", "codigo_programacao")
+            has_ctrl_pedido = has_ctrl and db_has_column(cur, "programacao_itens_controle", "pedido")
+            has_ctrl_alt_tipo = has_ctrl and db_has_column(cur, "programacao_itens_controle", "alteracao_tipo")
+            has_ctrl_alt_detalhe = has_ctrl and db_has_column(cur, "programacao_itens_controle", "alteracao_detalhe")
 
             status_expr = ("pi.status_pedido" if has_status else "''")
             caixas_atual_expr = ("pi.caixas_atual" if has_caixas_atual else "0")
@@ -6678,8 +6776,16 @@ def fetch_programacao_itens(codigo_programacao: str, limit: int = 8000):
                     "COALESCE(pc.valor_recebido, 0) as valor_recebido",
                     "COALESCE(pc.forma_recebimento, '') as forma_recebimento",
                     "COALESCE(pc.obs_recebimento, '') as obs_recebimento",
+                    ("COALESCE(pc.alteracao_tipo, '') as alteracao_tipo" if has_ctrl_alt_tipo else "'' as alteracao_tipo"),
+                    ("COALESCE(pc.alteracao_detalhe, '') as alteracao_detalhe" if has_ctrl_alt_detalhe else "'' as alteracao_detalhe"),
                 ])
-                join_ctrl = "LEFT JOIN programacao_itens_controle pc ON pc.codigo_programacao = pi.codigo_programacao AND UPPER(pc.cod_cliente)=UPPER(pi.cod_cliente)"
+                join_ctrl = (
+                    "LEFT JOIN programacao_itens_controle pc "
+                    "ON pc.codigo_programacao = pi.codigo_programacao "
+                    "AND UPPER(pc.cod_cliente)=UPPER(pi.cod_cliente)"
+                )
+                if has_pedido and has_ctrl_pedido:
+                    join_ctrl += " AND COALESCE(TRIM(pc.pedido),'') = COALESCE(TRIM(pi.pedido),'')"
             else:
                 select_cols.extend([
                     "0 as mortalidade_aves",
@@ -6687,6 +6793,8 @@ def fetch_programacao_itens(codigo_programacao: str, limit: int = 8000):
                     "0 as valor_recebido",
                     "'' as forma_recebimento",
                     "'' as obs_recebimento",
+                    "'' as alteracao_tipo",
+                    "'' as alteracao_detalhe",
                 ])
 
             cur.execute(f"""
@@ -6723,6 +6831,8 @@ def fetch_programacao_itens(codigo_programacao: str, limit: int = 8000):
                 "valor_recebido": safe_float(r[17], 0.0),
                 "forma_recebimento": r[18] or "",
                 "obs_recebimento": r[19] or "",
+                "alteracao_tipo": r[20] or "",
+                "alteracao_detalhe": r[21] or "",
             })
         return out
 
@@ -7768,6 +7878,10 @@ class ProgramacaoPage(PageBase):
         self._bind_money_entry(self.ent_adiantamento_prog)
 
         ttk.Label(card, text="CÃ³digo", style="CardLabel.TLabel").grid(row=0, column=8, sticky="w")
+        ttk.Label(card, text="Total Caixas", style="CardLabel.TLabel").grid(row=2, column=6, sticky="w")
+        self.ent_total_caixas_prog = ttk.Entry(card, style="Field.TEntry", state="readonly", width=12)
+        self.ent_total_caixas_prog.grid(row=2, column=7, sticky="ew", padx=6, pady=(2, 0))
+
         self.ent_codigo = ttk.Entry(card, style="Field.TEntry", state="readonly", width=10)
         self.ent_codigo.grid(row=1, column=8, sticky="ew", padx=6)
         self.lbl_prog_status_badge = ttk.Label(
@@ -7905,6 +8019,7 @@ class ProgramacaoPage(PageBase):
         )
 
         self.refresh_comboboxes()
+        self._refresh_total_caixas_field()
 
     # -------------------------
     # UtilitÃ¡rios
@@ -8370,6 +8485,28 @@ class ProgramacaoPage(PageBase):
         else:
             self.lbl_estimado_hint.config(text="Modo FOB (KG estimado)")
 
+    def _compute_total_caixas_tree(self) -> int:
+        total = 0
+        try:
+            for iid in self.tree.get_children():
+                vals = self._get_row_values(iid)
+                total += safe_int(vals[4] if len(vals) > 4 else 0, 0)
+        except Exception:
+            logging.debug("Falha ignorada")
+        return max(total, 0)
+
+    def _refresh_total_caixas_field(self):
+        if not hasattr(self, "ent_total_caixas_prog"):
+            return
+        total = self._compute_total_caixas_tree()
+        try:
+            self.ent_total_caixas_prog.config(state="normal")
+            self.ent_total_caixas_prog.delete(0, "end")
+            self.ent_total_caixas_prog.insert(0, str(total))
+            self.ent_total_caixas_prog.config(state="readonly")
+        except Exception:
+            logging.debug("Falha ignorada")
+
     # -------------------------
     # AÃ§Ãµes de itens
     # -------------------------
@@ -8378,6 +8515,7 @@ class ProgramacaoPage(PageBase):
         items = self.tree.get_children()
         if items:
             self.tree.see(items[-1])
+        self._refresh_total_caixas_field()
 
     def remover_linha(self):
         sel = self.tree.selection()
@@ -8386,10 +8524,12 @@ class ProgramacaoPage(PageBase):
             return
         for iid in sel:
             self.tree.delete(iid)
+        self._refresh_total_caixas_field()
 
     def limpar_itens(self):
         self.tree.delete(*self.tree.get_children())
         self._loaded_venda_ids = []
+        self._refresh_total_caixas_field()
 
     def _status_permite_edicao_programacao(self, status_raw: str) -> bool:
         st = upper(str(status_raw or "").strip())
@@ -8624,6 +8764,7 @@ class ProgramacaoPage(PageBase):
                 ),
             )
 
+        self._refresh_total_caixas_field()
         self.ent_codigo.config(state="normal")
         self.ent_codigo.delete(0, "end")
         self.ent_codigo.insert(0, codigo)
@@ -8745,6 +8886,7 @@ class ProgramacaoPage(PageBase):
                 observacao
             ))
 
+        self._refresh_total_caixas_field()
         msg = f"STATUS: Itens carregados: {len(self.tree.get_children())} vendas selecionadas (nao usadas). (edite antes de salvar)"
         if ignorados_invalidos:
             msg += f" Ignoradas inválidas: {ignorados_invalidos}."
@@ -8822,6 +8964,8 @@ class ProgramacaoPage(PageBase):
         vals = self._get_row_values(row_id)
         vals[col_index] = new_value
         self.tree.item(row_id, values=tuple(vals))
+        if col_name == "CAIXAS":
+            self._refresh_total_caixas_field()
 
         try:
             entry.destroy()
@@ -10299,7 +10443,7 @@ class RecebimentosPage(PageBase):
 
         self.lbl_motorista_info = ttk.Label(
             info_frame,
-            text="Motorista: ?",
+            text="Motorista: -",
             background="white",
             foreground="#6B7280",
             font=("Segoe UI", 9, "bold"),
@@ -10310,7 +10454,7 @@ class RecebimentosPage(PageBase):
 
         self.lbl_veiculo_info = ttk.Label(
             info_frame,
-            text="Veiculo: ?",
+            text="Veiculo: -",
             background="white",
             foreground="#6B7280",
             font=("Segoe UI", 9, "bold"),
@@ -10321,7 +10465,7 @@ class RecebimentosPage(PageBase):
 
         self.lbl_equipe_info = ttk.Label(
             info_frame,
-            text="Equipe: ?",
+            text="Equipe: -",
             background="white",
             foreground="#6B7280",
             font=("Segoe UI", 9, "bold"),
@@ -11447,14 +11591,20 @@ class RecebimentosPage(PageBase):
                 cols_prog = []
             col_rota = "local_rota" if "local_rota" in cols_prog else ("tipo_rota" if "tipo_rota" in cols_prog else "''")
             col_diaria = "diaria_motorista_valor" if "diaria_motorista_valor" in cols_prog else "0"
+            col_nf = (
+                "COALESCE(NULLIF(num_nf,''), NULLIF(nf_numero,''), '')"
+                if ("num_nf" in cols_prog and "nf_numero" in cols_prog)
+                else ("num_nf" if "num_nf" in cols_prog else ("nf_numero" if "nf_numero" in cols_prog else "''"))
+            )
             cur.execute("""
-                SELECT motorista, veiculo, equipe, num_nf, data_saida, hora_saida, data_chegada, hora_chegada,
+                SELECT motorista, veiculo, equipe, {col_nf} as num_nf,
+                       data_saida, hora_saida, data_chegada, hora_chegada,
                        {col_rota} as rota, COALESCE({col_diaria}, 0) as diaria_motorista
                 FROM programacoes
                 WHERE codigo_programacao=?
                 ORDER BY id DESC
                 LIMIT 1
-            """.format(col_rota=col_rota, col_diaria=col_diaria), (prog,))
+            """.format(col_nf=col_nf, col_rota=col_rota, col_diaria=col_diaria), (prog,))
             row = cur.fetchone()
 
         if not row:
@@ -12487,7 +12637,7 @@ class DespesasPage(PageBase):
             text="🔄 ATUALIZAR",
             style="Ghost.TButton",
             command=self._refresh_all,
-            width=10
+            width=14
         ).grid(row=0, column=2, padx=6)
 
         self.lbl_stats = ttk.Label(
@@ -12525,7 +12675,7 @@ class DespesasPage(PageBase):
 
         self.lbl_motorista = ttk.Label(
             top_frame,
-            text="Motorista: ? | Veiculo: ? | Equipe: ?",
+            text="Motorista: - | Veiculo: - | Equipe: -",
             font=("Segoe UI", 10),
             background="white",
             wraplength=520,
@@ -12555,14 +12705,12 @@ class DespesasPage(PageBase):
         tab_nf.grid_columnconfigure(2, weight=1)
         tab_nf.grid_columnconfigure(3, weight=1)
 
-        tab_cedulas = ttk.Frame(sections_nb, style="Card.TFrame", padding=10)
-        sections_nb.add(tab_cedulas, text="Contagem de Cedulas")
-        tab_cedulas.grid_columnconfigure(0, weight=1)
+        tab_cedulas = ttk.Frame(sections_nb, style="Card.TFrame", padding=6)
+        sections_nb.add(tab_cedulas, text="Contagem + Resumo")
+        tab_cedulas.grid_columnconfigure(0, weight=0, minsize=640)
         tab_cedulas.grid_columnconfigure(1, weight=1)
-        tab_cedulas.grid_columnconfigure(2, weight=1)
 
-        tab_resumos = ttk.Frame(sections_nb, style="Card.TFrame", padding=10)
-        sections_nb.add(tab_resumos, text="Resumos")
+        tab_resumos = tab_cedulas
         tab_resumos.grid_columnconfigure(0, weight=1)
 
         # =========================================================
@@ -12637,16 +12785,38 @@ class DespesasPage(PageBase):
             command=self._calcular_saldo_auto
         ).pack(anchor="w")
 
-        row_nf = 1
-        self.ent_nf_numero = self._create_field(tab_nf, "NÂº NOTA FISCAL:", row_nf, 14); row_nf += 1
-        self.ent_nf_kg = self._create_field(tab_nf, "KG NOTA FISCAL:", row_nf, 14); row_nf += 1
-        self.ent_nf_preco = self._create_field(tab_nf, "PRECO NF (R$/KG):", row_nf, 14); row_nf += 1
-        self.ent_nf_caixas = self._create_field(tab_nf, "CAIXAS:", row_nf, 14); row_nf += 1
-        self.ent_nf_kg_carregado = self._create_field(tab_nf, "KG CARREGADO:", row_nf, 14); row_nf += 1
-        self.ent_nf_kg_vendido = self._create_field(tab_nf, "KG VENDIDO:", row_nf, 14); row_nf += 1
-        self.ent_nf_saldo = self._create_field(tab_nf, "SALDO (KG):", row_nf, 14)
-        self.ent_nf_media_carregada = self._create_field(tab_nf, "MEDIA CARREGADA:", row_nf, 14); row_nf += 1
-        self.ent_nf_caixa_final = self._create_field(tab_nf, "CAIXA FINAL:", row_nf, 14)
+        tab_nf.grid_columnconfigure(0, weight=3)
+        tab_nf.grid_columnconfigure(1, weight=2)
+        tab_nf.grid_rowconfigure(1, weight=1)
+
+        nf_form_wrap = ttk.Frame(tab_nf, style="Card.TFrame")
+        nf_form_wrap.grid(row=1, column=0, sticky="nsew", padx=(0, 12))
+        nf_form_wrap.grid_columnconfigure(0, weight=1)
+        nf_form_wrap.grid_columnconfigure(1, weight=1)
+
+        nf_base = ttk.LabelFrame(nf_form_wrap, text="NF Base", padding=8)
+        nf_base.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 6))
+
+        row_nf = 0
+        self.ent_nf_numero = self._create_field(nf_base, "NÂº NOTA FISCAL:", row_nf, 14); row_nf += 1
+        self.ent_nf_kg = self._create_field(nf_base, "KG NOTA FISCAL:", row_nf, 14); row_nf += 1
+        self.ent_nf_preco = self._create_field(nf_base, "PRECO NF (R$/KG):", row_nf, 14); row_nf += 1
+        self.ent_nf_caixas = self._create_field(nf_base, "CAIXAS:", row_nf, 14)
+
+        nf_mov = ttk.LabelFrame(nf_form_wrap, text="Movimento", padding=8)
+        nf_mov.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=(0, 6))
+
+        row_nf = 0
+        self.ent_nf_kg_carregado = self._create_field(nf_mov, "KG CARREGADO:", row_nf, 14); row_nf += 1
+        self.ent_nf_kg_vendido = self._create_field(nf_mov, "KG VENDIDO:", row_nf, 14); row_nf += 1
+        self.ent_nf_saldo = self._create_field(nf_mov, "SALDO (KG):", row_nf, 14)
+
+        nf_params = ttk.LabelFrame(nf_form_wrap, text="Parametros e Sincronismo", padding=8)
+        nf_params.grid(row=1, column=0, columnspan=2, sticky="ew")
+
+        row_nf = 0
+        self.ent_nf_media_carregada = self._create_field(nf_params, "MEDIA CARREGADA:", row_nf, 14); row_nf += 1
+        self.ent_nf_caixa_final = self._create_field(nf_params, "CAIXA FINAL:", row_nf, 14)
         try:
             self.ent_nf_caixas.configure(state="readonly")
             self.ent_nf_kg_carregado.configure(state="readonly")
@@ -12655,15 +12825,15 @@ class DespesasPage(PageBase):
             logging.debug("Falha ignorada")
 
         ttk.Button(
-            tab_nf,
+            nf_params,
             text="Sincronizar com App",
             style="Warn.TButton",
             width=24,
             command=self._sincronizar_com_app
-        ).grid(row=row_nf + 1, column=0, columnspan=2, sticky="w", pady=(15, 0))
+        ).grid(row=row_nf + 1, column=0, columnspan=2, sticky="w", pady=(10, 0))
 
         nf_resumo = ttk.LabelFrame(tab_nf, text="Resumo Compra x Venda", padding=12)
-        nf_resumo.grid(row=1, column=3, rowspan=max(row_nf + 2, 12), sticky="nsew", padx=(20, 0))
+        nf_resumo.grid(row=1, column=1, sticky="nsew")
         nf_resumo.grid_columnconfigure(0, weight=1)
 
         ttk.Label(nf_resumo, text="COMPRA", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 6))
@@ -12695,6 +12865,16 @@ class DespesasPage(PageBase):
         self.lbl_nf_lucro_liquido.grid(row=13, column=0, sticky="w")
         self.lbl_nf_margem = ttk.Label(nf_resumo, text="Margem liquida: 0,00%")
         self.lbl_nf_margem.grid(row=14, column=0, sticky="w", pady=(0, 4))
+        ttk.Separator(nf_resumo, orient="horizontal").grid(row=15, column=0, sticky="ew", pady=(2, 8))
+        ttk.Label(nf_resumo, text="OCORRÊNCIAS (TRANSBORDO)", font=("Segoe UI", 10, "bold")).grid(row=16, column=0, sticky="w", pady=(0, 6))
+        self.lbl_nf_mort_aves = ttk.Label(nf_resumo, text="Mortalidade (aves): 0")
+        self.lbl_nf_mort_aves.grid(row=17, column=0, sticky="w")
+        self.lbl_nf_mort_kg = ttk.Label(nf_resumo, text="Mortalidade (KG): 0,00")
+        self.lbl_nf_mort_kg.grid(row=18, column=0, sticky="w")
+        self.lbl_nf_kg_util = ttk.Label(nf_resumo, text="KG útil NF (NF - mortalidade): 0,00", font=("Segoe UI", 10, "bold"))
+        self.lbl_nf_kg_util.grid(row=19, column=0, sticky="w")
+        self.lbl_nf_obs_transb = ttk.Label(nf_resumo, text="Obs transbordo: -", wraplength=320, justify="left")
+        self.lbl_nf_obs_transb.grid(row=20, column=0, sticky="w", pady=(2, 0))
 
         self._bind_nf_summary_auto_calc()
         self._refresh_nf_trade_summary()
@@ -12776,22 +12956,35 @@ class DespesasPage(PageBase):
         # ---- ABA 3: CONTAGEM DE CÃ‰DULAS
         # =========================================================
 
-        calc_ced_frame = ttk.Frame(tab_cedulas)
-        calc_ced_frame.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+        contagem_wrap = ttk.LabelFrame(tab_cedulas, text="CONTAGEM DE CEDULAS", padding=6)
+        contagem_wrap.grid(row=0, column=0, sticky="nw", pady=(0, 6), padx=(0, 8))
+        contagem_wrap.grid_columnconfigure(0, weight=0, minsize=220)
+        contagem_wrap.grid_columnconfigure(1, weight=0, minsize=220)
+        contagem_wrap.grid_columnconfigure(2, weight=0, minsize=220)
 
-        ttk.Label(calc_ced_frame, text="Valor Total:", style="CardLabel.TLabel").pack(side="left", padx=(0, 5))
-        self.ent_total_dinheiro = ttk.Entry(calc_ced_frame, style="Field.TEntry", width=15)
-        self.ent_total_dinheiro.pack(side="left", padx=5)
+        calc_ced_frame = ttk.Frame(contagem_wrap)
+        calc_ced_frame.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+
+        ttk.Label(calc_ced_frame, text="Valor Total:", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        self.ent_total_dinheiro = ttk.Entry(calc_ced_frame, style="Field.TEntry", width=12)
+        self.ent_total_dinheiro.grid(row=0, column=1, sticky="w")
         self._bind_money_entry(self.ent_total_dinheiro)
         self._bind_focus_scroll(self.ent_total_dinheiro)
-        ttk.Button(calc_ced_frame, text="🧮 Distribuir", style="Ghost.TButton",
-                   command=self._distribuir_cedulas, width=10).pack(side="left", padx=5)
+        ttk.Button(
+            calc_ced_frame,
+            text="🧮 Distribuir",
+            style="Ghost.TButton",
+            command=self._distribuir_cedulas,
+            width=11,
+        ).grid(row=0, column=2, sticky="w", padx=(10, 0))
 
-        header_ced = ttk.Frame(tab_cedulas)
-        header_ced.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(6, 3))
+        header_ced = ttk.Frame(contagem_wrap)
+        header_ced.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(2, 3))
+        for _c in range(3):
+            header_ced.grid_columnconfigure(_c, weight=1, uniform="ced_head")
 
         ttk.Label(header_ced, text="QTD", width=8, style="CardLabel.TLabel", anchor="center", font=("Segoe UI", 8)).grid(row=0, column=0, sticky="ew")
-        ttk.Label(header_ced, text="CÃ‰DULA", width=15, style="CardLabel.TLabel", anchor="center").grid(row=0, column=1)
+        ttk.Label(header_ced, text="CEDULA", width=15, style="CardLabel.TLabel", anchor="center").grid(row=0, column=1, sticky="ew")
         ttk.Label(header_ced, text="TOTAL", width=15, style="CardLabel.TLabel", anchor="center", font=("Segoe UI", 8)).grid(row=0, column=2, sticky="ew")
 
         self.ced_entries = {}
@@ -12808,36 +13001,37 @@ class DespesasPage(PageBase):
         }
 
         for i, ced in enumerate(ced_list, start=2):
-            ent = ttk.Entry(tab_cedulas, width=12, style="Field.TEntry", justify="center")
-            ent.grid(row=i, column=0, sticky="ew", pady=1, padx=4)
+            ent = ttk.Entry(contagem_wrap, width=12, style="Field.TEntry", justify="center")
+            ent.grid(row=i, column=0, sticky="ew", pady=0, padx=4)
             ent.bind("<KeyRelease>", lambda e: self._calc_valor_dinheiro())
             self._bind_focus_scroll(ent)
 
             lbl_ced = ttk.Label(
-                tab_cedulas,
+                contagem_wrap,
                 text=f"R$ {ced:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."),
                 style="CardLabel.TLabel",
                 anchor="center",
                 foreground=ced_colors.get(ced, "#111827")
             )
-            lbl_ced.grid(row=i, column=1, sticky="ew", pady=1, padx=4)
+            lbl_ced.grid(row=i, column=1, sticky="ew", pady=0, padx=4)
 
-            lbl_total = ttk.Label(tab_cedulas, text="R$ 0,00",
+            lbl_total = ttk.Label(contagem_wrap, text="R$ 0,00",
                                   font=("Segoe UI", 8, "bold"), anchor="center",
                                   foreground=ced_colors.get(ced, "#111827"))
-            lbl_total.grid(row=i, column=2, sticky="ew", pady=1, padx=4)
+            lbl_total.grid(row=i, column=2, sticky="ew", pady=0, padx=4)
 
             self.ced_entries[ced] = ent
             self.ced_totals[ced] = lbl_total
 
-        ttk.Separator(tab_cedulas, orient="horizontal")\
-            .grid(row=9, column=0, columnspan=3, sticky="ew", pady=6)
+        ttk.Separator(contagem_wrap, orient="horizontal")\
+            .grid(row=9, column=0, columnspan=3, sticky="ew", pady=4)
 
-        ttk.Label(tab_cedulas, text="TOTAL DINHEIRO:", font=("Segoe UI", 9, "bold"))\
-            .grid(row=10, column=0, columnspan=2, sticky="e", pady=3)
+        ttk.Label(contagem_wrap, text="TOTAL DINHEIRO:", font=("Segoe UI", 9, "bold"))\
+            .grid(row=10, column=0, columnspan=2, sticky="e", pady=2)
 
-        self.lbl_valor_dinheiro = ttk.Label(tab_cedulas, text="R$ 0,00", font=("Segoe UI", 11, "bold"))
-        self.lbl_valor_dinheiro.grid(row=10, column=2, sticky="w", pady=3, padx=4)
+        self.lbl_valor_dinheiro = ttk.Label(contagem_wrap, text="R$ 0,00", font=("Segoe UI", 11, "bold"))
+        self.lbl_valor_dinheiro.grid(row=10, column=2, sticky="w", pady=2, padx=4)
+        ttk.Separator(contagem_wrap, orient="horizontal").grid(row=11, column=0, columnspan=3, sticky="ew", pady=(4, 6))
 
         # forÃ§a atualizar scroll no primeiro render
         # =========================================================
@@ -12849,97 +13043,99 @@ class DespesasPage(PageBase):
         # =========================================================
         # RESUMO + BOTOES
         # =========================================================
-        resumo_frame = ttk.Frame(tab_resumos, style="Card.TFrame", padding=10)
-        resumo_frame.grid(row=0, column=0, sticky="nsew")
+        resumo_frame = ttk.Frame(tab_resumos, style="Card.TFrame", padding=6)
+        resumo_frame.grid(row=0, column=1, sticky="nsew")
         resumo_frame.grid_columnconfigure(0, weight=1)
         resumo_frame.grid_rowconfigure(2, weight=1)
 
         ttk.Label(
             resumo_frame,
-            text="RESUMO FINANCEIRO (PADRÃƒO ÃšNICO)",
+            text="RESUMO FINANCEIRO INTELIGENTE",
             style="CardTitle.TLabel",
-            font=("Segoe UI", 12, "bold")
-        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+            font=("Segoe UI", 11, "bold")
+        ).grid(row=0, column=0, sticky="w", pady=(0, 4))
 
         kpi_row = ttk.Frame(resumo_frame, style="Card.TFrame")
-        kpi_row.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        kpi_row.grid(row=1, column=0, sticky="ew", pady=(0, 4))
         for i in range(4):
             kpi_row.grid_columnconfigure(i, weight=1, uniform="kpi")
 
-        kpi_receb = ttk.LabelFrame(kpi_row, text=" RECEBIMENTOS ", padding=8)
-        kpi_receb.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        self.lbl_kpi_receb_total = ttk.Label(kpi_receb, text="R$ 0,00", font=("Segoe UI", 12, "bold"), foreground="#1D4ED8")
+        kpi_receb = ttk.LabelFrame(kpi_row, text=" RECEBIMENTOS ", padding=5)
+        kpi_receb.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self.lbl_kpi_receb_total = ttk.Label(kpi_receb, text="R$ 0,00", font=("Segoe UI", 11, "bold"), foreground="#1D4ED8")
         self.lbl_kpi_receb_total.grid(row=0, column=0, sticky="w")
 
-        kpi_desp = ttk.LabelFrame(kpi_row, text=" DESPESAS ", padding=8)
-        kpi_desp.grid(row=0, column=1, sticky="ew", padx=(0, 6))
-        self.lbl_kpi_desp_total = ttk.Label(kpi_desp, text="R$ 0,00", font=("Segoe UI", 12, "bold"), foreground="#C62828")
+        kpi_desp = ttk.LabelFrame(kpi_row, text=" DESPESAS ", padding=5)
+        kpi_desp.grid(row=0, column=1, sticky="ew", padx=(0, 4))
+        self.lbl_kpi_desp_total = ttk.Label(kpi_desp, text="R$ 0,00", font=("Segoe UI", 11, "bold"), foreground="#C62828")
         self.lbl_kpi_desp_total.grid(row=0, column=0, sticky="w")
 
-        kpi_ced = ttk.LabelFrame(kpi_row, text=" CÃ‰DULAS ", padding=8)
-        kpi_ced.grid(row=0, column=2, sticky="ew", padx=(0, 6))
-        self.lbl_kpi_cedulas_total = ttk.Label(kpi_ced, text="R$ 0,00", font=("Segoe UI", 12, "bold"), foreground="#7C3AED")
+        kpi_ced = ttk.LabelFrame(kpi_row, text=" CÃ‰DULAS ", padding=5)
+        kpi_ced.grid(row=0, column=2, sticky="ew", padx=(0, 4))
+        self.lbl_kpi_cedulas_total = ttk.Label(kpi_ced, text="R$ 0,00", font=("Segoe UI", 11, "bold"), foreground="#7C3AED")
         self.lbl_kpi_cedulas_total.grid(row=0, column=0, sticky="w")
 
-        kpi_res = ttk.LabelFrame(kpi_row, text=" RESULTADO LÃQUIDO ", padding=8)
+        kpi_res = ttk.LabelFrame(kpi_row, text=" RESULTADO LÃQUIDO ", padding=5)
         kpi_res.grid(row=0, column=3, sticky="ew")
-        self.lbl_kpi_resultado_liquido = ttk.Label(kpi_res, text="R$ 0,00", font=("Segoe UI", 12, "bold"), foreground="#2E7D32")
+        self.lbl_kpi_resultado_liquido = ttk.Label(kpi_res, text="R$ 0,00", font=("Segoe UI", 11, "bold"), foreground="#2E7D32")
         self.lbl_kpi_resultado_liquido.grid(row=0, column=0, sticky="w")
 
         details_wrap = ttk.Frame(resumo_frame, style="Card.TFrame")
         details_wrap.grid(row=2, column=0, sticky="nsew")
-        for i in range(3):
+        for i in range(2):
             details_wrap.grid_columnconfigure(i, weight=1, uniform="res_cards")
+        details_wrap.grid_rowconfigure(0, weight=1)
+        details_wrap.grid_rowconfigure(1, weight=1)
 
-        entrada_frame = ttk.LabelFrame(details_wrap, text=" ENTRADAS ", padding=8)
-        entrada_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        entrada_frame = ttk.LabelFrame(details_wrap, text=" ENTRADAS ", padding=5)
+        entrada_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 4), pady=(0, 3))
         entrada_frame.grid_columnconfigure(1, weight=1)
 
-        ttk.Label(entrada_frame, text="Recebimentos Total:", font=("Segoe UI", 9)).grid(row=0, column=0, sticky="w", pady=2)
-        self.lbl_receb_total = ttk.Label(entrada_frame, text="R$ 0,00", font=("Segoe UI", 10, "bold"))
-        self.lbl_receb_total.grid(row=0, column=1, sticky="e", pady=2)
+        ttk.Label(entrada_frame, text="Recebimentos Total:", font=("Segoe UI", 8)).grid(row=0, column=0, sticky="w", pady=1)
+        self.lbl_receb_total = ttk.Label(entrada_frame, text="R$ 0,00", font=("Segoe UI", 9, "bold"))
+        self.lbl_receb_total.grid(row=0, column=1, sticky="e", pady=1)
 
-        ttk.Label(entrada_frame, text="Adiantamento p/ Rota:", font=("Segoe UI", 9)).grid(row=1, column=0, sticky="w", pady=2)
-        self.ent_adiantamento = ttk.Entry(entrada_frame, style="Field.TEntry", width=12)
-        self.ent_adiantamento.grid(row=1, column=1, sticky="e", pady=2)
+        ttk.Label(entrada_frame, text="Adiantamento p/ Rota:", font=("Segoe UI", 8)).grid(row=1, column=0, sticky="w", pady=1)
+        self.ent_adiantamento = ttk.Entry(entrada_frame, style="Field.TEntry", width=10)
+        self.ent_adiantamento.grid(row=1, column=1, sticky="e", pady=1)
         self.ent_adiantamento.bind("<KeyRelease>", lambda e: self._update_resumo_financeiro())
         self._bind_money_entry(self.ent_adiantamento)
 
-        ttk.Label(entrada_frame, text="Total Entradas:", font=("Segoe UI", 9, "bold")).grid(row=2, column=0, sticky="w", pady=(8, 2))
-        self.lbl_total_entradas = ttk.Label(entrada_frame, text="R$ 0,00", font=("Segoe UI", 11, "bold"), foreground="#2E7D32")
-        self.lbl_total_entradas.grid(row=2, column=1, sticky="e", pady=(8, 2))
+        ttk.Label(entrada_frame, text="Total Entradas:", font=("Segoe UI", 8, "bold")).grid(row=2, column=0, sticky="w", pady=(4, 1))
+        self.lbl_total_entradas = ttk.Label(entrada_frame, text="R$ 0,00", font=("Segoe UI", 10, "bold"), foreground="#2E7D32")
+        self.lbl_total_entradas.grid(row=2, column=1, sticky="e", pady=(4, 1))
 
-        saida_frame = ttk.LabelFrame(details_wrap, text=" SAÃDAS ", padding=8)
-        saida_frame.grid(row=0, column=1, sticky="nsew", padx=(0, 6))
+        saida_frame = ttk.LabelFrame(details_wrap, text=" SAÃDAS ", padding=5)
+        saida_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 4), pady=(3, 0))
         saida_frame.grid_columnconfigure(1, weight=1)
 
-        ttk.Label(saida_frame, text="Despesas Total:", font=("Segoe UI", 9)).grid(row=0, column=0, sticky="w", pady=2)
-        self.lbl_desp_total = ttk.Label(saida_frame, text="R$ 0,00", font=("Segoe UI", 10, "bold"))
-        self.lbl_desp_total.grid(row=0, column=1, sticky="e", pady=2)
+        ttk.Label(saida_frame, text="Despesas Total:", font=("Segoe UI", 8)).grid(row=0, column=0, sticky="w", pady=1)
+        self.lbl_desp_total = ttk.Label(saida_frame, text="R$ 0,00", font=("Segoe UI", 9, "bold"))
+        self.lbl_desp_total.grid(row=0, column=1, sticky="e", pady=1)
 
-        ttk.Label(saida_frame, text="Contagem CÃ©dulas:", font=("Segoe UI", 9)).grid(row=1, column=0, sticky="w", pady=2)
-        self.lbl_cedulas_total = ttk.Label(saida_frame, text="R$ 0,00", font=("Segoe UI", 10, "bold"))
-        self.lbl_cedulas_total.grid(row=1, column=1, sticky="e", pady=2)
+        ttk.Label(saida_frame, text="Contagem C?dulas:", font=("Segoe UI", 8)).grid(row=1, column=0, sticky="w", pady=1)
+        self.lbl_cedulas_total = ttk.Label(saida_frame, text="R$ 0,00", font=("Segoe UI", 9, "bold"))
+        self.lbl_cedulas_total.grid(row=1, column=1, sticky="e", pady=1)
 
-        ttk.Label(saida_frame, text="Total SaÃ­das:", font=("Segoe UI", 9, "bold")).grid(row=2, column=0, sticky="w", pady=(8, 2))
-        self.lbl_total_saidas = ttk.Label(saida_frame, text="R$ 0,00", font=("Segoe UI", 11, "bold"), foreground="#C62828")
-        self.lbl_total_saidas.grid(row=2, column=1, sticky="e", pady=(8, 2))
+        ttk.Label(saida_frame, text="Total Sa?das:", font=("Segoe UI", 8, "bold")).grid(row=2, column=0, sticky="w", pady=(4, 1))
+        self.lbl_total_saidas = ttk.Label(saida_frame, text="R$ 0,00", font=("Segoe UI", 10, "bold"), foreground="#C62828")
+        self.lbl_total_saidas.grid(row=2, column=1, sticky="e", pady=(4, 1))
 
-        resultado_frame = ttk.LabelFrame(details_wrap, text=" RESULTADOS ", padding=8)
-        resultado_frame.grid(row=0, column=2, sticky="nsew")
+        resultado_frame = ttk.LabelFrame(details_wrap, text=" RESULTADOS ", padding=5)
+        resultado_frame.grid(row=0, column=1, rowspan=2, sticky="nsew")
         resultado_frame.grid_columnconfigure(1, weight=1)
 
-        ttk.Label(resultado_frame, text="Valor p/ Caixa:", font=("Segoe UI", 9)).grid(row=0, column=0, sticky="w", pady=2)
-        self.lbl_valor_final_caixa = ttk.Label(resultado_frame, text="R$ 0,00", font=("Segoe UI", 10, "bold"))
-        self.lbl_valor_final_caixa.grid(row=0, column=1, sticky="e", pady=2)
+        ttk.Label(resultado_frame, text="Valor p/ Caixa:", font=("Segoe UI", 8)).grid(row=0, column=0, sticky="w", pady=1)
+        self.lbl_valor_final_caixa = ttk.Label(resultado_frame, text="R$ 0,00", font=("Segoe UI", 9, "bold"))
+        self.lbl_valor_final_caixa.grid(row=0, column=1, sticky="e", pady=1)
 
-        ttk.Label(resultado_frame, text="DiferenÃ§a (Caixa - CÃ©d):", font=("Segoe UI", 9)).grid(row=1, column=0, sticky="w", pady=2)
-        self.lbl_diferenca = ttk.Label(resultado_frame, text="R$ 0,00", font=("Segoe UI", 10, "bold"))
-        self.lbl_diferenca.grid(row=1, column=1, sticky="e", pady=2)
+        ttk.Label(resultado_frame, text="Diferen?a (Caixa - C?d):", font=("Segoe UI", 8)).grid(row=1, column=0, sticky="w", pady=1)
+        self.lbl_diferenca = ttk.Label(resultado_frame, text="R$ 0,00", font=("Segoe UI", 9, "bold"))
+        self.lbl_diferenca.grid(row=1, column=1, sticky="e", pady=1)
 
-        ttk.Label(resultado_frame, text="Resultado LÃ­quido:", font=("Segoe UI", 9, "bold")).grid(row=2, column=0, sticky="w", pady=(8, 2))
-        self.lbl_resultado_liquido = ttk.Label(resultado_frame, text="R$ 0,00", font=("Segoe UI", 12, "bold"))
-        self.lbl_resultado_liquido.grid(row=2, column=1, sticky="e", pady=(8, 2))
+        ttk.Label(resultado_frame, text="Resultado L?quido:", font=("Segoe UI", 8, "bold")).grid(row=2, column=0, sticky="w", pady=(4, 1))
+        self.lbl_resultado_liquido = ttk.Label(resultado_frame, text="R$ 0,00", font=("Segoe UI", 11, "bold"))
+        self.lbl_resultado_liquido.grid(row=2, column=1, sticky="e", pady=(4, 1))
 
         botoes_frame = ttk.Frame(page_card, style="Card.TFrame")
         botoes_frame.grid(row=4, column=0, sticky="ew")
@@ -12957,8 +13153,8 @@ class DespesasPage(PageBase):
         ]
 
         for i, (texto, estilo, comando) in enumerate(botoes):
-            btn = ttk.Button(botoes_frame, text=texto, style=estilo, command=comando, width=14)
-            btn.grid(row=0, column=i, sticky="ew", padx=2, ipady=4)
+            btn = ttk.Button(botoes_frame, text=texto, style=estilo, command=comando, width=12)
+            btn.grid(row=0, column=i, sticky="ew", padx=1, ipady=2)
 
         # carrega dados
         self.refresh_comboboxes()
@@ -13333,8 +13529,17 @@ class DespesasPage(PageBase):
         if hasattr(self, "lbl_rota_chip"):
             self.lbl_rota_chip.config(text=prog)
 
+        try:
+            self._sync_programacao_from_api_desktop(prog, silent=True)
+        except Exception:
+            logging.debug("Falha ignorada")
+
         self._load_despesas(prog)
         self._load_programacao_extras(prog)
+        try:
+            self._calcular_km_media()
+        except Exception:
+            logging.debug("Falha ignorada")
         self._calc_valor_dinheiro()
         self._update_resumo_financeiro()
         status = self._get_prestacao_status(prog)
@@ -13399,6 +13604,9 @@ class DespesasPage(PageBase):
         has_media_carregada = False
         has_caixa_final = False
         has_nf_preco = False
+        has_mort_aves = False
+        has_mort_kg = False
+        has_obs_transbordo = False
 
         with get_db() as conn:
             cur = conn.cursor()
@@ -13422,6 +13630,9 @@ class DespesasPage(PageBase):
             has_aves_caixa_final = "aves_caixa_final" in cols_all
             has_qnt_aves_caixa_final = "qnt_aves_caixa_final" in cols_all
             has_caixa_final = has_aves_caixa_final or has_qnt_aves_caixa_final
+            has_mort_aves = "mortalidade_transbordo_aves" in cols_all
+            has_mort_kg = "mortalidade_transbordo_kg" in cols_all
+            has_obs_transbordo = "obs_transbordo" in cols_all
 
             select_cols = [
                 "motorista",
@@ -13454,6 +13665,12 @@ class DespesasPage(PageBase):
                 select_cols.append("COALESCE(qnt_aves_caixa_final, 0) as caixa_final")
             if has_rota_obs:
                 select_cols.append("rota_observacao")
+            if has_mort_aves:
+                select_cols.append("COALESCE(mortalidade_transbordo_aves,0) as mortalidade_transbordo_aves")
+            if has_mort_kg:
+                select_cols.append("COALESCE(mortalidade_transbordo_kg,0) as mortalidade_transbordo_kg")
+            if has_obs_transbordo:
+                select_cols.append("COALESCE(obs_transbordo,'') as obs_transbordo")
 
             try:
                 cur.execute(f"""
@@ -13526,6 +13743,19 @@ class DespesasPage(PageBase):
         rota_obs = ""
         if has_rota_obs:
             rota_obs = row[idx] or ""; idx += 1
+        mort_aves_transb = 0
+        mort_kg_transb = 0.0
+        obs_transb = ""
+        if has_mort_aves:
+            mort_aves_transb = safe_int(row[idx], 0); idx += 1
+        if has_mort_kg:
+            mort_kg_transb = safe_float(row[idx], 0.0); idx += 1
+        if has_obs_transbordo:
+            obs_transb = str(row[idx] or ""); idx += 1
+
+        self._nf_mort_aves = mort_aves_transb
+        self._nf_mort_kg = mort_kg_transb
+        self._nf_obs_transbordo = obs_transb
 
         self._data_saida, self._hora_saida = normalize_date_time_components(self._data_saida, self._hora_saida)
         self._data_chegada, self._hora_chegada = normalize_date_time_components(self._data_chegada, self._hora_chegada)
@@ -14047,6 +14277,10 @@ class DespesasPage(PageBase):
         nf_kg = safe_float(getattr(self, "ent_nf_kg", None).get() if getattr(self, "ent_nf_kg", None) else 0, 0.0)
         nf_preco = safe_float(getattr(self, "ent_nf_preco", None).get() if getattr(self, "ent_nf_preco", None) else 0, 0.0)
         kg_vendido = safe_float(getattr(self, "ent_nf_kg_vendido", None).get() if getattr(self, "ent_nf_kg_vendido", None) else 0, 0.0)
+        mort_aves = safe_int(getattr(self, "_nf_mort_aves", 0), 0)
+        mort_kg = safe_float(getattr(self, "_nf_mort_kg", 0.0), 0.0)
+        obs_transb = str(getattr(self, "_nf_obs_transbordo", "") or "").strip()
+        kg_nf_util = max(nf_kg - mort_kg, 0.0)
 
         compra_total = nf_kg * nf_preco
         preco_medio_venda = self._calc_preco_medio_venda(self._current_programacao or "")
@@ -14082,6 +14316,18 @@ class DespesasPage(PageBase):
         self.lbl_nf_desp_total.config(text=f"Despesas da rota: {self._fmt_money(despesas_rota)}")
         self.lbl_nf_lucro_bruto.config(text=f"Lucro bruto: {self._fmt_money(lucro_bruto)}")
         self.lbl_nf_lucro_liquido.config(text=f"Lucro liquido: {self._fmt_money(lucro_liquido)}")
+        if hasattr(self, "lbl_nf_mort_aves"):
+            self.lbl_nf_mort_aves.config(text=f"Mortalidade (aves): {mort_aves}")
+        if hasattr(self, "lbl_nf_mort_kg"):
+            self.lbl_nf_mort_kg.config(
+                text=f"Mortalidade (KG): {mort_kg:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            )
+        if hasattr(self, "lbl_nf_kg_util"):
+            self.lbl_nf_kg_util.config(
+                text=f"KG útil NF (NF - mortalidade): {kg_nf_util:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            )
+        if hasattr(self, "lbl_nf_obs_transb"):
+            self.lbl_nf_obs_transb.config(text=f"Obs transbordo: {obs_transb or '-'}")
 
         if receita_estimada <= 0:
             cor_margem = "#6B7280"   # cinza (sem base de receita)
@@ -14253,6 +14499,46 @@ class DespesasPage(PageBase):
 
         return codigo, senha
 
+    def _sync_programacao_from_api_desktop(self, prog: str, silent: bool = True) -> bool:
+        """
+        Sincroniza rota + clientes usando endpoint desktop protegido por ROTA_SECRET.
+        Não exige login de motorista e mantém o fluxo estação<->servidor.
+        """
+        prog = upper(str(prog or "").strip())
+        if not prog:
+            return False
+
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if not desktop_secret:
+            return False
+
+        try:
+            resposta = _call_api(
+                "GET",
+                f"desktop/rotas/{prog}",
+                extra_headers={"X-Desktop-Secret": desktop_secret},
+            )
+            rota = resposta.get("rota") if isinstance(resposta, dict) else None
+            clientes = resposta.get("clientes") if isinstance(resposta, dict) else []
+            if not isinstance(rota, dict):
+                return False
+
+            with get_db() as conn:
+                cur = conn.cursor()
+                self._apply_api_programacao(cur, prog, rota)
+                self._apply_api_clientes(cur, prog, clientes or [])
+                conn.commit()
+            return True
+        except Exception:
+            logging.debug("Falha ao sincronizar programação via endpoint desktop", exc_info=True)
+            if not silent:
+                messagebox.showwarning(
+                    "Sincronizacao",
+                    "Nao foi possivel sincronizar agora com a API central.\n"
+                    "A tela sera carregada com os dados locais.",
+                )
+            return False
+
     def _fetch_motorista_codigo_hint(self, prog: str) -> str:
         try:
             with get_db() as conn:
@@ -14299,6 +14585,12 @@ class DespesasPage(PageBase):
         nf_saldo = _pick("nf_saldo")
         media_carregada = self._normalize_media_kg_ave(_pick("media", "media_carregada", "media_base"))
         caixa_final = _pick("caixa_final", "qnt_aves_caixa_final", "aves_caixa_final")
+        data_saida_raw = _pick("data_saida", "saida_data")
+        hora_saida_raw = _pick("hora_saida", "saida_hora")
+        data_chegada_raw = _pick("data_chegada", "chegada_data")
+        hora_chegada_raw = _pick("hora_chegada", "chegada_hora")
+        data_saida_n, hora_saida_n = normalize_date_time_components(data_saida_raw, hora_saida_raw)
+        data_chegada_n, hora_chegada_n = normalize_date_time_components(data_chegada_raw, hora_chegada_raw)
 
         # Se a API nao trouxer saldo, calcula com base no carregado.
         if nf_saldo in (None, ""):
@@ -14310,6 +14602,7 @@ class DespesasPage(PageBase):
         valores_por_campo = {
             # status operacional da rota
             "status": _pick("status_operacional", "status"),
+            "num_nf": nf_numero,
             "nf_numero": nf_numero,
             "nf_kg": nf_kg,
             "nf_preco": nf_preco,
@@ -14327,10 +14620,10 @@ class DespesasPage(PageBase):
             "media_km_l": _pick("media_km_l"),
             "custo_km": _pick("custo_km"),
             # datas/horas: API mobile usa saida_*/chegada_* e o desktop usa data_*/hora_*
-            "data_saida": _pick("data_saida", "saida_data"),
-            "hora_saida": _pick("hora_saida", "saida_hora"),
-            "data_chegada": _pick("data_chegada", "chegada_data"),
-            "hora_chegada": _pick("hora_chegada", "chegada_hora"),
+            "data_saida": data_saida_n or "",
+            "hora_saida": hora_saida_n or "",
+            "data_chegada": data_chegada_n or "",
+            "hora_chegada": hora_chegada_n or "",
             # local de carregamento (compatibilidade entre esquemas)
             "local_carregamento": _pick("local_carregado", "local_carregamento", "granja_carregada", "local_carreg"),
             "granja_carregada": _pick("local_carregado", "local_carregamento", "granja_carregada", "local_carreg"),
@@ -14344,6 +14637,10 @@ class DespesasPage(PageBase):
             "caixas_estimado": _pick("caixas_estimado"),
             "usuario_criacao": _pick("usuario_criacao", "criado_por", "created_by"),
             "usuario_ultima_edicao": _pick("usuario_ultima_edicao", "alterado_por", "updated_by"),
+            # Ocorrências / mortalidade no transbordo (origem APK)
+            "mortalidade_transbordo_aves": _pick("aves_mortas_transbordo", "mortalidade_transbordo_aves"),
+            "mortalidade_transbordo_kg": _pick("mortalidade_transbordo_kg"),
+            "obs_transbordo": _pick("obs_transbordo", "mortalidade_transbordo_obs"),
         }
         status_operacional_api = upper(str(rota.get("status_operacional") or "").strip())
         if status_operacional_api:
@@ -14516,6 +14813,9 @@ class DespesasPage(PageBase):
         nf_kg_carregado = _pick("nf_kg_carregado", "kg_carregado")
         nf_caixas = _pick("nf_caixas", "caixas_carregadas", "total_caixas")
         nf_kg_vendido = _pick("nf_kg_vendido", "kg_vendido")
+        mort_aves_transb = _pick("aves_mortas_transbordo", "mortalidade_transbordo_aves")
+        mort_kg_transb = _pick("mortalidade_transbordo_kg")
+        obs_transb = _pick("obs_transbordo", "mortalidade_transbordo_obs")
         nf_saldo = _pick("nf_saldo")
         media_carregada = self._normalize_media_kg_ave(_pick("media", "media_carregada", "media_base"))
         caixa_final = _pick("caixa_final", "qnt_aves_caixa_final", "aves_caixa_final")
@@ -14539,6 +14839,9 @@ class DespesasPage(PageBase):
             (_pick("media_km_l"), self.ent_media),
             (_pick("custo_km"), self.ent_custo_km),
         ]
+        self._nf_mort_aves = safe_int(mort_aves_transb, 0)
+        self._nf_mort_kg = safe_float(mort_kg_transb, 0.0)
+        self._nf_obs_transbordo = str(obs_transb or "")
         for valor, entry in campos:
             if not entry:
                 continue
@@ -14652,6 +14955,137 @@ class DespesasPage(PageBase):
             return False
         return True
 
+    def _collect_logistica_rastreio(self, prog: str) -> dict:
+        """
+        Consolida rastreabilidade de substituições e transferências para
+        validar fechamento sem caixas "soltas".
+        """
+        out = {
+            "pend_substituicao": 0,
+            "pend_transferencia": 0,
+            "transf_out": 0,
+            "transf_in": 0,
+            "base_cx": 0,
+            "atual_cx": 0,
+            "esperado_cx": 0,
+            "delta_cx": 0,
+            "itens_ok": True,
+            "resumo": [],
+        }
+        prog = upper(str(prog or "").strip())
+        if not prog:
+            return out
+
+        try:
+            with get_db() as conn:
+                cur = conn.cursor()
+
+                def _has_table(tn: str) -> bool:
+                    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (tn,))
+                    return bool(cur.fetchone())
+
+                # Substituição pendente bloqueia fechamento.
+                if _has_table("rota_substituicoes"):
+                    cur.execute(
+                        """
+                        SELECT COUNT(1)
+                        FROM rota_substituicoes
+                        WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))
+                          AND UPPER(TRIM(COALESCE(status,'')))='PENDENTE'
+                        """,
+                        (prog,),
+                    )
+                    out["pend_substituicao"] = safe_int((cur.fetchone() or [0])[0], 0)
+
+                # Transferências pendentes e totais ativos (origem/destino).
+                if _has_table("transferencias"):
+                    cur.execute(
+                        """
+                        SELECT
+                            SUM(CASE
+                                    WHEN UPPER(TRIM(COALESCE(status,'')))='PENDENTE'
+                                     AND (UPPER(TRIM(COALESCE(codigo_origem,'')))=UPPER(TRIM(?))
+                                       OR UPPER(TRIM(COALESCE(codigo_destino,'')))=UPPER(TRIM(?)))
+                                    THEN 1 ELSE 0
+                                END) AS pend,
+                            SUM(CASE
+                                    WHEN UPPER(TRIM(COALESCE(codigo_origem,'')))=UPPER(TRIM(?))
+                                     AND UPPER(TRIM(COALESCE(status,''))) IN ('PENDENTE','ACEITA','CONVERTIDA')
+                                    THEN COALESCE(qtd_caixas,0) ELSE 0
+                                END) AS out_cx,
+                            SUM(CASE
+                                    WHEN UPPER(TRIM(COALESCE(codigo_destino,'')))=UPPER(TRIM(?))
+                                     AND UPPER(TRIM(COALESCE(status,''))) IN ('PENDENTE','ACEITA','CONVERTIDA')
+                                    THEN COALESCE(qtd_caixas,0) ELSE 0
+                                END) AS in_cx
+                        FROM transferencias
+                        """,
+                        (prog, prog, prog, prog),
+                    )
+                    row = cur.fetchone() or [0, 0, 0]
+                    out["pend_transferencia"] = safe_int(row[0], 0)
+                    out["transf_out"] = safe_int(row[1], 0)
+                    out["transf_in"] = safe_int(row[2], 0)
+
+                # Conciliação de caixas da programação.
+                if _has_table("programacao_itens"):
+                    cur.execute("PRAGMA table_info(programacao_itens)")
+                    cols_it = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+                    has_cx_atual = "caixas_atual" in cols_it
+
+                    cur.execute(
+                        f"""
+                        SELECT
+                            COALESCE(SUM(COALESCE(qnt_caixas,0)),0) AS base_cx,
+                            COALESCE(SUM(COALESCE({"caixas_atual" if has_cx_atual else "qnt_caixas"},0)),0) AS atual_cx
+                        FROM programacao_itens
+                        WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))
+                        """,
+                        (prog,),
+                    )
+                    row = cur.fetchone() or [0, 0]
+                    out["base_cx"] = safe_int(row[0], 0)
+                    out["atual_cx"] = safe_int(row[1], 0)
+                    out["esperado_cx"] = max(out["base_cx"] - out["transf_out"] + out["transf_in"], 0)
+                    out["delta_cx"] = out["esperado_cx"] - out["atual_cx"]
+                    out["itens_ok"] = (abs(out["delta_cx"]) == 0)
+
+                out["resumo"] = [
+                    f"Substituições pendentes: {out['pend_substituicao']}",
+                    f"Transferências pendentes: {out['pend_transferencia']}",
+                    f"Transferência caixas (origem): {out['transf_out']} cx",
+                    f"Transferência caixas (destino): {out['transf_in']} cx",
+                    f"Caixas base: {out['base_cx']} cx",
+                    f"Caixas atuais: {out['atual_cx']} cx",
+                    f"Caixas esperadas (base - out + in): {out['esperado_cx']} cx",
+                    f"Delta caixas: {out['delta_cx']} cx",
+                ]
+        except Exception:
+            logging.debug("Falha ao consolidar rastreabilidade logística", exc_info=True)
+        return out
+
+    def _validar_fechamento_logistico(self, prog: str) -> tuple[bool, str]:
+        info = self._collect_logistica_rastreio(prog)
+        if safe_int(info.get("pend_substituicao"), 0) > 0:
+            return (
+                False,
+                "Não é possível finalizar a prestação:\n"
+                "existe substituição de rota pendente de aceite/recusa.",
+            )
+        if safe_int(info.get("pend_transferencia"), 0) > 0:
+            return (
+                False,
+                "Não é possível finalizar a prestação:\n"
+                "existem transferências de caixas pendentes.",
+            )
+        if not bool(info.get("itens_ok", True)):
+            return (
+                False,
+                "Inconsistência de caixas detectada para fechamento:\n"
+                + "\n".join(info.get("resumo") or []),
+            )
+        return True, ""
+
     def finalizar_prestacao_despesas(self):
         prog = self._current_programacao
         if not prog:
@@ -14661,6 +15095,11 @@ class DespesasPage(PageBase):
         status = self._get_prestacao_status(prog)
         if status == "FECHADA":
             messagebox.showinfo("PrestaÃ§Ã£o", "Esta prestaÃ§Ã£o jÃ¡ estÃ¡ FECHADA.")
+            return
+
+        ok_log, msg_log = self._validar_fechamento_logistico(prog)
+        if not ok_log:
+            messagebox.showerror("Fechamento bloqueado", msg_log)
             return
 
         if not messagebox.askyesno(
@@ -16035,23 +16474,64 @@ class EscalaPage(PageBase):
         self.lbl_esc_kpi_horas = ttk.Label(kpi_4, text="0,00", font=("Segoe UI", 13, "bold"), foreground="#7C3AED")
         self.lbl_esc_kpi_horas.grid(row=0, column=0, sticky="w")
 
+        txt_row = ttk.Frame(resumo, style="Card.TFrame")
+        txt_row.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        txt_row.grid_columnconfigure(0, weight=1)
+        txt_row.grid_columnconfigure(1, weight=1)
+
+        box_resumo = ttk.LabelFrame(txt_row, text=" Resumo Operacional ", padding=(10, 8))
+        box_resumo.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        box_resumo.grid_columnconfigure(0, weight=1)
+
+        box_reco = ttk.LabelFrame(txt_row, text=" Recomendações ", padding=(10, 8))
+        box_reco.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        box_reco.grid_columnconfigure(0, weight=1)
+
         self.lbl_resumo = ttk.Label(
-            resumo,
+            box_resumo,
             text="-",
             style="CardLabel.TLabel",
             justify="left",
-            wraplength=980,
+            wraplength=480,
         )
-        self.lbl_resumo.grid(row=2, column=0, sticky="w", pady=(6, 0))
+        self.lbl_resumo.grid(row=0, column=0, sticky="nw")
         self.lbl_recomendacoes = ttk.Label(
-            resumo,
+            box_reco,
             text="-",
             style="CardLabel.TLabel",
             justify="left",
-            wraplength=980,
+            wraplength=480,
             foreground="#1E3A8A",
         )
-        self.lbl_recomendacoes.grid(row=3, column=0, sticky="w", pady=(8, 0))
+        self.lbl_recomendacoes.grid(row=0, column=0, sticky="nw")
+
+        chart_wrap = ttk.Frame(resumo, style="Card.TFrame")
+        chart_wrap.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        chart_wrap.grid_columnconfigure(0, weight=1)
+        self.lbl_esc_chart_title = ttk.Label(
+            chart_wrap,
+            text="Carga de Horas por Motorista (top 8)",
+            style="CardLabel.TLabel",
+        )
+        self.lbl_esc_chart_title.grid(row=0, column=0, sticky="w")
+        self.cv_escala = tk.Canvas(
+            chart_wrap,
+            height=230,
+            bg="white",
+            highlightthickness=1,
+            highlightbackground="#E5E7EB",
+        )
+        self.cv_escala.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        self.cv_escala.bind("<Configure>", lambda _e: self._draw_escala_chart())
+        self.lbl_esc_chart_meta = ttk.Label(
+            chart_wrap,
+            text="-",
+            style="CardLabel.TLabel",
+            foreground="#4B5563",
+        )
+        self.lbl_esc_chart_meta.grid(row=2, column=0, sticky="w", pady=(4, 0))
+        self._esc_chart_data = []
+        resumo.bind("<Configure>", self._on_escala_resize)
 
         tabs = ttk.Notebook(self.body)
         tabs.grid(row=2, column=0, sticky="nsew")
@@ -16150,6 +16630,63 @@ class EscalaPage(PageBase):
             self.lbl_esc_kpi_horas.config(text=f"{safe_float(horas_medias, 0.0):.2f}".replace(".", ","))
         except Exception:
             logging.debug("Falha ignorada")
+
+    def _on_escala_resize(self, event=None):
+        try:
+            w = max(int(getattr(event, "width", 0) or 0), 700)
+            half_wrap = max(320, (w - 70) // 2)
+            self.lbl_resumo.configure(wraplength=half_wrap)
+            self.lbl_recomendacoes.configure(wraplength=half_wrap)
+            self._draw_escala_chart()
+        except Exception:
+            logging.debug("Falha ignorada")
+
+    def _draw_escala_chart(self):
+        cv = getattr(self, "cv_escala", None)
+        if not cv:
+            return
+        cv.delete("all")
+        data = list(getattr(self, "_esc_chart_data", []) or [])
+        if not data:
+            cv.create_text(12, 12, anchor="nw", text="Sem dados para o período selecionado.", fill="#6B7280", font=("Segoe UI", 9))
+            return
+
+        w = max(cv.winfo_width(), 360)
+        h = max(cv.winfo_height(), 160)
+        left = 10
+        right = w - 10
+        top = 10
+        bottom = h - 10
+        count = max(min(len(data), 8), 1)
+        usable_h = max(bottom - top, 80)
+        # Ajusta altura de linha automaticamente para não cortar barras.
+        line_h = max(14, min(22, int((usable_h - (count - 1) * 2) / count)))
+        row_gap = 2
+        max_horas = max((safe_float(item.get("horas", 0.0), 0.0) for item in data), default=0.0)
+        max_horas = max(max_horas, 1.0)
+        name_w = 145
+        val_w = 52
+        bar_x0 = left + name_w
+        bar_x1 = right - val_w
+        usable_w = max(bar_x1 - bar_x0, 48)
+
+        for idx, item in enumerate(data[:8]):
+            y = top + idx * (line_h + row_gap)
+            if y + line_h > bottom:
+                break
+            nome = str(item.get("nome", "-"))[:22]
+            horas = safe_float(item.get("horas", 0.0), 0.0)
+            dias = safe_int(item.get("dias", 0), 0)
+            ratio = min(max(horas / max_horas, 0.0), 1.0)
+            fill_w = int(usable_w * ratio)
+            color = "#7C3AED" if ratio >= 0.8 else ("#2563EB" if ratio >= 0.5 else "#16A34A")
+            y_mid = y + (line_h // 2)
+
+            cv.create_text(left, y_mid, anchor="w", text=nome, fill="#111827", font=("Segoe UI", 8, "bold"))
+            cv.create_rectangle(bar_x0, y + 2, bar_x1, y + line_h - 2, fill="#F3F4F6", outline="#E5E7EB")
+            cv.create_rectangle(bar_x0, y + 2, bar_x0 + fill_w, y + line_h - 2, fill=color, outline=color)
+            cv.create_text(bar_x1 - 6, y_mid, anchor="e", text=f"{dias}d", fill="#374151", font=("Segoe UI", 8))
+            cv.create_text(right - 2, y_mid, anchor="e", text=f"{horas:.1f}h", fill="#111827", font=("Segoe UI", 8))
 
     def _mostrar_detalhe_carga(self, tree: ttk.Treeview, perfil: str):
         try:
@@ -16534,6 +17071,7 @@ class EscalaPage(PageBase):
                         "local_ref": "-",
                         "last_dt": None,
                         "local_counts": {},
+                        "dias_set": set(),
                     },
                 )
                 m["rotas"] += 1
@@ -16543,6 +17081,22 @@ class EscalaPage(PageBase):
                 if isinstance(dt_prog, datetime):
                     if m.get("last_dt") is None or dt_prog > m["last_dt"]:
                         m["last_dt"] = dt_prog
+                    try:
+                        m["dias_set"].add(dt_prog.date().isoformat())
+                    except Exception:
+                        logging.debug("Falha ignorada")
+                dt_saida_ref = self._parse_data_hora(data_saida, hora_saida)
+                dt_cheg_ref = self._parse_data_hora(data_chegada, hora_chegada)
+                if isinstance(dt_saida_ref, datetime):
+                    try:
+                        m["dias_set"].add(dt_saida_ref.date().isoformat())
+                    except Exception:
+                        logging.debug("Falha ignorada")
+                if isinstance(dt_cheg_ref, datetime):
+                    try:
+                        m["dias_set"].add(dt_cheg_ref.date().isoformat())
+                    except Exception:
+                        logging.debug("Falha ignorada")
                 if local_rota:
                     lc = m["local_counts"]
                     lc[local_rota] = int(lc.get(local_rota, 0)) + 1
@@ -16666,10 +17220,12 @@ class EscalaPage(PageBase):
             qtd_ajudantes = len(aj_rows)
             total_km = sum(float(d.get("km_rodado", 0.0) or 0.0) for _n, d in mot_rows)
             total_horas = sum(float(d.get("horas_trab", 0.0) or 0.0) for _n, d in mot_rows)
+            total_dias_trab = sum(len((d.get("dias_set") or set())) for _n, d in mot_rows)
             if qtd_motoristas > 0:
                 media = qtd_rotas / float(qtd_motoristas)
                 media_km = total_km / float(qtd_motoristas)
                 media_horas = total_horas / float(qtd_motoristas)
+                media_dias = total_dias_trab / float(qtd_motoristas)
                 mais_sobrecarregado = mot_rows[0][0] if mot_rows else "-"
                 carga_max = float(mot_rows[0][1].get("rotas", 0) or 0) if mot_rows else 0.0
                 nivel = "EQUILIBRADA"
@@ -16685,6 +17241,7 @@ class EscalaPage(PageBase):
                     f"Rotas no filtro: {qtd_rotas} | Motoristas: {qtd_motoristas} | Ajudantes: {qtd_ajudantes}\n"
                     f"Média por motorista: {media:.2f} | KM total: {total_km:.1f} | KM médio/motorista: {media_km:.1f}\n"
                     f"Horas totais: {total_horas:.2f} | Horas médias/motorista: {media_horas:.2f}\n"
+                    f"Dias trabalhados (motoristas): {total_dias_trab} | Média de dias/motorista: {media_dias:.2f}\n"
                     "Legenda visual: verde=equilibrado | laranja=alerta | vermelho=sobrecarga"
                 )
                 self.lbl_resumo.config(foreground=cor_nivel)
@@ -16695,6 +17252,26 @@ class EscalaPage(PageBase):
                 self._set_kpi_escala(qtd_rotas, 0, 0.0, 0.0)
 
             self.lbl_resumo.config(text=msg)
+            chart_rows = sorted(
+                [
+                    {
+                        "nome": n,
+                        "horas": float(d.get("horas_trab", 0.0) or 0.0),
+                        "dias": len((d.get("dias_set") or set())),
+                    }
+                    for n, d in mot_rows
+                ],
+                key=lambda x: (-x["horas"], -x["dias"], x["nome"]),
+            )[:8]
+            self._esc_chart_data = chart_rows
+            self._draw_escala_chart()
+            if qtd_motoristas > 0:
+                dias_media_txt = f"{(total_dias_trab / float(qtd_motoristas)):.2f}".replace(".", ",")
+            else:
+                dias_media_txt = "0,00"
+            self.lbl_esc_chart_meta.config(
+                text=f"Leitura de produtividade: horas acumuladas + dias ativos por motorista | Média de dias: {dias_media_txt}"
+            )
             self.lbl_recomendacoes.config(
                 text=self._recomendacoes_distribuicao(qtd_rotas, mot_rows, aj_rows) + "\n\nDuplo clique em uma linha para abrir detalhe da carga."
             )
@@ -17736,14 +18313,18 @@ class RelatoriosPage(PageBase):
                 media_expr = "COALESCE(media_km_l,0)" if "media_km_l" in cols_p else "0"
                 custo_expr = "COALESCE(custo_km,0)" if "custo_km" in cols_p else "0"
                 adiant_expr = "COALESCE(adiantamento,0)" if "adiantamento" in cols_p else "0"
+                mort_aves_expr = "COALESCE(mortalidade_transbordo_aves,0)" if "mortalidade_transbordo_aves" in cols_p else "0"
+                mort_kg_expr = "COALESCE(mortalidade_transbordo_kg,0)" if "mortalidade_transbordo_kg" in cols_p else "0"
+                obs_transb_expr = "COALESCE(obs_transbordo,'')" if "obs_transbordo" in cols_p else "''"
                 cur.execute(f"""
                     SELECT COALESCE(data_criacao,''), COALESCE(motorista,''), COALESCE(veiculo,''), COALESCE(equipe,''),
-                           {status_expr}, {prest_expr}, {km_expr}, {media_expr}, {custo_expr}, {adiant_expr}
+                           {status_expr}, {prest_expr}, {km_expr}, {media_expr}, {custo_expr}, {adiant_expr},
+                           {mort_aves_expr}, {mort_kg_expr}, {obs_transb_expr}
                     FROM programacoes
                     WHERE codigo_programacao=?
                     LIMIT 1
                 """, (prog,))
-                meta = cur.fetchone() or ("", "", "", "", "", "", 0, 0, 0, 0)
+                meta = cur.fetchone() or ("", "", "", "", "", "", 0, 0, 0, 0, 0, 0.0, "")
 
                 cur.execute("SELECT COALESCE(SUM(valor),0) FROM recebimentos WHERE codigo_programacao=?", (prog,))
                 total_receb = safe_float((cur.fetchone() or [0])[0], 0.0)
@@ -17773,11 +18354,45 @@ class RelatoriosPage(PageBase):
                 + "Verifique a estrutura do banco e tente novamente."
             )
 
-        data_criacao, motorista, veiculo, equipe, status, prest, km_rodado, media_km_l, custo_km, adiantamento = meta
+        (
+            data_criacao,
+            motorista,
+            veiculo,
+            equipe,
+            status,
+            prest,
+            km_rodado,
+            media_km_l,
+            custo_km,
+            adiantamento,
+            mort_aves,
+            mort_kg,
+            obs_transb,
+        ) = meta
         equipe_txt = resolve_equipe_nomes(equipe)
         entradas = total_receb + safe_float(adiantamento, 0.0)
         saidas = total_desp
         resultado = entradas - saidas
+        log_info = self._collect_logistica_rastreio(prog)
+        kg_nf_util = 0.0
+        try:
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    SELECT COALESCE(nf_kg,0)
+                    FROM programacoes
+                    WHERE codigo_programacao=?
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (prog,),
+                )
+                row_nf = cur.fetchone()
+                nf_kg_base = safe_float((row_nf[0] if row_nf else 0.0), 0.0)
+                kg_nf_util = max(nf_kg_base - safe_float(mort_kg, 0.0), 0.0)
+        except Exception:
+            logging.debug("Falha ignorada")
 
         lines = []
         lines.append("=" * 118)
@@ -17810,6 +18425,24 @@ class RelatoriosPage(PageBase):
             lines.append(f"{upper(cat or 'OUTROS')[:20]:<20} {upper(desc or '-')[:72]:<72} {self._fmt_rel_money(valor):>14}")
         if not desp:
             lines.append("Sem despesas.")
+        lines.append("-" * 118)
+        lines.append("[RASTREABILIDADE LOGÍSTICA]")
+        for ln in (log_info.get("resumo") or []):
+            lines.append(str(ln))
+        lines.append(
+            "Conciliação de caixas: "
+            + ("OK" if bool(log_info.get("itens_ok", True)) else "DIVERGENTE")
+        )
+        lines.append("-" * 118)
+        lines.append("[OCORRÊNCIAS DE TRANSBORDO / MORTALIDADE]")
+        lines.append(f"Mortalidade (aves): {safe_int(mort_aves, 0)}")
+        lines.append(
+            f"Mortalidade (KG): {safe_float(mort_kg, 0.0):.2f}".replace(".", ",")
+        )
+        lines.append(
+            f"KG útil NF (NF - mortalidade): {safe_float(kg_nf_util, 0.0):.2f}".replace(".", ",")
+        )
+        lines.append(f"Obs transbordo: {str(obs_transb or '-').strip() or '-'}")
         lines.append("-" * 118)
         lines.append("Conferido por: ____________________________________   Data: ____/____/________")
         return "\n".join(lines)

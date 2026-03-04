@@ -34,7 +34,7 @@ if not SECRET_KEY:
     raise RuntimeError("ROTA_SECRET nao definido. Configure a variavel de ambiente para iniciar a API.")
 TOKEN_TTL_SECONDS = 60 * 60 * 24 * 7  # 7 dias
 
-app = FastAPI(title="Rota Granja API", version="1.1.3")
+app = FastAPI(title="Rota Granja API", version="1.1.4")
 
 def _cors_origins_from_env() -> List[str]:
     raw = os.environ.get("ROTA_CORS_ORIGINS", "").strip()
@@ -3465,6 +3465,41 @@ def rota_detalhe_desktop(codigo_programacao: str, _ok: bool = Depends(_require_d
         )
         controles = cur.fetchall()
 
+        # Último log por cliente/pedido para enriquecer rastreabilidade
+        log_map = {}
+        try:
+            cur.execute(
+                """
+                SELECT cod_cliente, COALESCE(pedido, '') AS pedido, payload_json, created_at, id
+                FROM programacao_itens_log
+                WHERE codigo_programacao=?
+                ORDER BY id DESC
+                LIMIT 5000
+                """,
+                (codigo_programacao,),
+            )
+            for lr in (cur.fetchall() or []):
+                cod_l = str(lr["cod_cliente"] or "").strip().upper()
+                ped_l = _norm_pedido_key(lr["pedido"])
+                key_l = (cod_l, ped_l)
+                if key_l in log_map:
+                    continue
+                payload_raw = lr["payload_json"] or ""
+                payload_obj = {}
+                if payload_raw:
+                    try:
+                        tmp = json.loads(payload_raw)
+                        if isinstance(tmp, dict):
+                            payload_obj = tmp
+                    except Exception:
+                        payload_obj = {}
+                log_map[key_l] = {
+                    "created_at": str(lr["created_at"] or ""),
+                    "payload": payload_obj,
+                }
+        except Exception:
+            log_map = {}
+
         rota = row_to_dict(pr)
         rota = _apply_equipe_nome(rota, equipes_map, cur)
         rota = _decorate_rota_row(rota, cur)
@@ -3501,8 +3536,37 @@ def rota_detalhe_desktop(codigo_programacao: str, _ok: bool = Depends(_require_d
                 d["alteracao_detalhe"] = c.get("alteracao_detalhe")
                 d["caixas_atual"] = c.get("caixas_atual")
                 d["preco_atual"] = c.get("preco_atual")
-                d["alterado_em"] = c.get("alterado_em")
+                d["alterado_em"] = c.get("alterado_em") or c.get("updated_at")
                 d["alterado_por"] = c.get("alterado_por")
+
+            # Fallback por logs do item (quando controle não tiver horário/local completos)
+            lg = log_map.get((cod, ped))
+            if lg:
+                payload_obj = lg.get("payload") if isinstance(lg, dict) else {}
+                if not isinstance(payload_obj, dict):
+                    payload_obj = {}
+                created_at = str(lg.get("created_at") or "")
+                if not d.get("alterado_em"):
+                    d["alterado_em"] = created_at
+                d["evento_datahora"] = created_at
+                d["lat_evento"] = (
+                    payload_obj.get("lat_evento")
+                    if payload_obj.get("lat_evento") not in (None, "")
+                    else (payload_obj.get("latitude") if payload_obj.get("latitude") not in (None, "") else payload_obj.get("lat"))
+                )
+                d["lon_evento"] = (
+                    payload_obj.get("lon_evento")
+                    if payload_obj.get("lon_evento") not in (None, "")
+                    else (
+                        payload_obj.get("longitude")
+                        if payload_obj.get("longitude") not in (None, "")
+                        else (payload_obj.get("lon") if payload_obj.get("lon") not in (None, "") else payload_obj.get("lng"))
+                    )
+                )
+                d["endereco_evento"] = payload_obj.get("endereco") or payload_obj.get("endereco_cliente") or ""
+                d["cidade_evento"] = payload_obj.get("cidade") or payload_obj.get("cidade_cliente") or ""
+                d["bairro_evento"] = payload_obj.get("bairro") or payload_obj.get("bairro_cliente") or ""
+
             clientes.append(d)
 
         return {"rota": rota, "clientes": clientes}
