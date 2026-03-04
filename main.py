@@ -15,6 +15,7 @@ import urllib.parse
 import urllib.request
 import webbrowser
 import shutil
+import subprocess
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from tkinter import filedialog, messagebox, simpledialog, ttk
 try:
@@ -3846,6 +3847,80 @@ class HomePage(PageBase):
         url = self._remote_setup_url or SETUP_DOWNLOAD_URL
         self._open_url_safe(url, "download")
 
+    def _can_auto_update_from_url(self, url: str) -> bool:
+        try:
+            u = str(url or "").strip().lower()
+            if not u:
+                return False
+            if "releases/latest" in u or u.endswith("/releases"):
+                return False
+            parsed = urllib.parse.urlparse(u)
+            path = (parsed.path or "").lower()
+            return path.endswith(".exe")
+        except Exception:
+            return False
+
+    def _download_setup_to_temp(self, url: str, version: str) -> str:
+        u = str(url or "").strip()
+        if not u:
+            raise RuntimeError("URL de setup não configurada.")
+        base_tmp = os.path.join(tempfile.gettempdir(), "RotaHubDesktop")
+        os.makedirs(base_tmp, exist_ok=True)
+        fname = f"RotaHubDesktop_Setup_{(version or 'latest').replace('/', '_')}.exe"
+        dst = os.path.join(base_tmp, fname)
+        req = urllib.request.Request(
+            u,
+            method="GET",
+            headers={"User-Agent": "RotaHubDesktop-Updater/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=90) as resp:
+            data = resp.read()
+        if not data:
+            raise RuntimeError("Download vazio do instalador.")
+        with open(dst, "wb") as f:
+            f.write(data)
+        return dst
+
+    def _run_setup_installer(self, setup_path: str):
+        if not os.path.exists(setup_path):
+            raise RuntimeError("Arquivo do instalador não encontrado.")
+        if os.name == "nt":
+            os.startfile(setup_path)  # type: ignore[attr-defined]
+        else:
+            subprocess.Popen([setup_path], shell=False)
+
+    def _update_now(self):
+        url = self._remote_setup_url or SETUP_DOWNLOAD_URL
+        if not url:
+            messagebox.showwarning(
+                "Atualização",
+                "Setup não configurado no manifesto.\nUse 'Baixar Setup' com um link válido para o .exe.",
+            )
+            return
+
+        if not self._can_auto_update_from_url(url):
+            messagebox.showinfo(
+                "Atualização",
+                "Não foi possível atualizar automaticamente porque o link atual não aponta para um arquivo .exe.\n\n"
+                "Use o botão 'Baixar Setup' para baixar manualmente.",
+            )
+            self._open_setup()
+            return
+
+        try:
+            target_v = self._remote_version or "latest"
+            self.set_status(f"STATUS: Baixando atualização {target_v}...")
+            setup_path = self._download_setup_to_temp(url, target_v)
+            self._run_setup_installer(setup_path)
+            messagebox.showinfo(
+                "Atualização",
+                "Instalador aberto com sucesso.\nConclua a instalação para atualizar o Desktop.",
+            )
+        except Exception as e:
+            messagebox.showerror("ERRO", f"Falha ao atualizar automaticamente:\n{e}")
+        finally:
+            self.set_status("STATUS: Atualização finalizada (manual/automática).")
+
     def _open_changelog(self):
         url = self._remote_changelog_url or CHANGELOG_URL
         self._open_url_safe(url, "histórico")
@@ -4033,11 +4108,13 @@ class HomePage(PageBase):
                 remote_v = self._version_tuple(self._remote_version)
                 is_candidate = (remote_v > local_v) and self._is_same_release_line(local_v, remote_v)
                 if is_candidate:
-                    messagebox.showinfo(
+                    ask = messagebox.askyesno(
                         "Atualização disponível",
                         f"Versão local: {APP_VERSION}\nVersão disponível: {self._remote_version}\n\n"
-                        "Use o botão 'Baixar Setup' para atualizar.",
+                        "Deseja atualizar agora?",
                     )
+                    if ask:
+                        self._update_now()
                 else:
                     messagebox.showinfo("Atualizações", f"Você já está na versão mais recente ({APP_VERSION}).")
         except Exception as e:
