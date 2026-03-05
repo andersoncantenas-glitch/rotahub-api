@@ -7913,7 +7913,7 @@ class ClientesImportPage(ttk.Frame):
             try:
                 resp = _call_api(
                     "GET",
-                    "desktop/clientes/base?ordem=nome&limit=5000",
+                    "desktop/clientes/base?ordem=nome&limit=1000",
                     extra_headers={"X-Desktop-Secret": desktop_secret},
                 )
                 if isinstance(resp, list):
@@ -10028,7 +10028,7 @@ class ProgramacaoPage(PageBase):
 
                 resp_c = _call_api(
                     "GET",
-                    "desktop/clientes/base?ordem=codigo&limit=5000",
+                    "desktop/clientes/base?ordem=codigo&limit=1000",
                     extra_headers={"X-Desktop-Secret": desktop_secret},
                 )
                 rows_c = resp_c if isinstance(resp_c, list) else []
