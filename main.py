@@ -2449,13 +2449,49 @@ class CadastroCRUD(ttk.Frame):
             return
         if not self.definir_acesso_app_motorista(liberar):
             return
-        if self._has_status_field and self.selected_id:
-            self._set("status", "ATIVO" if liberar else "INATIVO")
-            self._edit_mode = "status"
-            self.salvar()
+        ref = self._selected_motorista_ref()
+        if not ref:
+            return
+        try:
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "UPDATE motoristas SET status=? WHERE id=?",
+                    ("ATIVO" if liberar else "INATIVO", int(ref.get("id"))),
+                )
+        except Exception:
+            logging.debug("Falha ao atualizar status local do motorista apos alterar acesso", exc_info=True)
+        self.carregar()
+        self.limpar()
 
-    def _upsert_motorista_acesso_na_api(self, codigo: str, liberar: bool, admin_nome: str, motivo: str, desktop_secret: str) -> bool:
-        nome = self._norm(self._get("nome"))
+    def _selected_motorista_ref(self):
+        if self.table != "motoristas":
+            return None
+        sel = self.tree.selection()
+        if not sel:
+            return None
+        vals = list(self.tree.item(sel[0], "values") or [])
+        if not vals:
+            return None
+        cols = [upper(c) for c in (self.tree["columns"] or [])]
+        def _val(col_name: str, default=""):
+            try:
+                idx = cols.index(upper(col_name))
+                return str(vals[idx] if idx < len(vals) else default)
+            except Exception:
+                return default
+        return {
+            "id": safe_int(_val("ID", "0"), 0),
+            "codigo": self._norm(_val("CODIGO")),
+            "nome": self._norm(_val("NOME")),
+            "cpf": self._norm(_val("CPF")),
+            "telefone": self._norm(_val("TELEFONE")),
+            "status": self._norm(_val("STATUS", "ATIVO")),
+        }
+
+    def _upsert_motorista_acesso_na_api(self, codigo: str, liberar: bool, admin_nome: str, motivo: str, desktop_secret: str, ref=None) -> bool:
+        ref = ref or {}
+        nome = self._norm(ref.get("nome") or "")
         if not nome and self.selected_id:
             try:
                 with get_db() as conn:
@@ -2468,14 +2504,14 @@ class CadastroCRUD(ttk.Frame):
         if not codigo or not nome:
             return False
 
-        status_ui = upper(self._norm(self._get("status")) or "")
+        status_ui = upper(self._norm(ref.get("status") or "") or "")
         status_api = "DESATIVADO" if status_ui in {"INATIVO", "DESATIVADO", "BLOQUEADO"} else "ATIVO"
 
         payload = {
             "codigo": codigo,
             "nome": nome,
-            "telefone": self._norm(self._get("telefone")),
-            "cpf": self._norm(self._get("cpf")),
+            "telefone": self._norm(ref.get("telefone") or self._get("telefone")),
+            "cpf": self._norm(ref.get("cpf") or self._get("cpf")),
             "status": status_api,
             "acesso_liberado": bool(liberar),
             "acesso_liberado_por": admin_nome,
@@ -3720,11 +3756,13 @@ class CadastroCRUD(ttk.Frame):
         if not self._is_admin:
             messagebox.showwarning("ATENÇÃO", "Somente ADMIN pode alterar acesso ao app.")
             return False
-        if not self.selected_id:
+        ref = self._selected_motorista_ref()
+        if not ref:
             messagebox.showwarning("ATENÇÃO", "SELECIONE UM MOTORISTA NA TABELA.")
             return False
+        self.selected_id = safe_int(ref.get("id"), 0) or self.selected_id
 
-        codigo = self._norm(self._get("codigo"))
+        codigo = self._norm(ref.get("codigo"))
         if not codigo:
             messagebox.showwarning("ATENÇÃO", "Código do motorista não encontrado no item selecionado.")
             return False
@@ -3771,6 +3809,7 @@ class CadastroCRUD(ttk.Frame):
                     admin_nome=admin_nome,
                     motivo=payload.get("motivo", ""),
                     desktop_secret=desktop_secret,
+                    ref=ref,
                 )
                 if ok_sync:
                     messagebox.showinfo("OK", f"Motorista {codigo} sincronizado na API e acesso atualizado.")
