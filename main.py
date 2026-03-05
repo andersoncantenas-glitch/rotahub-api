@@ -4616,6 +4616,7 @@ class HomePage(PageBase):
 
     def _update_api_status(self):
         online = False
+        integracao_ok = None
         api_host = "-"
         try:
             url = _build_api_url("openapi.json")
@@ -4634,7 +4635,26 @@ class HomePage(PageBase):
                 except Exception:
                     api_host = API_BASE_URL
 
-        if online:
+        if online and is_desktop_api_sync_enabled():
+            desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+            if desktop_secret:
+                try:
+                    _call_api(
+                        "GET",
+                        "admin/motoristas/acesso",
+                        extra_headers={"X-Desktop-Secret": desktop_secret},
+                    )
+                    integracao_ok = True
+                except Exception:
+                    integracao_ok = False
+
+        if online and integracao_ok is False:
+            self.lbl_api_status.config(
+                text=f"API: PARCIAL ({api_host})",
+                bg="#FEF3C7",
+                fg="#92400E",
+            )
+        elif online:
             self.lbl_api_status.config(text=f"API: ONLINE ({api_host})", bg="#DCFCE7", fg="#166534")
         else:
             self.lbl_api_status.config(text=f"API: OFFLINE ({api_host})", bg="#FEE2E2", fg="#991B1B")
