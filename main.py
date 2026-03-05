@@ -2256,6 +2256,16 @@ class CadastroCRUD(ttk.Frame):
         self.btn_bloquear = ttk.Button(actions, text="BLOQUEAR", style="Danger.TButton", command=lambda: self._set_status_rapido(False))
         self.btn_bloquear.grid(row=0, column=4, padx=6)
 
+        if self.table in {"usuarios", "motoristas"}:
+            cmd_senha = self.alterar_senha_motorista if self.table == "motoristas" else self.alterar_senha
+            self.btn_senha = ttk.Button(
+                actions,
+                text="ALTERAR SENHA",
+                style="Warn.TButton",
+                command=cmd_senha,
+            )
+            self.btn_senha.grid(row=0, column=5, padx=6)
+
         if self.table == "ajudantes":
             self._ajudantes_status_filter = tk.StringVar(value="TODOS")
             ttk.Label(actions, text="FILTRO STATUS:", style="CardLabel.TLabel").grid(row=0, column=10, padx=(18, 6), sticky="e")
@@ -2276,7 +2286,7 @@ class CadastroCRUD(ttk.Frame):
                 style="Warn.TButton",
                 command=self.importar_clientes_excel,
             )
-            self.btn_importar_clientes.grid(row=0, column=5, padx=6)
+            self.btn_importar_clientes.grid(row=0, column=6, padx=6)
 
         # Tabela
         cols = ["ID"] + [label for _, label in self.fields]
