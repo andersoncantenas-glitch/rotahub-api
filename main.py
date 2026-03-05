@@ -2143,7 +2143,7 @@ class PageBase(ttk.Frame):
 
         self.lbl_status = ttk.Label(
             header,
-            text="STATUS: âââââ€š¬Å¡¬ââââ‚¬Å¡¬",
+            text="STATUS: -",
             background="#F4F6FB",
             foreground="#6B7280",
             font=("Segoe UI", 8, "bold")
@@ -2251,9 +2251,15 @@ class CadastroCRUD(ttk.Frame):
         self.btn_alterar.grid(row=0, column=1, padx=6)
         self.btn_salvar = ttk.Button(actions, text="SALVAR", style="Primary.TButton", command=self.salvar)
         self.btn_salvar.grid(row=0, column=2, padx=6)
-        self.btn_liberar = ttk.Button(actions, text="LIBERAR", style="Primary.TButton", command=lambda: self._set_status_rapido(True))
+        cmd_liberar = (lambda: self._set_status_rapido(True))
+        cmd_bloquear = (lambda: self._set_status_rapido(False))
+        if self.table == "motoristas":
+            cmd_liberar = (lambda: self._toggle_motorista_access(True))
+            cmd_bloquear = (lambda: self._toggle_motorista_access(False))
+
+        self.btn_liberar = ttk.Button(actions, text="LIBERAR", style="Primary.TButton", command=cmd_liberar)
         self.btn_liberar.grid(row=0, column=3, padx=6)
-        self.btn_bloquear = ttk.Button(actions, text="BLOQUEAR", style="Danger.TButton", command=lambda: self._set_status_rapido(False))
+        self.btn_bloquear = ttk.Button(actions, text="BLOQUEAR", style="Danger.TButton", command=cmd_bloquear)
         self.btn_bloquear.grid(row=0, column=4, padx=6)
 
         if self.table in {"usuarios", "motoristas"}:
@@ -2436,6 +2442,59 @@ class CadastroCRUD(ttk.Frame):
         self._set("status", status_on if liberar else status_off)
         self._edit_mode = "status"
         self.salvar()
+
+    def _toggle_motorista_access(self, liberar: bool):
+        if self.table != "motoristas":
+            self._set_status_rapido(liberar)
+            return
+        if not self.definir_acesso_app_motorista(liberar):
+            return
+        if self._has_status_field and self.selected_id:
+            self._set("status", "ATIVO" if liberar else "INATIVO")
+            self._edit_mode = "status"
+            self.salvar()
+
+    def _upsert_motorista_acesso_na_api(self, codigo: str, liberar: bool, admin_nome: str, motivo: str, desktop_secret: str) -> bool:
+        nome = self._norm(self._get("nome"))
+        if not nome and self.selected_id:
+            try:
+                with get_db() as conn:
+                    cur = conn.cursor()
+                    cur.execute("SELECT COALESCE(nome,'') FROM motoristas WHERE id=? LIMIT 1", (self.selected_id,))
+                    rr = cur.fetchone()
+                    nome = self._norm(rr[0] if rr else "")
+            except Exception:
+                logging.debug("Falha ao buscar nome do motorista para upsert de acesso", exc_info=True)
+        if not codigo or not nome:
+            return False
+
+        status_ui = upper(self._norm(self._get("status")) or "")
+        status_api = "DESATIVADO" if status_ui in {"INATIVO", "DESATIVADO", "BLOQUEADO"} else "ATIVO"
+
+        payload = {
+            "codigo": codigo,
+            "nome": nome,
+            "telefone": self._norm(self._get("telefone")),
+            "cpf": self._norm(self._get("cpf")),
+            "status": status_api,
+            "acesso_liberado": bool(liberar),
+            "acesso_liberado_por": admin_nome,
+            "acesso_obs": motivo or "Sincronizado automaticamente ao alterar acesso",
+        }
+        senha_ui = self._norm(self._get("senha"))
+        if senha_ui and "*" not in senha_ui:
+            payload["senha"] = senha_ui
+        try:
+            _call_api(
+                "POST",
+                "desktop/cadastros/motoristas/upsert",
+                payload=payload,
+                extra_headers={"X-Desktop-Secret": desktop_secret},
+            )
+            return True
+        except Exception:
+            logging.exception("Falha ao sincronizar motorista na API antes de definir acesso")
+            return False
 
     def _infer_entry_kind(self, col: str, label: str):
         c = str(col or "").strip().lower()
@@ -2827,18 +2886,37 @@ class CadastroCRUD(ttk.Frame):
                     )
 
                 if isinstance(api_rows, list):
+                    motorista_cache = {}
+                    if self.table == "motoristas":
+                        try:
+                            with get_db() as conn:
+                                cur = conn.cursor()
+                                cur.execute("SELECT codigo, senha, cpf, telefone FROM motoristas")
+                                for _cod, _senha, _cpf, _tel in cur.fetchall():
+                                    motorista_cache[str(_cod or "").strip()] = {
+                                        "senha": str(_senha or ""),
+                                        "cpf": str(_cpf or ""),
+                                        "telefone": str(_tel or ""),
+                                    }
+                        except Exception:
+                            logging.debug("Falha ao montar cache local de motoristas", exc_info=True)
                     rows = []
                     for r in api_rows:
                         if not isinstance(r, dict):
                             continue
                         row_map = {}
                         if self.table == "motoristas":
+                            cod = str(r.get("codigo") or "").strip()
+                            local_row = motorista_cache.get(cod, {})
+                            senha_val = str(r.get("senha") or r.get("senha_hash") or local_row.get("senha") or "")
+                            cpf_val = str(r.get("cpf") or local_row.get("cpf") or "")
+                            tel_val = str(r.get("telefone") or local_row.get("telefone") or "")
                             row_map = {
                                 "nome": str(r.get("nome") or ""),
-                                "codigo": str(r.get("codigo") or ""),
-                                "senha": "",
-                                "cpf": "",
-                                "telefone": "",
+                                "codigo": cod,
+                                "senha": senha_val,
+                                "cpf": cpf_val,
+                                "telefone": tel_val,
                                 "status": str(r.get("status") or "ATIVO"),
                             }
                         elif self.table == "veiculos":
@@ -3545,8 +3623,8 @@ class CadastroCRUD(ttk.Frame):
 
         btns = ttk.Frame(frm)
         btns.grid(row=row, column=0, columnspan=2, sticky="e", pady=(8, 0))
-        ttk.Button(btns, text="ðÅ¸â€™¾ SALVAR", style="Primary.TButton", command=_salvar).grid(row=0, column=0, padx=6)
-        ttk.Button(btns, text="âÅ“â€“ CANCELAR", style="Ghost.TButton", command=win.destroy).grid(row=0, column=1, padx=6)
+        ttk.Button(btns, text="SALVAR", style="Primary.TButton", command=_salvar).grid(row=0, column=0, padx=6)
+        ttk.Button(btns, text="CANCELAR", style="Ghost.TButton", command=win.destroy).grid(row=0, column=1, padx=6)
 
     def alterar_senha_motorista(self):
         if self.table != "motoristas":
@@ -3633,23 +3711,23 @@ class CadastroCRUD(ttk.Frame):
 
         btns = ttk.Frame(frm)
         btns.grid(row=2, column=0, columnspan=2, sticky="e", pady=(8, 0))
-        ttk.Button(btns, text="ðÅ¸â€™¾ SALVAR", style="Primary.TButton", command=_salvar).grid(row=0, column=0, padx=6)
-        ttk.Button(btns, text="âÅ“â€“ CANCELAR", style="Ghost.TButton", command=win.destroy).grid(row=0, column=1, padx=6)
+        ttk.Button(btns, text="SALVAR", style="Primary.TButton", command=_salvar).grid(row=0, column=0, padx=6)
+        ttk.Button(btns, text="CANCELAR", style="Ghost.TButton", command=win.destroy).grid(row=0, column=1, padx=6)
 
     def definir_acesso_app_motorista(self, liberar: bool):
         if self.table != "motoristas":
-            return
+            return False
         if not self._is_admin:
             messagebox.showwarning("ATENÇÃO", "Somente ADMIN pode alterar acesso ao app.")
-            return
+            return False
         if not self.selected_id:
             messagebox.showwarning("ATENÇÃO", "SELECIONE UM MOTORISTA NA TABELA.")
-            return
+            return False
 
         codigo = self._norm(self._get("codigo"))
         if not codigo:
             messagebox.showwarning("ATENÇÃO", "Código do motorista não encontrado no item selecionado.")
-            return
+            return False
 
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
         if not desktop_secret:
@@ -3657,14 +3735,14 @@ class CadastroCRUD(ttk.Frame):
                 "ERRO",
                 "ROTA_SECRET não configurada no Desktop.\nDefina a variável de ambiente e tente novamente.",
             )
-            return
+            return False
 
         acao = "LIBERAR" if liberar else "BLOQUEAR"
         if not messagebox.askyesno(
             "CONFIRMAR",
             f"Deseja {acao} o acesso do motorista {codigo} ao app?",
         ):
-            return
+            return False
 
         admin_nome = upper((getattr(self.app, "user", {}) or {}).get("nome", "")) or "ADMIN_DESKTOP"
         payload = {
@@ -3673,7 +3751,7 @@ class CadastroCRUD(ttk.Frame):
             "motivo": "Definido no cadastro de motoristas (desktop)",
         }
         if not ensure_system_api_binding(context=f"Alterar acesso do motorista {codigo}", parent=self):
-            return
+            return False
         try:
             _call_api(
                 "POST",
@@ -3682,127 +3760,25 @@ class CadastroCRUD(ttk.Frame):
                 extra_headers={"X-Desktop-Secret": desktop_secret},
             )
             messagebox.showinfo("OK", f"Acesso ao app atualizado para {codigo}.")
-            return
+            return True
         except Exception as exc:
+            msg = str(exc or "")
+            msg_upper = upper(msg)
+            if "404" in msg and ("MOTORISTA NAO ENCONTRADO" in msg_upper or "MOTORISTA NÃO ENCONTRADO" in msg_upper):
+                ok_sync = self._upsert_motorista_acesso_na_api(
+                    codigo=codigo,
+                    liberar=liberar,
+                    admin_nome=admin_nome,
+                    motivo=payload.get("motivo", ""),
+                    desktop_secret=desktop_secret,
+                )
+                if ok_sync:
+                    messagebox.showinfo("OK", f"Motorista {codigo} sincronizado na API e acesso atualizado.")
+                    self.carregar()
+                    return True
             messagebox.showerror("ERRO", f"Falha ao atualizar acesso do motorista:\n{exc}")
-            return
+            return False
 
-
-# ==========================
-# ===== CADASTROS PAGE (ATUALIZADA) =====
-# ==========================
-
-class CadastrosPage(PageBase):
-    def __init__(self, parent, app):
-        super().__init__(parent, app, "Cadastros")
-
-        card = ttk.Frame(self.body, style="Card.TFrame", padding=12)
-        card.grid(row=0, column=0, sticky="nsew")
-        card.grid_columnconfigure(0, weight=1)
-        card.grid_rowconfigure(0, weight=1)
-
-        nb = ttk.Notebook(card)
-        nb.grid(row=0, column=0, sticky="nsew")
-
-        # -------------------------
-        # MOTORISTAS
-        # - ID é gerado pelo SQLite (sequência/autoincrement)
-        # - valida CPF/NOME/TELEFONE
-        # - código e senha são MANUAIS (botão GERAR é opcional)
-        # -------------------------
-        frm_motoristas = ttk.Frame(nb, style="Content.TFrame")
-        crud_motoristas = CadastroCRUD(
-            frm_motoristas,
-            "Motoristas",
-            "motoristas",
-            [
-                ("nome", "NOME"),
-                ("codigo", "CÓDIGO"),
-                ("senha", "SENHA"),
-                ("cpf", "CPF"),
-                ("telefone", "TELEFONE"),
-                ("status", "STATUS"),
-            ],
-            app=app
-        )
-        crud_motoristas.pack(fill="both", expand=True)
-        nb.add(frm_motoristas, text="Motoristas")
-
-        # -------------------------
-        # USURIOS (login por nome + senha, sem idade e sem código)
-        # -------------------------
-        frm_usuarios = ttk.Frame(nb, style="Content.TFrame")
-        crud_usuarios = CadastroCRUD(
-            frm_usuarios,
-            "Usuários",
-            "usuarios",
-            [
-                ("nome", "NOME"),
-                ("senha", "SENHA"),
-                ("permissoes", "PERMISSÕES"),
-                ("cpf", "CPF"),
-                ("telefone", "TELEFONE"),
-            ],
-            app=app
-        )
-        crud_usuarios.pack(fill="both", expand=True)
-        nb.add(frm_usuarios, text="Usuários")
-
-        # -------------------------
-        # VECULOS (placa, modelo, capacidade_cx)
-        # -------------------------
-        frm_veiculos = ttk.Frame(nb, style="Content.TFrame")
-        crud_veiculos = CadastroCRUD(
-            frm_veiculos,
-            "Veiculos",
-            "veiculos",
-            [
-                ("placa", "PLACA"),
-                ("modelo", "MODELO"),
-                ("capacidade_cx", "CAPACIDADE (CX)"),
-            ],
-            app=app
-        )
-        crud_veiculos.pack(fill="both", expand=True)
-        nb.add(frm_veiculos, text="Veiculos")
-
-        # -------------------------
-        # EQUIPES (mantém)
-        # -------------------------
-        frm_ajudantes = ttk.Frame(nb, style="Content.TFrame")
-        crud_ajudantes = CadastroCRUD(
-            frm_ajudantes,
-            "Ajudantes",
-            "ajudantes",
-            [
-                ("nome", "NOME"),
-                ("sobrenome", "SOBRENOME"),
-                ("telefone", "TELEFONE"),
-                ("status", "STATUS"),
-            ],
-            app=app
-        )
-        crud_ajudantes.pack(fill="both", expand=True)
-        nb.add(frm_ajudantes, text="Ajudantes")
-
-        # -------------------------
-        # CLIENTES (mantém sua ClientesImportPage)
-        # -------------------------
-        frm_clientes = ttk.Frame(nb, style="Content.TFrame")
-        clientes_page = ClientesImportPage(frm_clientes, app=app)
-        clientes_page.pack(fill="both", expand=True)
-        nb.add(frm_clientes, text="Clientes")
-
-    def on_show(self):
-        self.set_status("STATUS: Cadastros (CRUD).")
-
-# ==========================
-# ===== FIM DA PARTE 1 =====
-# ==========================
-
-# ==========================
-# ===== INCIO DA PARTE 2 (ATUALIZADA) =====
-# ==========================
 
 class Sidebar(ttk.Frame):
     def __init__(self, parent, app):
@@ -3949,7 +3925,7 @@ class App(tk.Tk):
     def request_close(self):
         """Confirma fechamento da aplicação."""
         try:
-            ok = messagebox.askyesno("Confirmar saÃÂda", "Deseja realmente fechar o sistema?")
+            ok = messagebox.askyesno("Confirmar saida", "Deseja realmente fechar o sistema?")
         except Exception:
             ok = True
         if not ok:
@@ -4174,13 +4150,17 @@ class HomePage(PageBase):
         self._remote_changelog_url = CHANGELOG_URL
         self._alerts_text = ""
 
-        card = ttk.Frame(self.body, style="Card.TFrame", padding=18)
-        card.grid(row=0, column=0, sticky="ew")
+        top = ttk.Frame(self.body, style="Content.TFrame")
+        top.grid(row=0, column=0, sticky="ew")
+        top.grid_columnconfigure(0, weight=3)
+        top.grid_columnconfigure(1, weight=2)
+
+        card = ttk.Frame(top, style="Card.TFrame", padding=18)
+        card.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
         card.grid_columnconfigure(0, weight=1)
         card.grid_columnconfigure(1, weight=0)
-        card.grid_columnconfigure(2, weight=0)
 
-        ttk.Label(card, text="Bem-vindo!", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(card, text="Painel Operacional", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
 
         self.lbl_clock = tk.Label(
             card,
@@ -4190,20 +4170,31 @@ class HomePage(PageBase):
             font=("Segoe UI", 11, "bold")
         )
         self.lbl_clock.grid(row=0, column=1, sticky="e")
-        self._build_system_info_panel(card)
 
         ttk.Label(
             card,
             text=(
-                "- Cadastre Motoristas, Veiculos, Equipes e Clientes.\n"
-                "- Importe Vendas via Excel.\n"
-                "- Gere Programacoes (codigos automaticos) e vincule pedidos/entregas.\n"
-                "- Registre Recebimentos e Despesas.\n"
-                "- Emita Relatorios e PDF.\n"
+                "Central de controle da operacao diaria.\n"
+                "Acompanhe rotas em andamento e acesse as areas principais."
             ),
             style="CardLabel.TLabel",
             justify="left"
-        ).grid(row=1, column=0, sticky="w", pady=(6, 0), columnspan=2)
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+        quick = ttk.Frame(card, style="Card.TFrame")
+        quick.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        quick.grid_columnconfigure((0, 1, 2), weight=1)
+        ttk.Button(quick, text="Cadastros", style="Ghost.TButton", command=lambda: self.app.show_page("Cadastros")).grid(
+            row=0, column=0, sticky="ew"
+        )
+        ttk.Button(quick, text="Programacao", style="Primary.TButton", command=lambda: self.app.show_page("Programacao")).grid(
+            row=0, column=1, sticky="ew", padx=6
+        )
+        ttk.Button(quick, text="Rotas", style="Ghost.TButton", command=lambda: self.app.show_page("Rotas")).grid(
+            row=0, column=2, sticky="ew"
+        )
+
+        self._build_system_info_panel(top)
 
         self.card_stats = ttk.Frame(self.body, style="Content.TFrame")
         self.card_stats.grid(row=1, column=0, sticky="nsew", pady=(14, 0))
@@ -4220,18 +4211,27 @@ class HomePage(PageBase):
 
         card_rotas = ttk.Frame(dash, style="Card.TFrame", padding=12)
         card_rotas.grid(row=0, column=0, sticky="nsew")
-        card_rotas.grid_rowconfigure(1, weight=1)
+        card_rotas.grid_rowconfigure(2, weight=1)
         card_rotas.grid_columnconfigure(0, weight=1)
 
-        ttk.Label(card_rotas, text="Rotas Ativas", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        top_rotas = ttk.Frame(card_rotas, style="Card.TFrame")
+        top_rotas.grid(row=0, column=0, columnspan=2, sticky="ew")
+        top_rotas.grid_columnconfigure(0, weight=1)
+        ttk.Label(top_rotas, text="Rotas Ativas", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Button(top_rotas, text="Atualizar", style="Ghost.TButton", command=self.on_show).grid(row=0, column=1, sticky="e")
+        ttk.Label(
+            card_rotas,
+            text="Duplo clique em uma rota para abrir a pre-visualizacao.",
+            style="CardLabel.TLabel",
+        ).grid(row=1, column=0, sticky="w", pady=(2, 0))
 
         cols = ["COD", "MOTORISTA", "VEICULO", "DATA"]
         self.tree_rotas = ttk.Treeview(card_rotas, columns=cols, show="headings", height=10)
-        self.tree_rotas.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
+        self.tree_rotas.grid(row=2, column=0, sticky="nsew", pady=(6, 0))
 
         vsb = ttk.Scrollbar(card_rotas, orient="vertical", command=self.tree_rotas.yview)
         self.tree_rotas.configure(yscrollcommand=vsb.set)
-        vsb.grid(row=1, column=1, sticky="ns", pady=(6, 0))
+        vsb.grid(row=2, column=1, sticky="ns", pady=(6, 0))
 
         for c in cols:
             self.tree_rotas.heading(c, text=c)
@@ -4249,6 +4249,57 @@ class HomePage(PageBase):
             date_cols={"DATA"}
         )
 
+        pend = ttk.Frame(self.body, style="Card.TFrame", padding=12)
+        pend.grid(row=3, column=0, sticky="ew", pady=(14, 0))
+        pend.grid_columnconfigure((0, 1, 2), weight=1)
+        ttk.Label(pend, text="Pendencias do dia", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+
+        self.lbl_pend_rotas = self._build_pending_stat(pend, 0, "Rotas em aberto")
+        self.lbl_pend_prest = self._build_pending_stat(pend, 1, "Prestacoes pendentes")
+        self.lbl_pend_desp = self._build_pending_stat(pend, 2, "Sem despesa lancada")
+
+        pend_btns = ttk.Frame(pend, style="Card.TFrame")
+        pend_btns.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        pend_btns.grid_columnconfigure((0, 1, 2), weight=1)
+        ttk.Button(
+            pend_btns,
+            text="Recebimentos",
+            style="Ghost.TButton",
+            command=lambda: self.app.show_page("Recebimentos"),
+        ).grid(row=0, column=0, sticky="ew")
+        ttk.Button(
+            pend_btns,
+            text="Despesas",
+            style="Ghost.TButton",
+            command=lambda: self.app.show_page("Despesas"),
+        ).grid(row=0, column=1, sticky="ew", padx=6)
+        ttk.Button(
+            pend_btns,
+            text="Atualizar Home",
+            style="Primary.TButton",
+            command=self.on_show,
+        ).grid(row=0, column=2, sticky="ew")
+
+        self.lbl_footer_sync = ttk.Label(
+            self.footer_left,
+            text="Ultima atualizacao: --/--/---- --:--:--",
+            style="CardLabel.TLabel",
+        )
+        self.lbl_footer_sync.pack(side="left")
+        self.lbl_footer_source = ttk.Label(
+            self.footer_left,
+            text="  |  Fonte: -",
+            style="CardLabel.TLabel",
+        )
+        self.lbl_footer_source.pack(side="left", padx=(8, 0))
+        ttk.Button(self.footer_right, text="Atualizar Home", style="Ghost.TButton", command=self.on_show).pack(side="right")
+        ttk.Button(
+            self.footer_right,
+            text="Abrir Programacao",
+            style="Primary.TButton",
+            command=lambda: self.app.show_page("Programacao"),
+        ).pack(side="right", padx=(0, 8))
+
         self._clock_job = None
         self._update_clock()
         self._build_api_status_badge()
@@ -4258,7 +4309,7 @@ class HomePage(PageBase):
 
     def _build_system_info_panel(self, parent):
         panel = ttk.Frame(parent, style="Card.TFrame", padding=10)
-        panel.grid(row=0, column=2, rowspan=2, sticky="ne", padx=(14, 0))
+        panel.grid(row=0, column=1, sticky="nsew")
         panel.grid_columnconfigure(0, weight=1)
 
         ttk.Label(panel, text="Informações do Sistema", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
@@ -4389,7 +4440,7 @@ class HomePage(PageBase):
         if not self._can_auto_update_from_url(url):
             messagebox.showinfo(
                 "Atualização",
-                "Não foi possÃÂvel atualizar automaticamente porque o link atual não aponta para um arquivo .exe.\n\n"
+                "Nao foi possivel atualizar automaticamente porque o link atual nao aponta para um arquivo .exe.\n\n"
                 "Use o botão 'Baixar Setup' para baixar manualmente.",
             )
             self._open_setup()
@@ -4898,6 +4949,14 @@ class HomePage(PageBase):
         lbl.pack(anchor="w", pady=(6, 0))
         return lbl
 
+    def _build_pending_stat(self, parent, col, title):
+        c = ttk.Frame(parent, style="Card.TFrame", padding=10)
+        c.grid(row=1, column=col, sticky="ew", padx=6, pady=(8, 0))
+        ttk.Label(c, text=title, style="CardLabel.TLabel").pack(anchor="w")
+        lbl = ttk.Label(c, text="0", font=("Segoe UI", 18, "bold"), background="white", foreground="#1D4ED8")
+        lbl.pack(anchor="w", pady=(4, 0))
+        return lbl
+
     def _update_clock(self):
         now = datetime.now().strftime("%d/%m/%Y  %H:%M:%S")
         self.lbl_clock.config(text=now)
@@ -4986,6 +5045,76 @@ class HomePage(PageBase):
             clauses.append("COALESCE(km_final, 0) = 0")
         return " AND ".join(clauses)
 
+    def _load_pending_counts(self, total_prog_hint: int = 0) -> dict:
+        out = {
+            "rotas_abertas": max(int(total_prog_hint or 0), 0),
+            "prestacao_pendente": 0,
+            "sem_despesa": 0,
+        }
+        with get_db() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute("PRAGMA table_info(programacoes)")
+                cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+            except Exception:
+                cols_prog = set()
+
+            status_col = "status_operacional" if "status_operacional" in cols_prog else "status"
+            status_expr = f"UPPER(TRIM(COALESCE({status_col}, '')))"
+            where_final = f"{status_expr} IN ('FINALIZADA', 'FINALIZADO')"
+            if "prestacao_status" in cols_prog:
+                where_prest = "UPPER(TRIM(COALESCE(prestacao_status, 'PENDENTE'))) <> 'FECHADA'"
+            else:
+                where_prest = "1=1"
+            where_base = f"{where_final} AND {where_prest}"
+            try:
+                cur.execute(f"SELECT COUNT(*) FROM programacoes WHERE {where_base}")
+                out["prestacao_pendente"] = safe_int((cur.fetchone() or [0])[0], 0)
+            except Exception:
+                out["prestacao_pendente"] = 0
+            try:
+                cur.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM programacoes p
+                    WHERE {where_base}
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM despesas d
+                          WHERE UPPER(TRIM(COALESCE(d.codigo_programacao, '')))
+                              = UPPER(TRIM(COALESCE(p.codigo_programacao, '')))
+                      )
+                    """
+                )
+                out["sem_despesa"] = safe_int((cur.fetchone() or [0])[0], 0)
+            except Exception:
+                out["sem_despesa"] = 0
+        return out
+
+    def _refresh_home_footer(self, source: str):
+        stamp = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+        self.lbl_footer_sync.config(text=f"Ultima atualizacao: {stamp}")
+        self.lbl_footer_source.config(text=f"  |  Fonte: {source}")
+
+    @staticmethod
+    def _format_home_data(value) -> str:
+        txt = str(value or "").strip()
+        if not txt:
+            return ""
+        if len(txt) >= 19 and txt[4:5] == "-" and txt[7:8] == "-":
+            try:
+                dt = datetime.strptime(txt[:19], "%Y-%m-%d %H:%M:%S")
+                return dt.strftime("%d/%m/%Y %H:%M")
+            except Exception:
+                pass
+        if len(txt) >= 10 and txt[4:5] == "-" and txt[7:8] == "-":
+            try:
+                dt = datetime.strptime(txt[:10], "%Y-%m-%d")
+                return dt.strftime("%d/%m/%Y")
+            except Exception:
+                pass
+        return txt
+
     def on_show(self):
         total_prog = 0
         total_vendas = 0
@@ -5018,6 +5147,11 @@ class HomePage(PageBase):
             self.lbl_total_prog.config(text=str(total_prog))
             self.lbl_total_vendas.config(text=str(total_vendas))
             self.lbl_total_clientes_ativos.config(text=str(total_clientes_ativos))
+            pending = self._load_pending_counts(total_prog_hint=total_prog)
+            self.lbl_pend_rotas.config(text=str(pending.get("rotas_abertas", 0)))
+            self.lbl_pend_prest.config(text=str(pending.get("prestacao_pendente", 0)))
+            self.lbl_pend_desp.config(text=str(pending.get("sem_despesa", 0)))
+            self._refresh_home_footer(source)
             self.set_status(f"STATUS: Home carregada ({source}).")
             return
 
@@ -5098,11 +5232,17 @@ class HomePage(PageBase):
                         rows = []
 
             for r in rows:
-                tree_insert_aligned(self.tree_rotas, "", "end", (r[0], r[1], r[2], r[3]))
+                data_fmt = self._format_home_data(r[3] if len(r) > 3 else "")
+                tree_insert_aligned(self.tree_rotas, "", "end", (r[0], r[1], r[2], data_fmt))
 
         self.lbl_total_prog.config(text=str(total_prog))
         self.lbl_total_vendas.config(text=str(total_vendas))
         self.lbl_total_clientes_ativos.config(text=str(total_clientes_ativos))
+        pending = self._load_pending_counts(total_prog_hint=total_prog)
+        self.lbl_pend_rotas.config(text=str(pending.get("rotas_abertas", 0)))
+        self.lbl_pend_prest.config(text=str(pending.get("prestacao_pendente", 0)))
+        self.lbl_pend_desp.config(text=str(pending.get("sem_despesa", 0)))
+        self._refresh_home_footer(source)
 
         nome = self.app.user.get("nome", "")
         is_admin = bool(self.app.user.get("is_admin", False))
@@ -5508,7 +5648,7 @@ class HomePage(PageBase):
             linhas.append(f"PROGRAMAÇÃO: {cabecalho_ctx.get('codigo') or codigo}")
             linhas.append(f"NOTA FISCAL: {cabecalho_ctx.get('nf_numero') or '-'}")
             linhas.append(
-                f"MOTORISTA: {cabecalho_ctx.get('motorista') or '-'}    VEÃÂCULO: {cabecalho_ctx.get('veiculo') or '-'}"
+                f"MOTORISTA: {cabecalho_ctx.get('motorista') or '-'}    VEICULO: {cabecalho_ctx.get('veiculo') or '-'}"
             )
             eq_raw = cabecalho_ctx.get("equipe") or ""
             linhas.append(f"EQUIPE: {resolve_equipe_nomes(eq_raw) or eq_raw or '-'}")
@@ -7604,8 +7744,6 @@ def format_prog_display(p: dict) -> str:
 # ===== FIM DA PARTE X (FINAL) =====
 # ==========================
 
-# Compatibilidade: o fluxo "Programacao" usa a mesma tela de "Rotas".
-ProgramacaoPage = RotasPage
 
 # ==========================
 # ===== INCIO DA PARTE 3 (FINAL / SEM DUPLICIDADE) =====
@@ -8129,14 +8267,12 @@ class ImportarVendasPage(PageBase):
         top = ttk.Frame(self.body, style="Content.TFrame")
         top.grid(row=0, column=0, sticky="ew")
         top.grid_columnconfigure(3, weight=1)
-
-        ttk.Button(top, text="ðÅ¸â€œ¥ IMPORTAR EXCEL", style="Primary.TButton", command=self.importar_excel).grid(row=0, column=0, padx=6)
-        ttk.Button(top, text="ðÅ¸§¹ LIMPAR TUDO", style="Danger.TButton", command=self.limpar_tudo).grid(row=0, column=1, sticky="w", padx=6)
-        ttk.Button(top, text="ðŸ”„ ATUALIZAR", style="Ghost.TButton", command=self.carregar).grid(row=0, column=2, padx=6)
-
+        ttk.Button(top, text="IMPORTAR EXCEL", style="Primary.TButton", command=self.importar_excel).grid(row=0, column=0, padx=6)
+        ttk.Button(top, text="LIMPAR TUDO", style="Danger.TButton", command=self.limpar_tudo).grid(row=0, column=1, sticky="w", padx=6)
+        ttk.Button(top, text="ATUALIZAR", style="Ghost.TButton", command=self.carregar).grid(row=0, column=2, padx=6)
         self.lbl_info = ttk.Label(
             top,
-            text="Selecione as vendas que irão para Programação (duplo clique marca/desmarca).",
+            text="Selecione as vendas que irao para Programacao (duplo clique marca/desmarca).",
             background="#F4F6FB",
             foreground="#6B7280",
             font=("Segoe UI", 8, "bold")
@@ -8158,13 +8294,10 @@ class ImportarVendasPage(PageBase):
         self.ent_busca = ttk.Entry(filt, style="Field.TEntry")
         self.ent_busca.grid(row=0, column=1, sticky="ew", padx=6)
         self.ent_busca.bind("<Return>", lambda e: self.carregar())
-
-        ttk.Button(filt, text="ðŸ”Ž FILTRAR", style="Ghost.TButton", command=self.carregar).grid(row=0, column=2, padx=6)
-        ttk.Button(filt, text="âÅ“â€¦ MARCAR", style="Primary.TButton", command=self.marcar_selecionadas).grid(row=0, column=3, padx=6)
-
-        ttk.Button(filt, text="âÅ“â€¦ MARCAR TODOS", style="Warn.TButton", command=lambda: self.set_all_selected(1)).grid(row=0, column=4, padx=6)
-        ttk.Button(filt, text="âËœâ€˜ DESMARCAR TODOS", style="Ghost.TButton", command=lambda: self.set_all_selected(0)).grid(row=0, column=5, padx=6)
-
+        ttk.Button(filt, text="FILTRAR", style="Ghost.TButton", command=self.carregar).grid(row=0, column=2, padx=6)
+        ttk.Button(filt, text="MARCAR", style="Primary.TButton", command=self.marcar_selecionadas).grid(row=0, column=3, padx=6)
+        ttk.Button(filt, text="MARCAR TODOS", style="Warn.TButton", command=lambda: self.set_all_selected(1)).grid(row=0, column=4, padx=6)
+        ttk.Button(filt, text="DESMARCAR TODOS", style="Ghost.TButton", command=lambda: self.set_all_selected(0)).grid(row=0, column=5, padx=6)
         # Tabela (com scroll horizontal)
         cols = ["ID", "SEL", "PEDIDO", "DATA", "CLIENTE", "NOME COMPLETO", "PRODUTO", "VR TOTAL", "QNT", "CIDADE", "VENDEDOR"]
         table_wrap = ttk.Frame(card, style="Card.TFrame")
@@ -8248,7 +8381,7 @@ class ImportarVendasPage(PageBase):
 
     def _normalize_data_venda(self, v):
         """
-        Normaliza data da venda para chave estável (YYYY-MM-DD quando possÃÂvel).
+        Normaliza data da venda para chave estavel (YYYY-MM-DD quando possivel).
         Evita duplicidade falsa por diferença de formato no Excel.
         """
         raw = self._excel_text(v)
@@ -8442,7 +8575,7 @@ class ImportarVendasPage(PageBase):
                 try:
                     self.ent_busca.delete(0, "end")
                 except Exception:
-                    logging.debug("Falha ao limpar busca ap?s importa??o")
+                    logging.debug("Falha ao limpar busca apos importacao")
 
             if opcionais_ausentes:
                 msg += "\nCampos opcionais nao encontrados (preenchidos em branco): " + ", ".join(opcionais_ausentes)
@@ -8542,7 +8675,7 @@ class ImportarVendasPage(PageBase):
                 (rid, sel, row[2], row[3], row[4], row[5], row[6], valor_txt, qnt_txt, row[9], row[10]),
             )
 
-        self.set_status(f"STATUS: {len(rows)} registros carregados (N?O usadas)  Selecionadas: {selected_count}.")
+        self.set_status(f"STATUS: {len(rows)} registros carregados (NAO usadas)  Selecionadas: {selected_count}.")
 
     def toggle_selected(self, event=None):
         # âÅâ€œââ‚¬¦ só alterna se clicar em uma célula (evita bug ao clicar em cabeçalho)
@@ -8670,7 +8803,7 @@ class ImportarVendasPage(PageBase):
                     extra_headers={"X-Desktop-Secret": desktop_secret},
                 )
                 self.carregar()
-                self.set_status(f"STATUS: {len(ids)} venda(s) marcada(s) a partir da sele??o.")
+                self.set_status(f"STATUS: {len(ids)} venda(s) marcada(s) a partir da selecao.")
                 return
             except Exception:
                 logging.debug("Falha ao marcar ids via API; usando fallback local.", exc_info=True)
@@ -8683,7 +8816,7 @@ class ImportarVendasPage(PageBase):
             )
 
         self.carregar()
-        self.set_status(f"STATUS: {len(ids)} venda(s) marcada(s) a partir da sele??o.")
+        self.set_status(f"STATUS: {len(ids)} venda(s) marcada(s) a partir da selecao.")
 
     def limpar_tudo(self):
         if not messagebox.askyesno("CONFIRMAR", "Deseja apagar TODAS as vendas importadas?"):
@@ -8708,8 +8841,9 @@ class ImportarVendasPage(PageBase):
 
         self.carregar()
 
+class ProgramacaoPage(PageBase):
     def __init__(self, parent, app):
-        super().__init__(parent, app, "Programação")
+        super().__init__(parent, app, "Programacao")
 
         self._editing = None
         self._prog_cols_checked = False  # evita PRAGMA/ALTER toda hora
@@ -8777,7 +8911,7 @@ class ImportarVendasPage(PageBase):
         self.ent_adiantamento_prog.insert(0, "0,00")
         self._bind_money_entry(self.ent_adiantamento_prog)
 
-        ttk.Label(card, text="Código", style="CardLabel.TLabel").grid(row=0, column=8, sticky="w")
+        ttk.Label(card, text="Codigo", style="CardLabel.TLabel").grid(row=0, column=8, sticky="w")
         ttk.Label(card, text="Total Caixas", style="CardLabel.TLabel").grid(row=2, column=6, sticky="w")
         self.ent_total_caixas_prog = ttk.Entry(card, style="Field.TEntry", state="readonly", width=12)
         self.ent_total_caixas_prog.grid(row=2, column=7, sticky="ew", padx=6, pady=(2, 0))
@@ -8835,14 +8969,14 @@ class ImportarVendasPage(PageBase):
 
         ttk.Button(
             acoes_linha_2,
-            text="SALVAR PROGRAMAÇÃO",
+            text="SALVAR PROGRAMACAO",
             style="Primary.TButton",
             command=self.salvar_programacao
         ).grid(row=0, column=0, padx=4, sticky="ew")
 
         ttk.Button(
             acoes_linha_2,
-            text="\u270F\ufe0f EDITAR PROGRAMACAO",
+            text="EDITAR PROGRAMACAO",
             style="Ghost.TButton",
             command=self.carregar_programacao_para_edicao
         ).grid(row=0, column=1, padx=4, sticky="ew")
@@ -8856,13 +8990,13 @@ class ImportarVendasPage(PageBase):
 
         ttk.Label(
             top2,
-            text="Dica: duplo clique para editar Endereço/Caixas/Preço/Vendedor/Pedido/Obs. ENTER confirma, ESC cancela.",
+            text="Dica: duplo clique para editar Endereco/Caixas/Preco/Vendedor/Pedido/Obs. ENTER confirma, ESC cancela.",
             background="white",
             foreground="#6B7280",
             font=("Segoe UI", 8, "bold")
         ).grid(row=2, column=0, padx=6, pady=(8, 0), sticky="w")
 
-        cols = ["COD CLIENTE", "NOME CLIENTE", "PRODUTO", "ENDEREÇO", "CAIXAS", "KG", "PREÇO", "VENDEDOR", "PEDIDO", "OBS"]
+        cols = ["COD CLIENTE", "NOME CLIENTE", "PRODUTO", "ENDERECO", "CAIXAS", "KG", "PRECO", "VENDEDOR", "PEDIDO", "OBS"]
 
         table_wrap = ttk.Frame(card2, style="Card.TFrame")
         table_wrap.grid(row=1, column=0, sticky="nsew")
@@ -8875,9 +9009,9 @@ class ImportarVendasPage(PageBase):
                 "COD CLIENTE",
                 "NOME CLIENTE",
                 "PRODUTO",
-                "ENDEREÇO",
+                "ENDERECO",
                 "CAIXAS",
-                "PREÇO",
+                "PRECO",
                 "VENDEDOR",
                 "PEDIDO",
                 "OBS",
@@ -8897,14 +9031,14 @@ class ImportarVendasPage(PageBase):
             self.tree.heading(c, text=c)
             self.tree.column(c, width=160, minwidth=90, anchor="w")
 
-        self.tree.column("ENDEREÇO", width=260, minwidth=180)
+        self.tree.column("ENDERECO", width=260, minwidth=180)
         self.tree.column("NOME CLIENTE", width=260, minwidth=160)
         self.tree.column("PRODUTO", width=160, minwidth=120)
         self.tree.column("PEDIDO", width=160, minwidth=120)
         self.tree.column("OBS", width=260, minwidth=140)
         self.tree.column("CAIXAS", width=90, anchor="center")
         self.tree.column("KG", width=90, anchor="center")
-        self.tree.column("PREÇO", width=110, anchor="e")
+        self.tree.column("PRECO", width=110, anchor="e")
 
         self.tree.bind("<Double-1>", self._start_edit_cell)
         self.tree.bind("<MouseWheel>", self._on_tree_scroll, add=True)
@@ -8914,7 +9048,7 @@ class ImportarVendasPage(PageBase):
         enable_treeview_sorting(
             self.tree,
             numeric_cols={"CAIXAS", "KG"},
-            money_cols={"PREÇO"},
+            money_cols={"PRECO"},
             date_cols=set()
         )
 
@@ -9645,17 +9779,17 @@ class ImportarVendasPage(PageBase):
                 cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
 
                 local_expr = "COALESCE(local_rota,'')" if "local_rota" in cols_prog else ("COALESCE(tipo_rota,'')" if "tipo_rota" in cols_prog else "''")
-                carreg_cols = [c for c in ("local_carregamento", "granja_carregada", "local_carregado", "local_carreg") if c in cols_prog]
+                carreg_cols = ["COD CLIENTE", "NOME CLIENTE", "PRODUTO", "ENDERECO", "CAIXAS", "KG", "PRECO", "VENDEDOR", "PEDIDO", "OBS"]
                 if carreg_cols:
                     carreg_expr = "COALESCE(" + ", ".join(carreg_cols) + ", '')"
                 else:
                     carreg_expr = "''"
-                adiant_cols = [c for c in ("adiantamento", "adiantamento_rota") if c in cols_prog]
+                adiant_cols = ["COD CLIENTE", "NOME CLIENTE", "PRODUTO", "ENDERECO", "CAIXAS", "KG", "PRECO", "VENDEDOR", "PEDIDO", "OBS"]
                 if adiant_cols:
                     adiant_expr = "COALESCE(" + ", ".join(adiant_cols) + ", 0)"
                 else:
                     adiant_expr = "0"
-                mot_cod_cols = [c for c in ("motorista_codigo", "codigo_motorista") if c in cols_prog]
+                mot_cod_cols = ["COD CLIENTE", "NOME CLIENTE", "PRODUTO", "ENDERECO", "CAIXAS", "KG", "PRECO", "VENDEDOR", "PEDIDO", "OBS"]
                 if mot_cod_cols:
                     mot_cod_expr = "COALESCE(" + ", ".join(mot_cod_cols) + ", '')"
                 else:
@@ -10002,7 +10136,7 @@ class ImportarVendasPage(PageBase):
         col_name = cols[col_index]
 
         # âÅâ€œââ‚¬¦ Regra: só permite editar essas colunas
-        editable = {"ENDEREÇO", "CAIXAS", "KG", "PREÇO", "VENDEDOR", "PEDIDO", "OBS"}
+        editable = {"ENDERECO", "CAIXAS", "KG", "PRECO", "VENDEDOR", "PEDIDO", "OBS"}
         if col_name not in editable:
             return
 
@@ -10040,7 +10174,7 @@ class ImportarVendasPage(PageBase):
                 v = 0
             new_value = str(v)
 
-        elif col_name in {"KG", "PREÇO"}:
+        elif col_name in {"KG", "PRECO"}:
             v = safe_float(new_value, 0.0)
             if v < 0:
                 v = 0.0
@@ -10075,7 +10209,7 @@ class ImportarVendasPage(PageBase):
         # Garante colunas que a API usa (sem quebrar bases antigas)
         try:
             cur.execute("PRAGMA table_info(programacoes)")
-            cols = [upper(r[1]).lower() for r in cur.fetchall()]
+            cols = [str(r[1]).lower() for r in cur.fetchall()]
         except Exception:
             cols = []
 
@@ -10238,9 +10372,9 @@ class ImportarVendasPage(PageBase):
                     if caixas_para_validar > capacidade_cx:
                         messagebox.showwarning(
                             "ATENÇÃO",
-                            f"Capacidade excedida para o veículo {veiculo}.\n\n"
+                            f"Capacidade excedida para o veiculo {veiculo}.\n\n"
                             f"Caixas na programação: {caixas_para_validar}\n"
-                            f"Capacidade do veículo: {capacidade_cx}"
+                            f"Capacidade do veiculo: {capacidade_cx}"
                         )
                         return
             except Exception:
@@ -10357,7 +10491,7 @@ class ImportarVendasPage(PageBase):
                     self._ensure_vendas_usada_cols(cur)
                     self._vendas_cols_checked = True
 
-                # Valida capacidade do veÃÂÂculo (CX) antes de salvar programação.
+                # Valida capacidade do veiculo (CX) antes de salvar programacao.
                 cap_col = "capacidade_cx"
                 try:
                     cur.execute("PRAGMA table_info(veiculos)")
@@ -10387,7 +10521,7 @@ class ImportarVendasPage(PageBase):
                 if capacidade_cx < 0:
                     messagebox.showwarning(
                         "ATENÇÃO",
-                        f"Capacidade (CX) inválida para o veÃÂÂculo {veiculo}. Ajuste no cadastro de veÃÂÂculos."
+                        f"Capacidade (CX) invalida para o veiculo {veiculo}. Ajuste no cadastro de veiculos."
                     )
                     return
 
@@ -10395,9 +10529,9 @@ class ImportarVendasPage(PageBase):
                 if caixas_para_validar > capacidade_cx:
                     messagebox.showwarning(
                         "ATENÇÃO",
-                        f"Capacidade excedida para o veÃÂÂculo {veiculo}.\n\n"
+                        f"Capacidade excedida para o veiculo {veiculo}.\n\n"
                         f"Caixas na programação: {caixas_para_validar}\n"
-                        f"Capacidade do veÃÂÂculo: {capacidade_cx}"
+                        f"Capacidade do veiculo: {capacidade_cx}"
                     )
                     return
 
@@ -11498,10 +11632,10 @@ class ImportarVendasPage(PageBase):
             except Exception as e:
                 messagebox.showerror("ERRO", f"Erro ao gerar romaneios: {str(e)}")
 
-        ttk.Button(bottom, text="â¬â€¦ Anterior", style="Ghost.TButton", command=_prev).pack(side="left")
-        ttk.Button(bottom, text="Próximo âÅ¾¡", style="Ghost.TButton", command=_next).pack(side="left", padx=8)
-        ttk.Button(bottom, text="ðÅ¸â€œâ€ž GERAR PDF", style="Primary.TButton", command=_export_pdf).pack(side="right")
-        ttk.Button(bottom, text="âÅ“â€“ Fechar", style="Danger.TButton", command=win.destroy).pack(side="right", padx=8)
+        ttk.Button(bottom, text="Anterior", style="Ghost.TButton", command=_prev).pack(side="left")
+        ttk.Button(bottom, text="Proximo", style="Ghost.TButton", command=_next).pack(side="left", padx=8)
+        ttk.Button(bottom, text="GERAR PDF", style="Primary.TButton", command=_export_pdf).pack(side="right")
+        ttk.Button(bottom, text="Fechar", style="Danger.TButton", command=win.destroy).pack(side="right", padx=8)
 
         cb.bind("<<ComboboxSelected>>", _on_sel)
         vias_var.trace_add("write", lambda *_: _render())
@@ -12513,7 +12647,7 @@ class RecebimentosPage(PageBase):
 
     def _warn_if_fechada(self) -> bool:
         if self._is_prestacao_fechada(self._current_prog):
-            messagebox.showwarning("ATENÇÃO", "Esta prestação já está FECHADA. Não é possÃÂÂvel alterar recebimentos.")
+            messagebox.showwarning("ATENCAO", "Esta prestacao ja esta FECHADA. Nao e possivel alterar recebimentos.")
             return True
         return False
 
@@ -14409,7 +14543,7 @@ class DespesasPage(PageBase):
         self.canvas_km_pie = tk.Canvas(chart_wrap, width=300, height=180, bg="white", highlightthickness=1, highlightbackground="#E5E7EB")
         self.canvas_km_pie.grid(row=0, column=0, sticky="w")
 
-        ttk.Label(km_side, text="ÚLTIMOS KM POR VEÃÂÂCULO", style="CardTitle.TLabel").grid(row=2, column=0, sticky="w", pady=(4, 4))
+        ttk.Label(km_side, text="ULTIMOS KM POR VEICULO", style="CardTitle.TLabel").grid(row=2, column=0, sticky="w", pady=(4, 4))
         self.tree_km_veiculos = ttk.Treeview(
             km_side,
             columns=["VEICULO", "KM", "MÉDIA", "DATA"],
@@ -14544,7 +14678,7 @@ class DespesasPage(PageBase):
         self.lbl_kpi_cedulas_total = ttk.Label(kpi_ced, text="R$ 0,00", font=("Segoe UI", 11, "bold"), foreground="#7C3AED")
         self.lbl_kpi_cedulas_total.grid(row=0, column=0, sticky="w")
 
-        kpi_res = ttk.LabelFrame(kpi_row, text=" RESULTADO LÃÂÂQUIDO ", padding=5)
+        kpi_res = ttk.LabelFrame(kpi_row, text=" RESULTADO LIQUIDO ", padding=5)
         kpi_res.grid(row=0, column=3, sticky="ew")
         self.lbl_kpi_resultado_liquido = ttk.Label(kpi_res, text="R$ 0,00", font=("Segoe UI", 11, "bold"), foreground="#2E7D32")
         self.lbl_kpi_resultado_liquido.grid(row=0, column=0, sticky="w")
@@ -14574,7 +14708,7 @@ class DespesasPage(PageBase):
         self.lbl_total_entradas = ttk.Label(entrada_frame, text="R$ 0,00", font=("Segoe UI", 10, "bold"), foreground="#2E7D32")
         self.lbl_total_entradas.grid(row=2, column=1, sticky="e", pady=(4, 1))
 
-        saida_frame = ttk.LabelFrame(details_wrap, text=" SAÃÂÂDAS ", padding=5)
+        saida_frame = ttk.LabelFrame(details_wrap, text=" SAIDAS ", padding=5)
         saida_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 4), pady=(3, 0))
         saida_frame.grid_columnconfigure(1, weight=1)
 
@@ -16378,7 +16512,7 @@ class DespesasPage(PageBase):
         resposta = _call_api("POST", "auth/motorista/login", payload={"codigo": codigo, "senha": senha})
         token = resposta.get("token")
         if not token:
-            raise SyncError("Não foi possÃÂÂvel obter token da API de sincronização.")
+            raise SyncError("Nao foi possivel obter token da API de sincronizacao.")
         return token
 
     def _apply_api_programacao(self, cur, prog: str, rota: dict):
@@ -16968,13 +17102,13 @@ class DespesasPage(PageBase):
         if safe_int(info.get("pend_substituicao"), 0) > 0:
             return (
                 False,
-                "Não é possÃÂvel finalizar a prestação:\n"
+                "Nao e possivel finalizar a prestacao:\n"
                 "existe substituição de rota pendente de aceite/recusa.",
             )
         if safe_int(info.get("pend_transferencia"), 0) > 0:
             return (
                 False,
-                "Não é possÃÂvel finalizar a prestação:\n"
+                "Nao e possivel finalizar a prestacao:\n"
                 "existem transferências de caixas pendentes.",
             )
         if not bool(info.get("itens_ok", True)):
@@ -18567,7 +18701,7 @@ class DespesasPage(PageBase):
                 f"Arquivo: {os.path.basename(path)}\n"
                 f"Despesas: {len(df_despesas)}\n"
                 f"Recebimentos: {len(df_receb)}\n"
-                f"Resultado LÃÂÂquido: {self._fmt_money(resultado_liquido) if hasattr(self, '_fmt_money') else resultado_liquido}"
+                f"Resultado Liquido: {self._fmt_money(resultado_liquido) if hasattr(self, '_fmt_money') else resultado_liquido}"
             )
 
         except Exception as e:
@@ -19860,7 +19994,7 @@ class CentroCustosPage(PageBase):
                 + f" | Custo/KM global: {custo_km_global:.3f} | Custo/KG global: {custo_kg_global:.3f}"
             )
         )
-        self.set_status(f"STATUS: Centro de Custos atualizado ({self.var_periodo.get()} dias / veÃÂculo {self.var_veiculo.get()}).")
+        self.set_status(f"STATUS: Centro de Custos atualizado ({self.var_periodo.get()} dias / veiculo {self.var_veiculo.get()}).")
 
 
 class RelatoriosPage(PageBase):
@@ -20631,7 +20765,7 @@ class RelatoriosPage(PageBase):
                 lines.append(f"{'FOLHA DE PROGRAMAÃ‡ÃƒO':^118}")
                 lines.append("=" * 118)
                 lines.append(f"CÃ“DIGO: {prog}   DATA: {data_criacao or '-'}   STATUS: {upper(status or '-')}")
-                lines.append(f"MOTORISTA: {upper(motorista or '-')}   VEÃƒÃ‚ÂCULO: {upper(veiculo or '-')}   LOCAL: {upper(local or '-')}")
+                lines.append(f"MOTORISTA: {upper(motorista or '-')}   VEICULO: {upper(veiculo or '-')}   LOCAL: {upper(local or '-')}")
                 lines.append(f"EQUIPE: {equipe_txt or '-'}")
                 lines.append(
                     f"{estimativa_txt}   CLIENTES: {len(itens)}   TOTAL ESTIMADO: {self._fmt_rel_money(total_prev)}"
@@ -20731,7 +20865,7 @@ class RelatoriosPage(PageBase):
         lines.append(f"{'FOLHA DE PROGRAMAÇÃO':^118}")
         lines.append("=" * 118)
         lines.append(f"CÓDIGO: {prog}   DATA: {data_criacao or '-'}   STATUS: {upper(status or '-')}")
-        lines.append(f"MOTORISTA: {upper(motorista or '-')}   VEÃÂCULO: {upper(veiculo or '-')}   LOCAL: {upper(local or '-')}")
+        lines.append(f"MOTORISTA: {upper(motorista or '-')}   VEICULO: {upper(veiculo or '-')}   LOCAL: {upper(local or '-')}")
         lines.append(f"EQUIPE: {equipe_txt or '-'}")
         lines.append(
             f"{estimativa_txt}   CLIENTES: {len(itens)}   TOTAL ESTIMADO: {self._fmt_rel_money(total_prev)}"
@@ -20974,11 +21108,11 @@ class RelatoriosPage(PageBase):
         lines.append(f"{'FOLHA DE PRESTAÇÃO DE CONTAS':^118}")
         lines.append("=" * 118)
         lines.append(f"CÓDIGO: {prog}   DATA: {data_criacao or '-'}   STATUS: {upper(status or '-')}   PRESTAÇÃO: {upper(prest or '-')}")
-        lines.append(f"MOTORISTA: {upper(motorista or '-')}   VEÃÂCULO: {upper(veiculo or '-')}   EQUIPE: {equipe_txt or '-'}")
+        lines.append(f"MOTORISTA: {upper(motorista or '-')}   VEICULO: {upper(veiculo or '-')}   EQUIPE: {equipe_txt or '-'}")
         lines.append("-" * 118)
         lines.append(
             f"ENTRADAS (RECEB+ADIANT.): {self._fmt_rel_money(entradas)}   "
-            f"SAÃÂDAS (DESPESAS): {self._fmt_rel_money(saidas)}   "
+            f"SAIDAS (DESPESAS): {self._fmt_rel_money(saidas)}   "
             f"RESULTADO: {self._fmt_rel_money(resultado)}"
         )
         lines.append(
@@ -21001,7 +21135,7 @@ class RelatoriosPage(PageBase):
         if not desp:
             lines.append("Sem despesas.")
         lines.append("-" * 118)
-        lines.append("[RASTREABILIDADE LOGÃÂSTICA]")
+        lines.append("[RASTREABILIDADE LOGISTICA]")
         for ln in (log_info.get("resumo") or []):
             lines.append(str(ln))
         lines.append(
@@ -21167,13 +21301,13 @@ class RelatoriosPage(PageBase):
         self._set_dashboard(
             f"Veiculos: {len(rows)}",
             f"KM total: {total_km:.2f}",
-            f"Média KM/veÃÂculo: {(total_km / max(len(rows), 1)):.2f}",
+            f"Media KM/veiculo: {(total_km / max(len(rows), 1)):.2f}",
             f"Destaque: {upper(top or '-')}",
             [upper((r[0] or "-")) for r in rows[:8]],
             [safe_float(r[2], 0.0) for r in rows[:8]],
             color="#2563EB",
         )
-        self.set_status(f"STATUS: Relatório de KM por veÃÂculo gerado ({len(rows)} veÃÂculo(s)).")
+        self.set_status(f"STATUS: Relatorio de KM por veiculo gerado ({len(rows)} veiculo(s)).")
 
     def _gerar_relatorio_despesas_geral(self):
         rows = []
@@ -22205,7 +22339,7 @@ class BackupExportarPage(PageBase):
             return
 
         try:
-            # âÅâ€œââ‚¬¦ melhor prática: usar SQLite backup API quando possÃÂÂvel
+            # melhor pratica: usar SQLite backup API quando possivel
             try:
                 import sqlite3
                 src = sqlite3.connect(DB_PATH)
@@ -22282,7 +22416,7 @@ class BackupExportarPage(PageBase):
         except PermissionError:
             messagebox.showerror(
                 "ERRO",
-                "Não foi possÃÂÂvel substituir o banco (arquivo em uso).\n\n"
+                "Nao foi possivel substituir o banco (arquivo em uso).\n\n"
                 "Feche o sistema e tente novamente, ou reinicie o computador."
             )
         except Exception as e:
@@ -22411,7 +22545,7 @@ class LoginWindow(tk.Tk):
         self.btn_entrar = ttk.Button(btns, text="🔐 ENTRAR", style="Primary.TButton", command=self.try_login)
         self.btn_entrar.grid(row=0, column=0, sticky="ew", padx=(0, 6), ipady=6)
 
-        self.btn_sair = ttk.Button(btns, text="âÂ» SAIR", style="Danger.TButton", command=self._request_close)
+        self.btn_sair = ttk.Button(btns, text="SAIR", style="Danger.TButton", command=self._request_close)
         self.btn_sair.grid(row=0, column=1, sticky="ew", padx=(6, 0), ipady=6)
 
         self.ent_codigo.focus_set()
@@ -22423,7 +22557,7 @@ class LoginWindow(tk.Tk):
 
     def _request_close(self):
         try:
-            ok = messagebox.askyesno("Confirmar saÃÂda", "Deseja realmente fechar o sistema?")
+            ok = messagebox.askyesno("Confirmar saida", "Deseja realmente fechar o sistema?")
         except Exception:
             ok = True
         if ok:
