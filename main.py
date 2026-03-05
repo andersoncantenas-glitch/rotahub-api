@@ -2719,7 +2719,7 @@ class CadastroCRUD(ttk.Frame):
                 if placa:
                     cur.execute("SELECT COUNT(*) FROM programacoes WHERE UPPER(COALESCE(veiculo,''))=UPPER(?)", (placa,))
                     if int((cur.fetchone() or [0])[0] or 0) > 0:
-                        return "VeÃÂculo vinculado a programação/rota."
+                        return "Veiculo vinculado a programacao/rota."
             elif self.table == "clientes":
                 cod = self._norm(self._get("cod_cliente"))
                 if cod:
@@ -3265,7 +3265,7 @@ class CadastroCRUD(ttk.Frame):
             except Exception as e:
                 messagebox.showwarning(
                     "Sincronização",
-                    "VeÃÂculo salvo localmente, mas falhou ao sincronizar com a API.\n"
+                    "Veiculo salvo localmente, mas falhou ao sincronizar com a API.\n"
                     f"Detalhe: {e}",
                 )
         elif (not saved_via_api) and self.table == "ajudantes":
@@ -3744,7 +3744,7 @@ class CadastrosPage(PageBase):
         frm_veiculos = ttk.Frame(nb, style="Content.TFrame")
         crud_veiculos = CadastroCRUD(
             frm_veiculos,
-            "VeÃÂÂculos",
+            "Veiculos",
             "veiculos",
             [
                 ("placa", "PLACA"),
@@ -3754,7 +3754,7 @@ class CadastrosPage(PageBase):
             app=app
         )
         crud_veiculos.pack(fill="both", expand=True)
-        nb.add(frm_veiculos, text="VeÃÂÂculos")
+        nb.add(frm_veiculos, text="Veiculos")
 
         # -------------------------
         # EQUIPES (mantém)
@@ -5685,7 +5685,7 @@ class HomePage(PageBase):
             ttk.Label(head, text=f"Programação: {codigo}").grid(row=1, column=0, sticky="w")
             ttk.Label(head, text=f"NF: {cabecalho_ctx.get('nf_numero') or '-'}").grid(row=1, column=1, sticky="w")
             ttk.Label(head, text=f"Motorista: {cabecalho_ctx.get('motorista') or '-'}").grid(row=1, column=2, sticky="w")
-            ttk.Label(head, text=f"VeÃÂculo: {cabecalho_ctx.get('veiculo') or '-'}").grid(row=1, column=3, sticky="w")
+            ttk.Label(head, text=f"Veiculo: {cabecalho_ctx.get('veiculo') or '-'}").grid(row=1, column=3, sticky="w")
 
             nb = ttk.Notebook(area)
             nb.grid(row=1, column=0, sticky="nsew")
@@ -6399,7 +6399,7 @@ class HomePage(PageBase):
 
         btns = ttk.Frame(frm)
         btns.grid(row=3, column=0, sticky="e", pady=(6, 0))
-        ttk.Button(btns, text="ðŸ”„ ATUALIZAR", style="Ghost.TButton", command=_load_preview).pack(side="right")
+        ttk.Button(btns, text="ATUALIZAR", style="Ghost.TButton", command=_load_preview).pack(side="right")
 
 
 class RotasPage(PageBase):
@@ -6456,13 +6456,13 @@ class RotasPage(PageBase):
         )
         self.tree.bind("<Double-1>", lambda _e: self._abrir_mapa_selecionado())
 
-        ttk.Button(self.footer_right, text="ðŸ”„ ATUALIZAR", style="Ghost.TButton", command=self.carregar).grid(
+        ttk.Button(self.footer_right, text="ATUALIZAR", style="Ghost.TButton", command=self.carregar).grid(
             row=0, column=0, padx=4
         )
-        ttk.Button(self.footer_right, text="ðÅ¸â€”º MAPA SELECIONADO", style="Primary.TButton", command=self._abrir_mapa_selecionado).grid(
+        ttk.Button(self.footer_right, text="MAPA SELECIONADO", style="Primary.TButton", command=self._abrir_mapa_selecionado).grid(
             row=0, column=1, padx=4
         )
-        ttk.Button(self.footer_right, text="ðÅ¸Å’Â MAPA DE TODAS", style="Primary.TButton", command=self._abrir_mapa_todas).grid(
+        ttk.Button(self.footer_right, text="MAPA DE TODAS", style="Primary.TButton", command=self._abrir_mapa_todas).grid(
             row=0, column=2, padx=4
         )
 
@@ -7627,7 +7627,7 @@ class ClientesImportPage(ttk.Frame):
         ttk.Button(actions, text="ðŸ”„ ATUALIZAR", style="Ghost.TButton",
                    command=self.carregar).grid(row=0, column=1, padx=6)
 
-        ttk.Button(actions, text="âÅ¾â€¢ INSERIR LINHA", style="Ghost.TButton",
+        ttk.Button(actions, text="INSERIR LINHA", style="Ghost.TButton",
                    command=self.inserir_linha).grid(row=0, column=2, padx=6)
 
         ttk.Button(actions, text="SALVAR ALTERAÇÕES", style="Primary.TButton",
@@ -8063,7 +8063,7 @@ class CadastrosPage(PageBase):
         frm_veiculos = ttk.Frame(nb, style="Content.TFrame")
         crud_veiculos = CadastroCRUD(
             frm_veiculos,
-            "VeÃÂÂculos",
+            "Veiculos",
             "veiculos",
             [
                 ("placa", "PLACA"),
@@ -8074,7 +8074,7 @@ class CadastrosPage(PageBase):
             app=app
         )
         crud_veiculos.pack(fill="both", expand=True)
-        nb.add(frm_veiculos, text="VeÃÂÂculos")
+        nb.add(frm_veiculos, text="Veiculos")
 
         frm_ajudantes = ttk.Frame(nb, style="Content.TFrame")
         crud_ajudantes = CadastroCRUD(
@@ -8721,12 +8721,12 @@ class ImportarVendasPage(PageBase):
         self.cb_motorista = ttk.Combobox(card, state="readonly", width=16)
         self.cb_motorista.grid(row=1, column=0, sticky="ew", padx=6)
 
-        ttk.Label(card, text="VeÃÂÂculo", style="CardLabel.TLabel").grid(row=0, column=1, sticky="w")
+        ttk.Label(card, text="Veiculo", style="CardLabel.TLabel").grid(row=0, column=1, sticky="w")
         self.cb_veiculo = ttk.Combobox(card, state="readonly", width=12)
         self.cb_veiculo.grid(row=1, column=1, sticky="ew", padx=6)
 
         ttk.Label(card, text="Ajudantes (multipla escolha)", style="CardLabel.TLabel").grid(row=0, column=2, sticky="w")
-        self.btn_ajudantes = ttk.Button(card, text="ðÅ¸â€˜¥ Selecionar ajudantes", style="Ghost.TButton", command=self._open_ajudantes_selector)
+        self.btn_ajudantes = ttk.Button(card, text="Selecionar ajudantes", style="Ghost.TButton", command=self._open_ajudantes_selector)
         self.btn_ajudantes.grid(row=1, column=2, columnspan=2, sticky="ew", padx=6)
         self.lbl_ajudantes_sel = ttk.Label(card, text="Nenhum selecionado", style="CardLabel.TLabel")
         self.lbl_ajudantes_sel.grid(row=2, column=2, columnspan=2, sticky="w", padx=6, pady=(2, 0))
@@ -8809,13 +8809,13 @@ class ImportarVendasPage(PageBase):
             command=self.carregar_vendas_selecionadas
         ).grid(row=0, column=0, padx=4, sticky="ew")
 
-        ttk.Button(acoes_linha_1, text="âÅ¾â€¢ INSERIR LINHA", style="Ghost.TButton",
+        ttk.Button(acoes_linha_1, text="INSERIR LINHA", style="Ghost.TButton",
                    command=self.inserir_linha).grid(row=0, column=1, padx=4, sticky="ew")
 
-        ttk.Button(acoes_linha_1, text="âÅ¾â€“ REMOVER LINHA", style="Danger.TButton",
+        ttk.Button(acoes_linha_1, text="REMOVER LINHA", style="Danger.TButton",
                    command=self.remover_linha).grid(row=0, column=2, padx=4, sticky="ew")
 
-        ttk.Button(acoes_linha_1, text="ðÅ¸§¹ LIMPAR ITENS", style="Danger.TButton",
+        ttk.Button(acoes_linha_1, text="LIMPAR ITENS", style="Danger.TButton",
                    command=self.limpar_itens).grid(row=0, column=3, padx=4, sticky="ew")
 
         acoes_linha_2 = ttk.Frame(top2, style="Card.TFrame")
@@ -8832,7 +8832,7 @@ class ImportarVendasPage(PageBase):
 
         ttk.Button(
             acoes_linha_2,
-            text="âÅ“Âï¸Â EDITAR PROGRAMAÇÃO",
+            text="EDITAR PROGRAMACAO",
             style="Ghost.TButton",
             command=self.carregar_programacao_para_edicao
         ).grid(row=0, column=1, padx=4, sticky="ew")
@@ -9076,7 +9076,7 @@ class ImportarVendasPage(PageBase):
         labels = self._get_selected_labels()
         qtd = len(labels)
         if qtd <= 0:
-            self.btn_ajudantes.configure(text="ðÅ¸â€˜¥ Selecionar ajudantes")
+            self.btn_ajudantes.configure(text="Selecionar ajudantes")
             self.lbl_ajudantes_sel.configure(text="Nenhum selecionado")
             return
         self.btn_ajudantes.configure(text=f"{qtd} selecionado(s)")
@@ -10157,7 +10157,7 @@ class ImportarVendasPage(PageBase):
                 return
 
         if not motorista_nome or not veiculo:
-            messagebox.showwarning("ATENÇÃO", "Selecione Motorista e VeÃÂÂculo.")
+            messagebox.showwarning("ATENCAO", "Selecione Motorista e Veiculo.")
             return
         if self._ajudantes_mode == "equipes":
             if not ajudante1:
@@ -10369,7 +10369,7 @@ class ImportarVendasPage(PageBase):
                 if not vrow:
                     messagebox.showwarning(
                         "ATENÇÃO",
-                        f"VeÃÂÂculo não encontrado no cadastro: {veiculo}."
+                        f"Veiculo nao encontrado no cadastro: {veiculo}.",
                     )
                     return
 
@@ -13861,7 +13861,7 @@ class RecebimentosPage(PageBase):
                 c.drawString(x + 28 * mm, y0, v or "")
 
             draw_kv(col1_x, y, "Motorista", header["motorista_nome"])
-            draw_kv(col2_x, y, "VeÃÂÂculo", header["veiculo"])
+            draw_kv(col2_x, y, "Veiculo", header["veiculo"])
             y -= line_h
 
             draw_kv(col1_x, y, "Equipe", header["equipe_nomes"])
@@ -19492,7 +19492,7 @@ class CentroCustosPage(PageBase):
         )
         self.cb_periodo.grid(row=1, column=0, sticky="w", padx=(0, 10))
 
-        ttk.Label(filtros, text="VeÃÂculo", style="CardLabel.TLabel").grid(row=0, column=1, sticky="w")
+        ttk.Label(filtros, text="Veiculo", style="CardLabel.TLabel").grid(row=0, column=1, sticky="w")
         self.var_veiculo = tk.StringVar(value="TODOS")
         self.cb_veiculo = ttk.Combobox(
             filtros, textvariable=self.var_veiculo, state="readonly", width=16, values=["TODOS"]
@@ -19526,7 +19526,7 @@ class CentroCustosPage(PageBase):
         chart_wrap = ttk.Frame(self.body, style="Card.TFrame", padding=10)
         chart_wrap.grid(row=2, column=0, sticky="ew")
         chart_wrap.grid_columnconfigure(0, weight=1)
-        self.lbl_chart_title = ttk.Label(chart_wrap, text="Custo por VeÃÂculo (Custo/KM)", style="CardTitle.TLabel")
+        self.lbl_chart_title = ttk.Label(chart_wrap, text="Custo por Veiculo (Custo/KM)", style="CardTitle.TLabel")
         self.lbl_chart_title.grid(row=0, column=0, sticky="w")
         self.cv_chart = tk.Canvas(chart_wrap, height=220, bg="white", highlightthickness=1, highlightbackground="#E5E7EB")
         self.cv_chart.grid(row=1, column=0, sticky="ew", pady=(6, 0))
@@ -19829,13 +19829,13 @@ class CentroCustosPage(PageBase):
         metric = upper(self.var_chart_metric.get().strip())
         if metric == "CUSTO_KG":
             idx = 6
-            title = "Custo por VeÃÂculo (Custo/KG)"
+            title = "Custo por Veiculo (Custo/KG)"
         elif metric == "DESPESA_TOTAL":
             idx = 4
-            title = "Custo por VeÃÂculo (Despesa Total)"
+            title = "Custo por Veiculo (Despesa Total)"
         else:
             idx = 5
-            title = "Custo por VeÃÂculo (Custo/KM)"
+            title = "Custo por Veiculo (Custo/KM)"
         self.lbl_chart_title.config(text=title)
         chart_rows = sorted(rows_out, key=lambda r: safe_float(r[idx], 0.0), reverse=True)
         self._chart_labels = [r[0] for r in chart_rows[:10]]
@@ -19844,7 +19844,7 @@ class CentroCustosPage(PageBase):
 
         self.lbl_resumo.config(
             text=(
-                f"VeÃÂculos: {len(rows_out)} | Rotas: {total_rotas} | "
+                f"Veiculos: {len(rows_out)} | Rotas: {total_rotas} | "
                 f"KM: {total_km:.1f} | KG carregado: {total_kg:.2f} | "
                 f"Despesas: R$ {total_desp:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
                 + f" | Custo/KM global: {custo_km_global:.3f} | Custo/KG global: {custo_kg_global:.3f}"
@@ -21155,7 +21155,7 @@ class RelatoriosPage(PageBase):
         total_km = sum(safe_float(r[2], 0.0) for r in rows)
         top = rows[0][0] if rows else "-"
         self._set_dashboard(
-            f"VeÃÂculos: {len(rows)}",
+            f"Veiculos: {len(rows)}",
             f"KM total: {total_km:.2f}",
             f"Média KM/veÃÂculo: {(total_km / max(len(rows), 1)):.2f}",
             f"Destaque: {upper(top or '-')}",
