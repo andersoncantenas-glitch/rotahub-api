@@ -34,7 +34,7 @@ if not SECRET_KEY:
     raise RuntimeError("ROTA_SECRET nao definido. Configure a variavel de ambiente para iniciar a API.")
 TOKEN_TTL_SECONDS = 60 * 60 * 24 * 7  # 7 dias
 
-app = FastAPI(title="Rota Granja API", version="1.1.4")
+app = FastAPI(title="Rota Granja API", version="1.1.5")
 
 def _cors_origins_from_env() -> List[str]:
     raw = os.environ.get("ROTA_CORS_ORIGINS", "").strip()
