@@ -8632,7 +8632,7 @@ class ImportarVendasPage(PageBase):
         self._ensure_vendas_usada_cols()
         itens = self.tree.selection() or ()
         if not itens:
-            messagebox.showwarning("ATEN??O", "Selecione uma ou mais vendas para marcar.")
+            messagebox.showwarning("ATENCAO", "Selecione uma ou mais vendas para marcar.")
             return
 
         ids = []
@@ -8647,7 +8647,7 @@ class ImportarVendasPage(PageBase):
                 ids.append(rid)
 
         if not ids:
-            messagebox.showwarning("ATEN??O", "N?o foi poss?vel identificar as vendas selecionadas.")
+            messagebox.showwarning("ATENCAO", "Nao foi possivel identificar as vendas selecionadas.")
             return
 
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
