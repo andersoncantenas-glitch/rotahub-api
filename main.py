@@ -161,8 +161,9 @@ if is_desktop_api_sync_enabled() and not os.environ.get("ROTA_SECRET", "").strip
     )
 
 # Versao/update/suporte (customizavel via variaveis de ambiente no servidor/estacao)
-APP_VERSION = "1.1.4"
-UPDATE_MANIFEST_URL = os.environ.get("ROTA_UPDATE_MANIFEST_URL", "").strip()
+APP_VERSION = "1.1.5"
+DEFAULT_UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/andersoncantenas-glitch/rotahub-api/main/updates/version.json"
+UPDATE_MANIFEST_URL = os.environ.get("ROTA_UPDATE_MANIFEST_URL", DEFAULT_UPDATE_MANIFEST_URL).strip()
 SETUP_DOWNLOAD_URL = os.environ.get("ROTA_SETUP_URL", "").strip()
 CHANGELOG_URL = os.environ.get("ROTA_CHANGELOG_URL", "").strip()
 SUPPORT_WHATSAPP = os.environ.get("ROTA_SUPPORT_WHATSAPP", "").strip()
@@ -2195,6 +2196,8 @@ class CadastroCRUD(ttk.Frame):
         self.app = app
         self.selected_id = None
         self._is_admin = bool(getattr(self.app, "user", {}).get("is_admin")) if self.app else False
+        self._edit_mode = "view"  # view | novo | status
+        self._has_status_field = any(col == "status" for col, _ in fields)
 
         # Card
         card = ttk.Frame(self, style="Card.TFrame", padding=16)
@@ -2237,16 +2240,21 @@ class CadastroCRUD(ttk.Frame):
                 kind, precision = self._infer_entry_kind(col, label)
                 bind_entry_smart(ent, kind, precision=precision)
 
-        # BOTÕES
+        # BOTOES
         actions = ttk.Frame(card, style="Card.TFrame")
         actions.grid(row=2, column=0, sticky="ew", pady=(4, 12))
         actions.grid_columnconfigure(20, weight=1)
 
-        ttk.Button(actions, text="ðÅ¸â€™¾ SALVAR", style="Primary.TButton", command=self.salvar).grid(row=0, column=0, padx=6)
-        ttk.Button(actions, text="âÅ“Âï¸Â EDITAR", style="Ghost.TButton", command=self.editar).grid(row=0, column=1, padx=6)
-        ttk.Button(actions, text="ðÅ¸â€”â€˜ï¸Â EXCLUIR", style="Danger.TButton", command=self.excluir).grid(row=0, column=2, padx=6)
-        ttk.Button(actions, text="ðÅ¸§¹ LIMPAR", style="Ghost.TButton", command=self.limpar).grid(row=0, column=3, padx=6)
-        ttk.Button(actions, text="ðŸ”„ ATUALIZAR", style="Ghost.TButton", command=self.carregar).grid(row=0, column=4, padx=6)
+        self.btn_novo = ttk.Button(actions, text="NOVO", style="Ghost.TButton", command=self.novo)
+        self.btn_novo.grid(row=0, column=0, padx=6)
+        self.btn_alterar = ttk.Button(actions, text="ALTERAR", style="Ghost.TButton", command=self.alterar)
+        self.btn_alterar.grid(row=0, column=1, padx=6)
+        self.btn_salvar = ttk.Button(actions, text="SALVAR", style="Primary.TButton", command=self.salvar)
+        self.btn_salvar.grid(row=0, column=2, padx=6)
+        self.btn_liberar = ttk.Button(actions, text="LIBERAR", style="Primary.TButton", command=lambda: self._set_status_rapido(True))
+        self.btn_liberar.grid(row=0, column=3, padx=6)
+        self.btn_bloquear = ttk.Button(actions, text="BLOQUEAR", style="Danger.TButton", command=lambda: self._set_status_rapido(False))
+        self.btn_bloquear.grid(row=0, column=4, padx=6)
 
         if self.table == "ajudantes":
             self._ajudantes_status_filter = tk.StringVar(value="TODOS")
@@ -2261,48 +2269,15 @@ class CadastroCRUD(ttk.Frame):
             cb_status_filter.grid(row=0, column=11, padx=6, sticky="w")
             cb_status_filter.bind("<<ComboboxSelected>>", lambda _e: self.carregar())
 
-        # Importar clientes (se você ainda usa esse CRUD para clientes em algum lugar)
         if self.table == "clientes":
-            ttk.Button(
+            self.btn_importar_clientes = ttk.Button(
                 actions,
-                text="ðÅ¸â€œ¥ IMPORTAR CLIENTES (EXCEL)",
+                text="IMPORTAR CLIENTES (EXCEL)",
                 style="Warn.TButton",
-                command=self.importar_clientes_excel
-            ).grid(row=0, column=5, padx=6)
+                command=self.importar_clientes_excel,
+            )
+            self.btn_importar_clientes.grid(row=0, column=5, padx=6)
 
-        if self.table == "motoristas":
-            self.btn_senha = ttk.Button(
-                actions,
-                text="ALTERAR SENHA",
-                style="Warn.TButton",
-                command=self.alterar_senha_motorista
-            )
-            self.btn_senha.grid(row=0, column=6, padx=6)
-            self.btn_liberar_app = ttk.Button(
-                actions,
-                text="LIBERAR APP",
-                style="Primary.TButton",
-                command=lambda: self.definir_acesso_app_motorista(True),
-            )
-            self.btn_liberar_app.grid(row=0, column=7, padx=6)
-            self.btn_bloquear_app = ttk.Button(
-                actions,
-                text="BLOQUEAR APP",
-                style="Danger.TButton",
-                command=lambda: self.definir_acesso_app_motorista(False),
-            )
-            self.btn_bloquear_app.grid(row=0, column=8, padx=6)
-
-        if self.table == "usuarios":
-            self.btn_senha = ttk.Button(
-                actions,
-                text="ALTERAR SENHA",
-                style="Warn.TButton",
-                command=self.alterar_senha
-            )
-            self.btn_senha.grid(row=0, column=6, padx=6)
-
-        
         # Tabela
         cols = ["ID"] + [label for _, label in self.fields]
         self.tree = ttk.Treeview(card, columns=cols, show="headings", height=12)
@@ -2327,6 +2302,8 @@ class CadastroCRUD(ttk.Frame):
 
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
         self.carregar()
+        self.limpar()
+        self._set_form_mode("view")
         self._update_password_controls()
 
     # -------------------------
@@ -2334,6 +2311,121 @@ class CadastroCRUD(ttk.Frame):
     # -------------------------
     def _norm(self, v):
         return upper(str(v or "").strip())
+
+    def _extract_motorista_seq(self, codigo: str) -> int:
+        s = upper(str(codigo or "").strip())
+        m = re.match(r"^MOT-(\d+)$", s)
+        if not m:
+            return 0
+        try:
+            return int(m.group(1))
+        except Exception:
+            return 0
+
+    def _next_motorista_codigo(self, cur=None) -> str:
+        max_seq = 0
+
+        # Prioriza API central quando sincronizacao estiver ativa.
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                rows = _call_api(
+                    "GET",
+                    "desktop/cadastros/motoristas",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                if isinstance(rows, list):
+                    for r in rows:
+                        if not isinstance(r, dict):
+                            continue
+                        max_seq = max(max_seq, self._extract_motorista_seq(r.get("codigo")))
+            except Exception:
+                logging.debug("Falha ao calcular proximo codigo de motorista via API; usando local.", exc_info=True)
+
+        # Fallback/local: garante funcionamento mesmo sem API.
+        try:
+            if cur is not None:
+                cur.execute("SELECT COALESCE(codigo,'') FROM motoristas")
+                for row in (cur.fetchall() or []):
+                    max_seq = max(max_seq, self._extract_motorista_seq(row[0] if row else ""))
+            else:
+                with get_db() as conn:
+                    c2 = conn.cursor()
+                    c2.execute("SELECT COALESCE(codigo,'') FROM motoristas")
+                    for row in (c2.fetchall() or []):
+                        max_seq = max(max_seq, self._extract_motorista_seq(row[0] if row else ""))
+        except Exception:
+            logging.debug("Falha ao calcular proximo codigo de motorista local.", exc_info=True)
+
+        next_seq = max(1, max_seq + 1)
+        return f"MOT-{next_seq:02d}"
+
+    def _set_widget_enabled(self, w, enabled: bool):
+        try:
+            if isinstance(w, ttk.Combobox):
+                if str(getattr(w, "cget")("state") or "") == "readonly":
+                    w.configure(state="readonly" if enabled else "disabled")
+                else:
+                    w.configure(state="normal" if enabled else "disabled")
+            else:
+                w.configure(state="normal" if enabled else "disabled")
+        except Exception:
+            logging.debug("Falha ignorada")
+
+    def _set_form_mode(self, mode: str):
+        self._edit_mode = str(mode or "view").lower()
+        if self._edit_mode not in {"view", "novo", "status"}:
+            self._edit_mode = "view"
+
+        for col, _ in self.fields:
+            w = self.entries.get(col)
+            if not w:
+                continue
+            if self._edit_mode == "novo":
+                self._set_widget_enabled(w, True)
+            elif self._edit_mode == "status":
+                self._set_widget_enabled(w, col == "status")
+            else:
+                self._set_widget_enabled(w, False)
+
+        if self._edit_mode == "novo" and self.table == "motoristas" and "codigo" in self.entries:
+            self._set("codigo", self._next_motorista_codigo())
+
+        try:
+            has_sel = bool(self.selected_id)
+            status_ops = self._has_status_field and has_sel
+            if hasattr(self, "btn_alterar"):
+                self.btn_alterar.config(state="normal" if status_ops else "disabled")
+            if hasattr(self, "btn_liberar"):
+                self.btn_liberar.config(state="normal" if status_ops else "disabled")
+            if hasattr(self, "btn_bloquear"):
+                self.btn_bloquear.config(state="normal" if status_ops else "disabled")
+        except Exception:
+            logging.debug("Falha ignorada")
+
+    def novo(self):
+        self.selected_id = None
+        for col, _ in self.fields:
+            self._set(col, "")
+        if self.table == "ajudantes" and "status" in self.entries:
+            self._set("status", "ATIVO")
+        if self.table == "motoristas" and "status" in self.entries:
+            self._set("status", "ATIVO")
+        self._set_form_mode("novo")
+        self._update_password_controls()
+
+    def _set_status_rapido(self, liberar: bool):
+        if not self._has_status_field:
+            messagebox.showwarning("ATENCAO", "Este cadastro nao possui campo STATUS.")
+            return
+        if not self.selected_id:
+            messagebox.showwarning("ATENCAO", "Selecione um cadastro na tabela.")
+            return
+        status_on = "ATIVO"
+        status_off = "INATIVO" if self.table == "motoristas" else "DESATIVADO"
+        self._set("status", status_on if liberar else status_off)
+        self._edit_mode = "status"
+        self.salvar()
 
     def _infer_entry_kind(self, col: str, label: str):
         c = str(col or "").strip().lower()
@@ -2678,7 +2770,27 @@ class CadastroCRUD(ttk.Frame):
             self._set("status", "ATIVO")
         if self.table == "motoristas" and "status" in self.entries:
             self._set("status", "ATIVO")
+            if "codigo" in self.entries:
+                self._set("codigo", self._next_motorista_codigo())
+        self._set_form_mode("view")
         self._update_password_controls()
+
+    def alterar(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("ATENCAO", "Selecione um item na tabela para alterar.")
+            return
+        self._on_select()
+        if not self._has_status_field:
+            messagebox.showwarning("ATENCAO", "Este cadastro nao possui campo STATUS.")
+            return
+        self._set_form_mode("status")
+        try:
+            ent = self.entries.get("status")
+            if ent:
+                ent.focus_set()
+        except Exception:
+            logging.debug("Falha ignorada")
 
     def carregar(self):
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
@@ -2814,12 +2926,63 @@ class CadastroCRUD(ttk.Frame):
         if not ensure_system_api_binding(context=f"Salvar cadastro ({self.table})", parent=self):
             return
 
+        if self._edit_mode not in {"novo", "status"}:
+            messagebox.showwarning("ATENCAO", "Clique em NOVO ou ALTERAR antes de salvar.")
+            return
+
         data = {col: self.entries[col].get().strip() for col, _ in self.fields}
 
         # Normalizações por tabela
         if self.table in {"motoristas", "usuarios", "veiculos", "equipes", "ajudantes", "clientes"}:
             for k in list(data.keys()):
                 data[k] = self._norm(data[k])
+
+        if self._edit_mode == "status":
+            if not self.selected_id:
+                messagebox.showwarning("ATENCAO", "Selecione um cadastro para alterar o status.")
+                return
+            if "status" not in data:
+                messagebox.showwarning("ATENCAO", "Este cadastro nao possui campo STATUS.")
+                return
+            novo_status = self._norm(data.get("status"))
+            if self.table == "motoristas":
+                if novo_status not in {"ATIVO", "INATIVO"}:
+                    messagebox.showwarning("ATENCAO", "Status invalido. Use ATIVO ou INATIVO.")
+                    return
+                data["status"] = novo_status
+            elif self.table == "ajudantes":
+                if novo_status not in {"ATIVO", "DESATIVADO"}:
+                    messagebox.showwarning("ATENCAO", "Status invalido. Use ATIVO ou DESATIVADO.")
+                    return
+                data["status"] = novo_status
+
+            try:
+                with get_db() as conn:
+                    cur = conn.cursor()
+                    cur.execute(f"UPDATE {self.table} SET status=? WHERE id=?", (data["status"], self.selected_id))
+            except Exception as e:
+                messagebox.showerror("ERRO", str(e))
+                return
+
+            desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+            if desktop_secret and is_desktop_api_sync_enabled():
+                try:
+                    if self.table == "motoristas":
+                        self._sync_motorista_upsert_api(data)
+                    elif self.table == "ajudantes":
+                        self._sync_ajudante_upsert_api(data)
+                except Exception as e:
+                    messagebox.showwarning(
+                        "Sincronizacao",
+                        "Status salvo localmente, mas falhou ao sincronizar com a API.\n"
+                        f"Detalhe: {e}",
+                    )
+
+            self.carregar()
+            self.limpar()
+            if self.app:
+                self.app.refresh_programacao_comboboxes()
+            return
 
         saved_via_api = False
         # Validar obrigatórios + duplicidade + tipos
@@ -2833,7 +2996,8 @@ class CadastroCRUD(ttk.Frame):
                 if self.table == "motoristas":
                     # Exige NOME, CÓDIGO e SENHA (manuais) + TELEFONE
                     # CPF é opcional, porém deve ser válido e único quando informado.
-                    ok, f = self._require_fields(["nome", "codigo", "senha", "telefone"])
+                    req = ["nome", "senha", "telefone"] if not self.selected_id else ["nome", "telefone"]
+                    ok, f = self._require_fields(req)
                     if not ok:
                         messagebox.showwarning("ATENÇÃO", f"PREENCHA O CAMPO: {f.upper()}.")
                         return
@@ -2847,6 +3011,8 @@ class CadastroCRUD(ttk.Frame):
 
                     # Código (login flutter)  manual, mas pode usar GERAR
                     cod = self._norm(data.get("codigo"))
+                    if not self.selected_id:
+                        cod = self._next_motorista_codigo(cur)
                     if not is_valid_motorista_codigo(cod):
                         messagebox.showwarning(
                             "ATENÇÃO",
@@ -2904,7 +3070,7 @@ class CadastroCRUD(ttk.Frame):
 
                     # Status do motorista
                     status_m = self._norm(data.get("status") or "ATIVO")
-                    if status_m not in {"ATIVO", "DESATIVADO"}:
+                    if status_m not in {"ATIVO", "INATIVO"}:
                         status_m = "ATIVO"
                     data["status"] = status_m
 
@@ -3198,6 +3364,7 @@ class CadastroCRUD(ttk.Frame):
                 self._set(col, "")
                 continue
             self._set(col, row[i] if i < len(row) else "")
+        self._set_form_mode("view")
         self._update_password_controls()
 
         # Mantive seu importar_clientes_excel como estava (se você ainda usa em algum ponto)
@@ -4375,7 +4542,7 @@ class HomePage(PageBase):
         local_v = self._version_tuple(APP_VERSION)
         remote_v = self._version_tuple(remote_version)
         is_candidate = (remote_v > local_v) and self._is_same_release_line(local_v, remote_v)
-        remote_display = remote_version if is_candidate else "0.0.0"
+        remote_display = remote_version if remote_version != "-" else "-"
 
         self.lbl_version_remote.config(text=f"Versão disponÃÂvel: {remote_display}")
         self.lbl_alerts.config(text=alert_txt or "Sem alertas.")
@@ -4386,22 +4553,36 @@ class HomePage(PageBase):
             self.lbl_version_remote.config(foreground="#166534")
 
     def _check_updates(self, silent=False):
-        if not UPDATE_MANIFEST_URL:
-            if not silent:
-                messagebox.showinfo(
-                    "Atualizações",
-                    "Manifesto de atualização não configurado.\n"
-                    "Defina ROTA_UPDATE_MANIFEST_URL no ambiente para habilitar checagem automática.",
-                )
-            return
-
         try:
-            req = urllib.request.Request(UPDATE_MANIFEST_URL, method="GET")
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                data = resp.read().decode("utf-8", errors="replace")
-            manifest = json.loads(data)
-            if not isinstance(manifest, dict):
-                raise ValueError("Manifesto inválido")
+            manifest = None
+            if UPDATE_MANIFEST_URL:
+                req = urllib.request.Request(UPDATE_MANIFEST_URL, method="GET")
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    data = resp.read().decode("utf-8", errors="replace")
+                loaded = json.loads(data)
+                if isinstance(loaded, dict):
+                    manifest = loaded
+
+            if manifest is None:
+                req = urllib.request.Request(_build_api_url("openapi.json"), method="GET")
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    data = resp.read().decode("utf-8", errors="replace")
+                openapi = json.loads(data)
+                info = openapi.get("info") if isinstance(openapi, dict) else {}
+                api_version = str((info or {}).get("version") or "").strip()
+                if not api_version:
+                    raise ValueError("Nao foi possivel obter versao remota (manifesto e API).")
+                manifest = {
+                    "version": api_version,
+                    "setup_url": SETUP_DOWNLOAD_URL,
+                    "changelog_url": CHANGELOG_URL,
+                    "alert": "",
+                    "alerts": [
+                        "Versao remota obtida via API (fallback).",
+                        "Publique updates/version.json para habilitar update automatizado completo.",
+                    ],
+                }
+
             self._apply_manifest(manifest)
 
             if not silent:
@@ -4410,17 +4591,17 @@ class HomePage(PageBase):
                 is_candidate = (remote_v > local_v) and self._is_same_release_line(local_v, remote_v)
                 if is_candidate:
                     ask = messagebox.askyesno(
-                        "Atualização disponÃÂvel",
-                        f"Versão local: {APP_VERSION}\nVersão disponÃÂvel: {self._remote_version}\n\n"
+                        "Atualizacao disponivel",
+                        f"Versao local: {APP_VERSION}\nVersao disponivel: {self._remote_version}\n\n"
                         "Deseja atualizar agora?",
                     )
                     if ask:
                         self._update_now()
                 else:
-                    messagebox.showinfo("Atualizações", f"Você já está na versão mais recente ({APP_VERSION}).")
+                    messagebox.showinfo("Atualizacoes", f"Voce ja esta na versao mais recente ({APP_VERSION}).")
         except Exception as e:
             if not silent:
-                messagebox.showerror("ERRO", f"Falha ao verificar atualizações:\n{e}")
+                messagebox.showerror("ERRO", f"Falha ao verificar atualizacoes:\n{e}")
 
     def _update_state_path(self):
         base_dir = USER_DATA_DIR if IS_FROZEN else APP_DIR
