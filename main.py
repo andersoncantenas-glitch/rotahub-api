@@ -3835,23 +3835,23 @@ class Sidebar(ttk.Frame):
         self.canvas.bind("<Configure>", _on_canvas_configure)
 
         # Itens do menu
-        self._add_btn("home", "Home", lambda: app.show_page("Home"))
-        self._add_btn("cadastros", "Cadastros", lambda: app.show_page("Cadastros"))
-        self._add_btn("rotas", "Rotas", lambda: app.show_page("Rotas"))
-        self._add_btn("vendas", "Importar Vendas", lambda: app.show_page("ImportarVendas"))
-        self._add_btn("programacao", "Programacao", lambda: app.show_page("Programacao"))
-        self._add_btn("recebimentos", "Recebimentos", lambda: app.show_page("Recebimentos"))
-        self._add_btn("despesas", "Despesas", lambda: app.show_page("Despesas"))
-        self._add_btn("escala", "Escala", lambda: app.show_page("Escala"))
-        self._add_btn("centro_custos", "Centro de Custos", lambda: app.show_page("CentroCustos"))
-        self._add_btn("relatorios", "Relatorios", lambda: app.show_page("Relatorios"))
-        self._add_btn("backup", "Backup / Exportar", lambda: app.show_page("BackupExportar"))
+        self._add_btn("home", "\U0001F3E0 Home", lambda: app.show_page("Home"))
+        self._add_btn("cadastros", "\U0001F4CB Cadastros", lambda: app.show_page("Cadastros"))
+        self._add_btn("rotas", "\U0001F5FA Rotas", lambda: app.show_page("Rotas"))
+        self._add_btn("vendas", "\U0001F4E5 Importar Vendas", lambda: app.show_page("ImportarVendas"))
+        self._add_btn("programacao", "\U0001F4C5 Programacao", lambda: app.show_page("Programacao"))
+        self._add_btn("recebimentos", "\U0001F4B5 Recebimentos", lambda: app.show_page("Recebimentos"))
+        self._add_btn("despesas", "\U0001F4B8 Despesas", lambda: app.show_page("Despesas"))
+        self._add_btn("escala", "\U0001F4CA Escala", lambda: app.show_page("Escala"))
+        self._add_btn("centro_custos", "\U0001F4C8 Centro de Custos", lambda: app.show_page("CentroCustos"))
+        self._add_btn("relatorios", "\U0001F4D1 Relatorios", lambda: app.show_page("Relatorios"))
+        self._add_btn("backup", "\U0001F4E6 Backup / Exportar", lambda: app.show_page("BackupExportar"))
 
         # Rodapé
         bottom = ttk.Frame(self, style="Sidebar.TFrame", padding=(10, 12))
         bottom.pack(fill="x")
 
-        ttk.Button(bottom, text="SAIR", style="Danger.TButton", command=self._safe_quit).pack(fill="x")
+        ttk.Button(bottom, text="\u23FB SAIR", style="Danger.TButton", command=self._safe_quit).pack(fill="x")
 
     def _safe_quit(self):
         """Evita travas se houver janelas abertas/toplevels"""
@@ -6399,7 +6399,7 @@ class HomePage(PageBase):
 
         btns = ttk.Frame(frm)
         btns.grid(row=3, column=0, sticky="e", pady=(6, 0))
-        ttk.Button(btns, text="ATUALIZAR", style="Ghost.TButton", command=_load_preview).pack(side="right")
+        ttk.Button(btns, text="\U0001F504 ATUALIZAR", style="Ghost.TButton", command=_load_preview).pack(side="right")
 
 
 class RotasPage(PageBase):
@@ -6456,13 +6456,13 @@ class RotasPage(PageBase):
         )
         self.tree.bind("<Double-1>", lambda _e: self._abrir_mapa_selecionado())
 
-        ttk.Button(self.footer_right, text="ATUALIZAR", style="Ghost.TButton", command=self.carregar).grid(
+        ttk.Button(self.footer_right, text="\U0001F504 ATUALIZAR", style="Ghost.TButton", command=self.carregar).grid(
             row=0, column=0, padx=4
         )
-        ttk.Button(self.footer_right, text="MAPA SELECIONADO", style="Primary.TButton", command=self._abrir_mapa_selecionado).grid(
+        ttk.Button(self.footer_right, text="\U0001F5FA MAPA SELECIONADO", style="Primary.TButton", command=self._abrir_mapa_selecionado).grid(
             row=0, column=1, padx=4
         )
-        ttk.Button(self.footer_right, text="MAPA DE TODAS", style="Primary.TButton", command=self._abrir_mapa_todas).grid(
+        ttk.Button(self.footer_right, text="\U0001F5FA MAPA DE TODAS", style="Primary.TButton", command=self._abrir_mapa_todas).grid(
             row=0, column=2, padx=4
         )
 
@@ -7627,7 +7627,7 @@ class ClientesImportPage(ttk.Frame):
         ttk.Button(actions, text="ðŸ”„ ATUALIZAR", style="Ghost.TButton",
                    command=self.carregar).grid(row=0, column=1, padx=6)
 
-        ttk.Button(actions, text="INSERIR LINHA", style="Ghost.TButton",
+        ttk.Button(actions, text="\u2795 INSERIR LINHA", style="Ghost.TButton",
                    command=self.inserir_linha).grid(row=0, column=2, padx=6)
 
         ttk.Button(actions, text="SALVAR ALTERAÇÕES", style="Primary.TButton",
@@ -8726,7 +8726,7 @@ class ImportarVendasPage(PageBase):
         self.cb_veiculo.grid(row=1, column=1, sticky="ew", padx=6)
 
         ttk.Label(card, text="Ajudantes (multipla escolha)", style="CardLabel.TLabel").grid(row=0, column=2, sticky="w")
-        self.btn_ajudantes = ttk.Button(card, text="Selecionar ajudantes", style="Ghost.TButton", command=self._open_ajudantes_selector)
+        self.btn_ajudantes = ttk.Button(card, text="\U0001F465 Selecionar ajudantes", style="Ghost.TButton", command=self._open_ajudantes_selector)
         self.btn_ajudantes.grid(row=1, column=2, columnspan=2, sticky="ew", padx=6)
         self.lbl_ajudantes_sel = ttk.Label(card, text="Nenhum selecionado", style="CardLabel.TLabel")
         self.lbl_ajudantes_sel.grid(row=2, column=2, columnspan=2, sticky="w", padx=6, pady=(2, 0))
@@ -8809,13 +8809,13 @@ class ImportarVendasPage(PageBase):
             command=self.carregar_vendas_selecionadas
         ).grid(row=0, column=0, padx=4, sticky="ew")
 
-        ttk.Button(acoes_linha_1, text="INSERIR LINHA", style="Ghost.TButton",
+        ttk.Button(acoes_linha_1, text="\u2795 INSERIR LINHA", style="Ghost.TButton",
                    command=self.inserir_linha).grid(row=0, column=1, padx=4, sticky="ew")
 
-        ttk.Button(acoes_linha_1, text="REMOVER LINHA", style="Danger.TButton",
+        ttk.Button(acoes_linha_1, text="\u2796 REMOVER LINHA", style="Danger.TButton",
                    command=self.remover_linha).grid(row=0, column=2, padx=4, sticky="ew")
 
-        ttk.Button(acoes_linha_1, text="LIMPAR ITENS", style="Danger.TButton",
+        ttk.Button(acoes_linha_1, text="\U0001F9F9 LIMPAR ITENS", style="Danger.TButton",
                    command=self.limpar_itens).grid(row=0, column=3, padx=4, sticky="ew")
 
         acoes_linha_2 = ttk.Frame(top2, style="Card.TFrame")
@@ -8832,7 +8832,7 @@ class ImportarVendasPage(PageBase):
 
         ttk.Button(
             acoes_linha_2,
-            text="EDITAR PROGRAMACAO",
+            text="\u270F\ufe0f EDITAR PROGRAMACAO",
             style="Ghost.TButton",
             command=self.carregar_programacao_para_edicao
         ).grid(row=0, column=1, padx=4, sticky="ew")
@@ -9076,7 +9076,7 @@ class ImportarVendasPage(PageBase):
         labels = self._get_selected_labels()
         qtd = len(labels)
         if qtd <= 0:
-            self.btn_ajudantes.configure(text="Selecionar ajudantes")
+            self.btn_ajudantes.configure(text="\U0001F465 Selecionar ajudantes")
             self.lbl_ajudantes_sel.configure(text="Nenhum selecionado")
             return
         self.btn_ajudantes.configure(text=f"{qtd} selecionado(s)")
@@ -11676,7 +11676,7 @@ class RecebimentosPage(PageBase):
         self.cb_prog = ttk.Combobox(self.card, state="readonly", width=24)
         self.cb_prog.grid(row=1, column=0, sticky="w", padx=(0, 10))
 
-        ttk.Button(self.card, text="ðÅ¸â€œâ€š CARREGAR", style="Ghost.TButton", command=self.carregar_programacao)\
+        ttk.Button(self.card, text="\U0001F4E6 CARREGAR", style="Ghost.TButton", command=self.carregar_programacao)\
             .grid(row=1, column=1, padx=(0, 14))
 
         info_frame = ttk.Frame(self.card, style="Card.TFrame")
@@ -11809,13 +11809,13 @@ class RecebimentosPage(PageBase):
         top2.grid(row=0, column=0, sticky="ew")
         top2.grid_columnconfigure(30, weight=1)
 
-        ttk.Button(top2, text="ðÅ¸â€˜¤ INSERIR CLIENTE MANUAL", style="Warn.TButton", command=self.inserir_cliente_manual)\
+        ttk.Button(top2, text="\U0001F464 INSERIR CLIENTE MANUAL", style="Warn.TButton", command=self.inserir_cliente_manual)\
             .grid(row=0, column=0, padx=6)
 
-        ttk.Button(top2, text="ðÅ¸§½ ZERAR RECEBIMENTO", style="Danger.TButton", command=self.zerar_recebimento)\
+        ttk.Button(top2, text="\U0001F9FD ZERAR RECEBIMENTO", style="Danger.TButton", command=self.zerar_recebimento)\
             .grid(row=0, column=1, padx=6)
 
-        ttk.Button(top2, text="âÅ¾¡ IR PARA DESPESAS", style="Primary.TButton", command=self._ir_para_despesas)\
+        ttk.Button(top2, text="\u27A1 IR PARA DESPESAS", style="Primary.TButton", command=self._ir_para_despesas)\
             .grid(row=0, column=2, padx=6)
 
         self.lbl_total = ttk.Label(
@@ -11913,11 +11913,11 @@ class RecebimentosPage(PageBase):
         self.ent_obs.grid(row=1, column=4, sticky="ew", padx=6)
         bind_entry_smart(self.ent_obs, "text")
 
-        ttk.Button(frm, text="ðÅ¸â€™¾ SALVAR RECEBIMENTOS", style="Primary.TButton", command=self.salvar_recebimento)\
+        ttk.Button(frm, text="\U0001F4BE SALVAR RECEBIMENTOS", style="Primary.TButton", command=self.salvar_recebimento)\
             .grid(row=1, column=5, sticky="e", padx=(12, 0))
 
         # âÅâ€œââ‚¬¦ TROCA: no lugar do Excel, botão IMPRIMIR PDF
-        ttk.Button(frm, text="ðÅ¸â€“¨ IMPRIMIR PDF", style="Warn.TButton", command=self.imprimir_pdf)\
+        ttk.Button(frm, text="\U0001F5A8 IMPRIMIR PDF", style="Warn.TButton", command=self.imprimir_pdf)\
             .grid(row=1, column=6, sticky="e", padx=6)
 
         # Por padrão: COD/NOME não editáveis
@@ -11944,10 +11944,10 @@ class RecebimentosPage(PageBase):
         btns.grid(row=1, column=0, sticky="ew", pady=(6, 0))
         btns.grid_columnconfigure(10, weight=1)
 
-        ttk.Button(btns, text="ðÅ¸â€“¨ IMPRIMIR PDF", style="Warn.TButton", command=self.imprimir_pdf)\
+        ttk.Button(btns, text="\U0001F5A8 IMPRIMIR PDF", style="Warn.TButton", command=self.imprimir_pdf)\
             .grid(row=0, column=0, padx=6, sticky="w")
 
-        ttk.Button(btns, text="ðÅ¸â€˜Â MOSTRAR DADOS (CONSULTA)", style="Ghost.TButton", command=self._expand_view)\
+        ttk.Button(btns, text="\U0001F441 MOSTRAR DADOS (CONSULTA)", style="Ghost.TButton", command=self._expand_view)\
             .grid(row=0, column=1, padx=6, sticky="w")
 
         ttk.Button(btns, text="LIMPAR / NOVA PROGRAMAÇÃO", style="Primary.TButton", command=self._reset_view)\
@@ -13612,7 +13612,7 @@ class RecebimentosPage(PageBase):
             return
 
         cod = upper(simple_input(
-            "Cliente Manual", "Digite o C?DIGO do cliente:",
+            "Cliente Manual", "Digite o CODIGO do cliente:",
             master=self.app if hasattr(self, "app") else None,
             allow_empty=False
         ))
@@ -14093,7 +14093,7 @@ class DespesasPage(PageBase):
 
         ttk.Button(
             actions_frame,
-            text="ðŸ”„ ATUALIZAR",
+            text="\U0001F504 ATUALIZAR",
             style="Ghost.TButton",
             command=self._refresh_all,
             width=14
@@ -14431,7 +14431,7 @@ class DespesasPage(PageBase):
         self._bind_focus_scroll(self.ent_total_dinheiro)
         ttk.Button(
             calc_ced_frame,
-            text="ðÅ¸§® Distribuir",
+            text="\U0001F9EE Distribuir",
             style="Ghost.TButton",
             command=self._distribuir_cedulas,
             width=11,
@@ -14572,11 +14572,11 @@ class DespesasPage(PageBase):
         self.lbl_desp_total = ttk.Label(saida_frame, text="R$ 0,00", font=("Segoe UI", 9, "bold"))
         self.lbl_desp_total.grid(row=0, column=1, sticky="e", pady=1)
 
-        ttk.Label(saida_frame, text="Contagem C?dulas:", font=("Segoe UI", 8)).grid(row=1, column=0, sticky="w", pady=1)
+        ttk.Label(saida_frame, text="Contagem Cedulas:", font=("Segoe UI", 8)).grid(row=1, column=0, sticky="w", pady=1)
         self.lbl_cedulas_total = ttk.Label(saida_frame, text="R$ 0,00", font=("Segoe UI", 9, "bold"))
         self.lbl_cedulas_total.grid(row=1, column=1, sticky="e", pady=1)
 
-        ttk.Label(saida_frame, text="Total Sa?das:", font=("Segoe UI", 8, "bold")).grid(row=2, column=0, sticky="w", pady=(4, 1))
+        ttk.Label(saida_frame, text="Total Saidas:", font=("Segoe UI", 8, "bold")).grid(row=2, column=0, sticky="w", pady=(4, 1))
         self.lbl_total_saidas = ttk.Label(saida_frame, text="R$ 0,00", font=("Segoe UI", 10, "bold"), foreground="#C62828")
         self.lbl_total_saidas.grid(row=2, column=1, sticky="e", pady=(4, 1))
 
@@ -14588,11 +14588,11 @@ class DespesasPage(PageBase):
         self.lbl_valor_final_caixa = ttk.Label(resultado_frame, text="R$ 0,00", font=("Segoe UI", 9, "bold"))
         self.lbl_valor_final_caixa.grid(row=0, column=1, sticky="e", pady=1)
 
-        ttk.Label(resultado_frame, text="Diferen?a (Caixa - C?d):", font=("Segoe UI", 8)).grid(row=1, column=0, sticky="w", pady=1)
+        ttk.Label(resultado_frame, text="Diferenca (Caixa - Ced):", font=("Segoe UI", 8)).grid(row=1, column=0, sticky="w", pady=1)
         self.lbl_diferenca = ttk.Label(resultado_frame, text="R$ 0,00", font=("Segoe UI", 9, "bold"))
         self.lbl_diferenca.grid(row=1, column=1, sticky="e", pady=1)
 
-        ttk.Label(resultado_frame, text="Resultado L?quido:", font=("Segoe UI", 8, "bold")).grid(row=2, column=0, sticky="w", pady=(4, 1))
+        ttk.Label(resultado_frame, text="Resultado Liquido:", font=("Segoe UI", 8, "bold")).grid(row=2, column=0, sticky="w", pady=(4, 1))
         self.lbl_resultado_liquido = ttk.Label(resultado_frame, text="R$ 0,00", font=("Segoe UI", 11, "bold"))
         self.lbl_resultado_liquido.grid(row=2, column=1, sticky="e", pady=(4, 1))
 
@@ -14603,12 +14603,12 @@ class DespesasPage(PageBase):
             botoes_frame.grid_columnconfigure(i, weight=1)
 
         botoes = [
-            ("â¬â€¦ VOLTAR", "Ghost.TButton", self._voltar_recebimentos),
-            ("âÅ¾â€¢ ADICIONAR DESPESA", "Warn.TButton", self._open_registrar_rapido),
-            ("ðÅ¸â€“¨ IMPRIMIR PDF", "Ghost.TButton", self.imprimir_resumo),
-            ("ðÅ¸â€™¾ SALVAR", "Primary.TButton", self.salvar_tudo),
-            ("âÅ“Âï¸Â EDITAR", "Warn.TButton", self._editar_linha_selecionada),
-            ("ðÅ¸ÂÂ FINALIZAR", "Danger.TButton", self.finalizar_prestacao_despesas),
+            ("\u2B05 VOLTAR", "Ghost.TButton", self._voltar_recebimentos),
+            ("\u2795 ADICIONAR DESPESA", "Warn.TButton", self._open_registrar_rapido),
+            ("\U0001F5A8 IMPRIMIR PDF", "Ghost.TButton", self.imprimir_resumo),
+            ("\U0001F4BE SALVAR", "Primary.TButton", self.salvar_tudo),
+            ("\u270F\ufe0f EDITAR", "Warn.TButton", self._editar_linha_selecionada),
+            ("\U0001F3C1 FINALIZAR", "Danger.TButton", self.finalizar_prestacao_despesas),
         ]
 
         for i, (texto, estilo, comando) in enumerate(botoes):
@@ -17259,9 +17259,9 @@ class DespesasPage(PageBase):
         btn_frame.grid_columnconfigure(0, weight=1)
         btn_frame.grid_columnconfigure(1, weight=1)
 
-        ttk.Button(btn_frame, text="ðÅ¸â€™¾ SALVAR", style="Primary.TButton", command=salvar)\
+        ttk.Button(btn_frame, text="\U0001F4BE SALVAR", style="Primary.TButton", command=salvar)\
             .grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        ttk.Button(btn_frame, text="âÅ“â€“ CANCELAR", style="Ghost.TButton", command=win.destroy)\
+        ttk.Button(btn_frame, text="\u274C CANCELAR", style="Ghost.TButton", command=win.destroy)\
             .grid(row=0, column=1, sticky="ew", padx=(6, 0))
 
         win.bind("<Return>", lambda e: salvar())
@@ -17407,9 +17407,9 @@ class DespesasPage(PageBase):
         btn_frame.grid_columnconfigure(0, weight=1)
         btn_frame.grid_columnconfigure(1, weight=1)
 
-        ttk.Button(btn_frame, text="ðÅ¸â€™¾ SALVAR", style="Primary.TButton", command=salvar)\
+        ttk.Button(btn_frame, text="\U0001F4BE SALVAR", style="Primary.TButton", command=salvar)\
             .grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        ttk.Button(btn_frame, text="âÅ“â€“ CANCELAR", style="Ghost.TButton", command=win.destroy)\
+        ttk.Button(btn_frame, text="\u274C CANCELAR", style="Ghost.TButton", command=win.destroy)\
             .grid(row=0, column=1, sticky="ew", padx=(6, 0))
 
         win.bind("<Return>", lambda e: salvar())
@@ -18628,7 +18628,7 @@ class EscalaPage(PageBase):
         for c in range(4):
             kpi_row.grid_columnconfigure(c, weight=1)
 
-        kpi_1 = ttk.LabelFrame(kpi_row, text=" Rotas no PerÃÂodo ", padding=8)
+        kpi_1 = ttk.LabelFrame(kpi_row, text=" Rotas no Periodo ", padding=8)
         kpi_1.grid(row=0, column=0, sticky="ew", padx=(0, 6))
         self.lbl_esc_kpi_rotas = ttk.Label(kpi_1, text="0", font=("Segoe UI", 13, "bold"), foreground="#1D4ED8")
         self.lbl_esc_kpi_rotas.grid(row=0, column=0, sticky="w")
@@ -19130,7 +19130,7 @@ class EscalaPage(PageBase):
 
         if not recs:
             return "Recomendações: distribuição está equilibrada no filtro atual."
-        return f"Recomendações (local-alvo: {local_alvo}):\nââ‚¬¢ " + "\nââ‚¬¢ ".join(recs)
+        return f"Recomendacoes (local-alvo: {local_alvo}):\n- " + "\n- ".join(recs)
 
     def _listar_programacoes_filtradas(self):
         status_filtro = self._status_normalizado(self.var_status.get())
@@ -19426,7 +19426,7 @@ class EscalaPage(PageBase):
                     nivel = "ALERTA"
                     cor_nivel = "#9A3412"
                 msg = (
-                    f"NÃÂvel da escala: {nivel} | Maior carga atual: {mais_sobrecarregado}\n"
+                    f"Nivel da escala: {nivel} | Maior carga atual: {mais_sobrecarregado}\n"
                     f"Rotas no filtro: {qtd_rotas} | Motoristas: {qtd_motoristas} | Ajudantes: {qtd_ajudantes}\n"
                     f"Média por motorista: {media:.2f} | KM total: {total_km:.1f} | KM médio/motorista: {media_km:.1f}\n"
                     f"Horas totais: {total_horas:.2f} | Horas médias/motorista: {media_horas:.2f}\n"
@@ -19484,7 +19484,7 @@ class CentroCustosPage(PageBase):
         filtros.grid(row=0, column=0, sticky="ew")
         filtros.grid_columnconfigure(8, weight=1)
 
-        ttk.Label(filtros, text="PerÃÂodo (dias)", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(filtros, text="Periodo (dias)", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w")
         self.var_periodo = tk.StringVar(value="30")
         self.cb_periodo = ttk.Combobox(
             filtros, textvariable=self.var_periodo, state="readonly", width=10,
@@ -19896,7 +19896,7 @@ class RelatoriosPage(PageBase):
         ttk.Button(card, text="ðŸ”Ž BUSCAR", style="Primary.TButton", command=self._buscar_programacoes_relatorio).grid(
             row=1, column=4, padx=6
         )
-        ttk.Button(card, text="ðÅ¸§¹ LIMPAR", style="Ghost.TButton", command=self._limpar_filtros_relatorio).grid(
+        ttk.Button(card, text="\U0001F9F9 LIMPAR", style="Ghost.TButton", command=self._limpar_filtros_relatorio).grid(
             row=1, column=5, padx=6
         )
 
@@ -19904,23 +19904,23 @@ class RelatoriosPage(PageBase):
         self.cb_prog = ttk.Combobox(card, state="readonly")
         self.cb_prog.grid(row=3, column=0, sticky="ew", padx=6)
 
-        ttk.Button(card, text="ðÅ¸§¾ GERAR RESUMO", style="Primary.TButton", command=self.gerar_resumo).grid(
+        ttk.Button(card, text="\U0001F4CA GERAR RESUMO", style="Primary.TButton", command=self.gerar_resumo).grid(
             row=3, column=1, padx=6
         )
-        ttk.Button(card, text="ðÅ¸â€œ¤ EXPORTAR EXCEL", style="Warn.TButton", command=self.exportar_excel).grid(
+        ttk.Button(card, text="\U0001F4E4 EXPORTAR EXCEL", style="Warn.TButton", command=self.exportar_excel).grid(
             row=3, column=2, padx=6
         )
-        ttk.Button(card, text="ðÅ¸â€œâ€ž GERAR PDF", style="Primary.TButton", command=self.gerar_pdf).grid(
+        ttk.Button(card, text="\U0001F4D1 GERAR PDF", style="Primary.TButton", command=self.gerar_pdf).grid(
             row=3, column=3, padx=6
         )
-        ttk.Button(card, text="ðÅ¸â€˜Â PREVIEW", style="Ghost.TButton", command=self.abrir_previsualizacao_relatorio).grid(
+        ttk.Button(card, text="\U0001F441 PREVIEW", style="Ghost.TButton", command=self.abrir_previsualizacao_relatorio).grid(
             row=3, column=4, padx=6
         )
         ttk.Button(card, text="ðŸ”„ ATUALIZAR", style="Ghost.TButton", command=self.refresh_comboboxes).grid(
             row=3, column=5, padx=6
         )
 
-        ttk.Button(card, text="ðÅ¸ÂÂ FINALIZAR ROTA", style="Danger.TButton", command=self.finalizar_rota).grid(
+        ttk.Button(card, text="\U0001F3C1 FINALIZAR ROTA", style="Danger.TButton", command=self.finalizar_rota).grid(
             row=3, column=6, padx=6
         )
         ttk.Button(card, text="ââ€ © REABRIR ROTA", style="Warn.TButton", command=self.reabrir_rota).grid(
@@ -22128,11 +22128,11 @@ class BackupExportarPage(PageBase):
 
         ttk.Label(card, text="Ferramentas", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 10))
 
-        ttk.Button(card, text="ðÅ¸â€”â€ž FAZER BACKUP DO BANCO", style="Primary.TButton", command=self.backup_db)\
+        ttk.Button(card, text="\U0001F4BE FAZER BACKUP DO BANCO", style="Primary.TButton", command=self.backup_db)\
             .grid(row=1, column=0, sticky="ew", pady=6)
         ttk.Button(card, text="ââ„¢» RESTAURAR BANCO (IMPORTAR .DB)", style="Warn.TButton", command=self.restore_db)\
             .grid(row=2, column=0, sticky="ew", pady=6)
-        ttk.Button(card, text="ðÅ¸â€œ¤ EXPORTAR VENDAS IMPORTADAS (EXCEL)", style="Ghost.TButton", command=self.exportar_vendas)\
+        ttk.Button(card, text="\U0001F4E4 EXPORTAR VENDAS IMPORTADAS (EXCEL)", style="Ghost.TButton", command=self.exportar_vendas)\
             .grid(row=3, column=0, sticky="ew", pady=6)
 
         self.lbl = ttk.Label(card, text="Dica: Faça backup diariamente.", background="white", foreground="#444")
