@@ -4652,10 +4652,11 @@ class HomePage(PageBase):
         local_v = self._version_tuple(APP_VERSION)
         remote_v = self._version_tuple(remote_version)
         is_candidate = (remote_v > local_v) and self._is_same_release_line(local_v, remote_v)
+        has_new_version = remote_v > local_v
         if remote_v <= local_v:
             # Evita instalar downgrade quando manifesto remoto estiver atrasado.
             self._remote_setup_url = ""
-        remote_display = remote_version if remote_version != "-" else "-"
+        remote_display = remote_version if (remote_version != "-" and has_new_version) else "-"
 
         self.lbl_version_remote.config(text=f"Versao disponivel: {remote_display}")
         self.lbl_alerts.config(text=alert_txt or "Sem alertas.")
