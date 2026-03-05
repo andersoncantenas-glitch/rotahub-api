@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # âœ… Prioridade:
-# 1) variÃ¡vel de ambiente ROTA_DB
+# 1) variável de ambiente ROTA_DB
 # 2) rota_granja.db na pasta do projeto
 DB_PATH = os.environ.get("ROTA_DB") or os.path.join(BASE_DIR, "rota_granja.db")
 
@@ -72,7 +72,7 @@ security = HTTPBearer()
 @contextmanager
 def get_conn() -> Iterator[sqlite3.Connection]:
     if not os.path.exists(DB_PATH):
-        raise RuntimeError(f"Banco n?o encontrado em: {DB_PATH}")
+        raise RuntimeError(f"Banco nao encontrado em: {DB_PATH}")
     conn = sqlite3.connect(DB_PATH)
     try:
         conn.execute("PRAGMA foreign_keys = ON")
@@ -705,7 +705,7 @@ def ensure_tables():
         """)
 
         # Migra schema legado da tabela de controle:
-        # antes a chave Ãºnica era (codigo_programacao, cod_cliente), o que colide pedidos do mesmo cliente.
+        # antes a chave única era (codigo_programacao, cod_cliente), o que colide pedidos do mesmo cliente.
         try:
             cur.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='programacao_itens_controle'")
             row_tbl = cur.fetchone()
@@ -1590,7 +1590,7 @@ class CarregamentoIn(BaseModel):
 
     caixas_carregadas: int = Field(..., gt=0)
 
-    # podem vir vazios, entÃ£o nÃ£o force min_length=1
+    # podem vir vazios, então não force min_length=1
     inicio_carregamento: Optional[str] = None
     fim_carregamento: Optional[str] = None
 
@@ -1615,7 +1615,7 @@ class ClienteControleIn(BaseModel):
     media_aplicada: Optional[float] = None
     peso_previsto: Optional[float] = None
 
-    # recebimentos (jÃ¡ fica pronto, mesmo que o app ainda nÃ£o use)
+    # recebimentos (já fica pronto, mesmo que o app ainda não use)
     valor_recebido: Optional[float] = None
     forma_recebimento: Optional[str] = None
     obs_recebimento: Optional[str] = None
@@ -1741,6 +1741,88 @@ class DesktopClienteUpsertIn(BaseModel):
     vendedor: Optional[str] = None
 
 
+class DesktopRecebimentoIn(BaseModel):
+    cod_cliente: str
+    nome_cliente: str
+    valor: float
+    forma_pagamento: Optional[str] = "DINHEIRO"
+    observacao: Optional[str] = ""
+    num_nf: Optional[str] = ""
+
+
+class DesktopDespesaIn(BaseModel):
+    descricao: str
+    valor: float
+    categoria: Optional[str] = "OUTROS"
+    observacao: Optional[str] = ""
+
+
+class DesktopRotaCabecalhoIn(BaseModel):
+    data_saida: Optional[str] = None
+    hora_saida: Optional[str] = None
+    data_chegada: Optional[str] = None
+    hora_chegada: Optional[str] = None
+    diaria_motorista_valor: Optional[float] = None
+
+
+class DesktopRotaFinanceiroIn(BaseModel):
+    nf_numero: Optional[str] = None
+    nf_kg: Optional[float] = None
+    nf_caixas: Optional[int] = None
+    nf_kg_carregado: Optional[float] = None
+    nf_kg_vendido: Optional[float] = None
+    nf_saldo: Optional[float] = None
+    nf_preco: Optional[float] = None
+    media: Optional[float] = None
+    nf_caixa_final: Optional[int] = None
+    km_inicial: Optional[float] = None
+    km_final: Optional[float] = None
+    litros: Optional[float] = None
+    km_rodado: Optional[float] = None
+    media_km_l: Optional[float] = None
+    custo_km: Optional[float] = None
+    ced_200_qtd: Optional[int] = None
+    ced_100_qtd: Optional[int] = None
+    ced_50_qtd: Optional[int] = None
+    ced_20_qtd: Optional[int] = None
+    ced_10_qtd: Optional[int] = None
+    ced_5_qtd: Optional[int] = None
+    ced_2_qtd: Optional[int] = None
+    valor_dinheiro: Optional[float] = None
+    adiantamento: Optional[float] = None
+    rota_observacao: Optional[str] = None
+
+
+class DesktopDiariasSyncIn(BaseModel):
+    qtd_diarias: float
+    qtd_ajudantes: int = 0
+    total_motorista: float
+    total_ajudantes: float
+    observacao_motorista: Optional[str] = ""
+    observacao_ajudantes: Optional[str] = ""
+
+
+class DesktopProgramacaoClienteManualIn(BaseModel):
+    cod_cliente: str
+    nome_cliente: str
+
+
+class DesktopProgramacaoStatusIn(BaseModel):
+    status: Optional[str] = None
+    prestacao_status: Optional[str] = None
+    status_operacional: Optional[str] = None
+    finalizada_no_app: Optional[int] = None
+
+
+class DesktopSqlStatementIn(BaseModel):
+    sql: str
+    params: Optional[Any] = Field(default_factory=list)
+
+
+class DesktopSqlMutateIn(BaseModel):
+    statements: List[DesktopSqlStatementIn] = Field(default_factory=list)
+
+
 class SubstituicaoRotaIn(BaseModel):
     motorista_destino_codigo: str
     veiculo_destino: str = ""
@@ -1763,11 +1845,11 @@ def get_current_motorista(
 
     data = verify_token(token)
     if not data:
-        raise HTTPException(status_code=401, detail="Token invÃ¡lido/expirado")
+        raise HTTPException(status_code=401, detail="Token inválido/expirado")
 
     codigo = data.get("codigo")
     if not codigo:
-        raise HTTPException(status_code=401, detail="Token sem cÃ³digo do motorista")
+        raise HTTPException(status_code=401, detail="Token sem código do motorista")
 
     with get_conn() as conn:
         cur = conn.cursor()
@@ -1786,7 +1868,7 @@ def get_current_motorista(
             cur.execute("SELECT id, nome, codigo FROM motoristas WHERE codigo=?", (codigo,))
         m = cur.fetchone()
         if not m:
-            raise HTTPException(status_code=401, detail="Motorista nÃ£o encontrado")
+            raise HTTPException(status_code=401, detail="Motorista não encontrado")
         if "acesso_liberado" in cols_m and int(m["acesso_liberado"] or 0) != 1:
             raise HTTPException(status_code=403, detail="Acesso bloqueado. Solicite desbloqueio do administrador.")
 
@@ -1799,8 +1881,8 @@ def _owner_filter_for_programacoes(
     alias: str = "p",
 ) -> tuple[str, tuple]:
     """
-    Resolve filtro de posse por motorista com prioridade em chaves estÃ¡veis.
-    Fallback por nome existe apenas para bancos legados sem coluna de vÃ­nculo.
+    Resolve filtro de posse por motorista com prioridade em chaves estáveis.
+    Fallback por nome existe apenas para bancos legados sem coluna de vÃnculo.
     """
     cur = conn.cursor()
     cur.execute("PRAGMA table_info(programacoes)")
@@ -1905,7 +1987,7 @@ def _next_codigo_avulsa(cur: sqlite3.Cursor, data_ref: Optional[str] = None) -> 
     return f"{prefix}-{last_seq + 1:03d}"
 
 # =========================================================
-# ENDPOINTS BÃSICOS
+# ENDPOINTS BÁSICOS
 # =========================================================
 @app.get("/ping")
 def ping():
@@ -1984,9 +2066,10 @@ def desktop_ajudantes(_ok: bool = Depends(_require_desktop_secret)):
         cur.execute("PRAGMA table_info(ajudantes)")
         cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
         status_filter = "WHERE UPPER(COALESCE(status,'ATIVO'))='ATIVO'" if "status" in cols else ""
+        tel_expr = "COALESCE(telefone,'')" if "telefone" in cols else "''"
         cur.execute(
             f"""
-            SELECT id, COALESCE(nome,''), COALESCE(sobrenome,''), COALESCE(status,'ATIVO')
+            SELECT id, COALESCE(nome,''), COALESCE(sobrenome,''), {tel_expr} AS telefone, COALESCE(status,'ATIVO')
             FROM ajudantes
             {status_filter}
             ORDER BY UPPER(COALESCE(nome,'')), UPPER(COALESCE(sobrenome,'')), id
@@ -1994,12 +2077,17 @@ def desktop_ajudantes(_ok: bool = Depends(_require_desktop_secret)):
         )
         out = []
         for r in cur.fetchall() or []:
-            nome = f"{str(r[1] or '').strip()} {str(r[2] or '').strip()}".strip().upper()
+            nome_base = str(r[1] or "").strip().upper()
+            sobrenome = str(r[2] or "").strip().upper()
+            nome = f"{nome_base} {sobrenome}".strip().upper()
             out.append(
                 {
                     "id": int(r[0] or 0),
                     "nome": nome,
-                    "status": str(r[3] or "ATIVO").strip().upper(),
+                    "nome_base": nome_base,
+                    "sobrenome": sobrenome,
+                    "telefone": str(r[3] or "").strip(),
+                    "status": str(r[4] or "ATIVO").strip().upper(),
                 }
             )
         return out
@@ -2278,6 +2366,54 @@ def desktop_clientes_upsert(payload: DesktopClienteUpsertIn, _ok: bool = Depends
         ph = ", ".join(["?"] * len(cols_ins))
         cur.execute(f"INSERT INTO clientes ({', '.join(cols_ins)}) VALUES ({ph})", tuple(vals_ins))
         return {"ok": True, "cod_cliente": cod_cliente, "created": 1}
+
+
+@app.delete("/desktop/cadastros/motoristas/{codigo}")
+def desktop_motoristas_delete(codigo: str, _ok: bool = Depends(_require_desktop_secret)):
+    cod = _clean_text(codigo).upper()
+    if not cod:
+        raise HTTPException(status_code=400, detail="codigo obrigatorio.")
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM motoristas WHERE UPPER(TRIM(COALESCE(codigo,'')))=UPPER(TRIM(?))", (cod,))
+        deleted = int(cur.rowcount or 0)
+    return {"ok": True, "codigo": cod, "deleted": deleted}
+
+
+@app.delete("/desktop/cadastros/veiculos/{placa}")
+def desktop_veiculos_delete(placa: str, _ok: bool = Depends(_require_desktop_secret)):
+    plc = _clean_text(placa).upper()
+    if not plc:
+        raise HTTPException(status_code=400, detail="placa obrigatoria.")
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM veiculos WHERE UPPER(TRIM(COALESCE(placa,'')))=UPPER(TRIM(?))", (plc,))
+        deleted = int(cur.rowcount or 0)
+    return {"ok": True, "placa": plc, "deleted": deleted}
+
+
+@app.delete("/desktop/cadastros/ajudantes/{ajudante_id}")
+def desktop_ajudantes_delete(ajudante_id: int, _ok: bool = Depends(_require_desktop_secret)):
+    aid = int(ajudante_id or 0)
+    if aid <= 0:
+        raise HTTPException(status_code=400, detail="ajudante_id invalido.")
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM ajudantes WHERE id=?", (aid,))
+        deleted = int(cur.rowcount or 0)
+    return {"ok": True, "ajudante_id": aid, "deleted": deleted}
+
+
+@app.delete("/desktop/cadastros/clientes/{cod_cliente}")
+def desktop_clientes_delete(cod_cliente: str, _ok: bool = Depends(_require_desktop_secret)):
+    cod = _clean_text(cod_cliente).upper()
+    if not cod:
+        raise HTTPException(status_code=400, detail="cod_cliente obrigatorio.")
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM clientes WHERE UPPER(TRIM(COALESCE(cod_cliente,'')))=UPPER(TRIM(?))", (cod,))
+        deleted = int(cur.rowcount or 0)
+    return {"ok": True, "cod_cliente": cod, "deleted": deleted}
 
 
 @app.get("/desktop/clientes/base")
@@ -2893,7 +3029,7 @@ def desktop_avulsa_conciliar(
 
 @app.get("/clientes/base")
 def listar_clientes_base(
-    q: str = Query("", description="Busca por cÃ³digo/nome/cidade"),
+    q: str = Query("", description="Busca por código/nome/cidade"),
     limit: int = Query(200, ge=1, le=1000),
     m=Depends(get_current_motorista),
 ):
@@ -2953,11 +3089,11 @@ def criar_cliente_reserva(
     observacao = (payload.observacao or "").strip()
 
     if not codigo_programacao:
-        raise HTTPException(status_code=400, detail="CÃ³digo da programaÃ§Ã£o Ã© obrigatÃ³rio.")
+        raise HTTPException(status_code=400, detail="Código da programação é obrigatório.")
     if not cod_cliente:
-        raise HTTPException(status_code=400, detail="cod_cliente Ã© obrigatÃ³rio.")
+        raise HTTPException(status_code=400, detail="cod_cliente é obrigatório.")
     if not nome_cliente:
-        raise HTTPException(status_code=400, detail="nome_cliente Ã© obrigatÃ³rio.")
+        raise HTTPException(status_code=400, detail="nome_cliente é obrigatório.")
     if qnt_caixas <= 0:
         raise HTTPException(status_code=400, detail="qnt_caixas deve ser maior que zero.")
 
@@ -2968,11 +3104,11 @@ def criar_cliente_reserva(
         cur = conn.cursor()
         row_prog = _fetch_programacao_owned(cur, codigo_programacao, m, "p.id, p.codigo_programacao")
         if not row_prog:
-            raise HTTPException(status_code=404, detail="ProgramaÃ§Ã£o nÃ£o encontrada para este motorista.")
+            raise HTTPException(status_code=404, detail="Programação não encontrada para este motorista.")
 
         cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='programacao_itens'")
         if not cur.fetchone():
-            raise HTTPException(status_code=500, detail="Tabela programacao_itens nÃ£o encontrada.")
+            raise HTTPException(status_code=500, detail="Tabela programacao_itens não encontrada.")
 
         cur.execute("PRAGMA table_info(programacao_itens)")
         cols = {r[1] for r in cur.fetchall() or []}
@@ -3230,11 +3366,11 @@ def admin_set_senha_motorista(
 @app.get("/rotas/ativas_todas", response_model=List[RotaAtivaOut])
 def listar_rotas_ativas_todas(m=Depends(get_current_motorista)):
     """
-    Lista programaÃ§Ãµes ativas de TODOS os motoristas.
-    Isso Ã© necessÃ¡rio para a tela de TRANSFERÃŠNCIA (destino).
+    Lista programações ativas de TODOS os motoristas.
+    Isso é necessário para a tela de TRANSFERÊNCIA (destino).
     """
     if not ENABLE_ROTAS_ATIVAS_TODAS:
-        raise HTTPException(status_code=403, detail="Endpoint desabilitado por configuraÃ§Ã£o.")
+        raise HTTPException(status_code=403, detail="Endpoint desabilitado por configuração.")
 
     with get_conn() as conn:
         cur = conn.cursor()
@@ -3423,7 +3559,7 @@ def rota_detalhe(codigo_programacao: str, m=Depends(get_current_motorista)):
         pr = cur.fetchone()
 
         if not pr:
-            raise HTTPException(status_code=404, detail="Rota nÃ£o encontrada para este motorista")
+            raise HTTPException(status_code=404, detail="Rota não encontrada para este motorista")
 
         equipes_map = _load_equipes_map(cur)
 
@@ -3656,6 +3792,1270 @@ def rota_detalhe_desktop(codigo_programacao: str, _ok: bool = Depends(_require_d
         return {"rota": rota, "clientes": clientes}
 
 
+@app.get("/desktop/rotas/{codigo_programacao}/recebimentos")
+def desktop_listar_recebimentos(
+    codigo_programacao: str,
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    prog = (codigo_programacao or "").strip().upper()
+    if not prog:
+        raise HTTPException(status_code=400, detail="codigo_programacao obrigatorio.")
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                id,
+                UPPER(TRIM(COALESCE(cod_cliente,''))) AS cod_cliente,
+                TRIM(COALESCE(nome_cliente,'')) AS nome_cliente,
+                COALESCE(valor,0) AS valor,
+                UPPER(TRIM(COALESCE(forma_pagamento,''))) AS forma_pagamento,
+                TRIM(COALESCE(observacao,'')) AS observacao,
+                TRIM(COALESCE(num_nf,'')) AS num_nf,
+                TRIM(COALESCE(data_registro,'')) AS data_registro
+            FROM recebimentos
+            WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))
+            ORDER BY id DESC
+            """,
+            (prog,),
+        )
+        out: List[Dict[str, Any]] = []
+        for r in (cur.fetchall() or []):
+            out.append(
+                {
+                    "id": int(r["id"] or 0),
+                    "cod_cliente": str(r["cod_cliente"] or ""),
+                    "nome_cliente": str(r["nome_cliente"] or ""),
+                    "valor": float(r["valor"] or 0.0),
+                    "forma_pagamento": str(r["forma_pagamento"] or ""),
+                    "observacao": str(r["observacao"] or ""),
+                    "num_nf": str(r["num_nf"] or ""),
+                    "data_registro": str(r["data_registro"] or ""),
+                }
+            )
+    return {"ok": True, "codigo_programacao": prog, "recebimentos": out}
+
+
+@app.post("/desktop/rotas/{codigo_programacao}/recebimentos")
+def desktop_criar_recebimento(
+    codigo_programacao: str,
+    payload: DesktopRecebimentoIn,
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    prog = (codigo_programacao or "").strip().upper()
+    if not prog:
+        raise HTTPException(status_code=400, detail="codigo_programacao obrigatorio.")
+
+    cod = str(payload.cod_cliente or "").strip().upper()
+    nome = str(payload.nome_cliente or "").strip().upper()
+    forma = str(payload.forma_pagamento or "DINHEIRO").strip().upper() or "DINHEIRO"
+    obs = str(payload.observacao or "").strip().upper()
+    num_nf = str(payload.num_nf or "").strip().upper()
+    valor = float(payload.valor or 0.0)
+    if not cod or not nome:
+        raise HTTPException(status_code=400, detail="cod_cliente e nome_cliente obrigatorios.")
+    if valor <= 0:
+        raise HTTPException(status_code=400, detail="valor deve ser maior que zero.")
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cur.execute(
+            """
+            INSERT INTO recebimentos
+                (codigo_programacao, cod_cliente, nome_cliente, valor, forma_pagamento, observacao, num_nf, data_registro)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (prog, cod, nome, valor, forma, obs, num_nf, ts),
+        )
+        rid = int(cur.lastrowid or 0)
+    return {"ok": True, "id": rid, "codigo_programacao": prog}
+
+
+@app.delete("/desktop/rotas/{codigo_programacao}/recebimentos/{cod_cliente}")
+def desktop_zerar_recebimentos_cliente(
+    codigo_programacao: str,
+    cod_cliente: str,
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    prog = (codigo_programacao or "").strip().upper()
+    cod = (cod_cliente or "").strip().upper()
+    if not prog or not cod:
+        raise HTTPException(status_code=400, detail="codigo_programacao e cod_cliente obrigatorios.")
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "DELETE FROM recebimentos WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?)) AND UPPER(TRIM(COALESCE(cod_cliente,'')))=UPPER(TRIM(?))",
+            (prog, cod),
+        )
+        deleted = int(cur.rowcount or 0)
+    return {"ok": True, "deleted": deleted, "codigo_programacao": prog, "cod_cliente": cod}
+
+
+@app.put("/desktop/rotas/{codigo_programacao}/cabecalho")
+def desktop_atualizar_cabecalho_rota(
+    codigo_programacao: str,
+    payload: DesktopRotaCabecalhoIn,
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    prog = (codigo_programacao or "").strip().upper()
+    if not prog:
+        raise HTTPException(status_code=400, detail="codigo_programacao obrigatorio.")
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(programacoes)")
+        cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+
+        sets: List[str] = []
+        vals: List[Any] = []
+        if "data_saida" in cols_prog:
+            sets.append("data_saida=?")
+            vals.append(str(payload.data_saida or "").strip())
+        if "hora_saida" in cols_prog:
+            sets.append("hora_saida=?")
+            vals.append(str(payload.hora_saida or "").strip())
+        if "data_chegada" in cols_prog:
+            sets.append("data_chegada=?")
+            vals.append(str(payload.data_chegada or "").strip())
+        if "hora_chegada" in cols_prog:
+            sets.append("hora_chegada=?")
+            vals.append(str(payload.hora_chegada or "").strip())
+        if ("diaria_motorista_valor" in cols_prog) and (payload.diaria_motorista_valor is not None):
+            sets.append("diaria_motorista_valor=?")
+            vals.append(float(payload.diaria_motorista_valor or 0.0))
+
+        if not sets:
+            raise HTTPException(status_code=500, detail="Colunas de cabecalho indisponiveis em programacoes.")
+
+        vals.append(prog)
+        cur.execute(
+            f"UPDATE programacoes SET {', '.join(sets)} WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))",
+            tuple(vals),
+        )
+        updated = int(cur.rowcount or 0)
+        if updated <= 0:
+            raise HTTPException(status_code=404, detail="programacao nao encontrada.")
+    return {"ok": True, "codigo_programacao": prog, "updated": updated}
+
+
+@app.put("/desktop/rotas/{codigo_programacao}/financeiro")
+def desktop_atualizar_financeiro_rota(
+    codigo_programacao: str,
+    payload: DesktopRotaFinanceiroIn,
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    prog = (codigo_programacao or "").strip().upper()
+    if not prog:
+        raise HTTPException(status_code=400, detail="codigo_programacao obrigatorio.")
+
+    def _add_num(sets: List[str], vals: List[Any], cols: set, col: str, value: Optional[Any], caster):
+        if value is None:
+            return
+        if col in cols:
+            sets.append(f"{col}=?")
+            vals.append(caster(value))
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(programacoes)")
+        cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+
+        sets: List[str] = []
+        vals: List[Any] = []
+
+        if payload.nf_numero is not None:
+            nf_numero = str(payload.nf_numero or "").strip()
+            if "nf_numero" in cols_prog:
+                sets.append("nf_numero=?")
+                vals.append(nf_numero)
+            if "num_nf" in cols_prog:
+                sets.append("num_nf=?")
+                vals.append(nf_numero)
+        _add_num(sets, vals, cols_prog, "nf_kg", payload.nf_kg, float)
+        _add_num(sets, vals, cols_prog, "nf_caixas", payload.nf_caixas, int)
+        _add_num(sets, vals, cols_prog, "nf_kg_carregado", payload.nf_kg_carregado, float)
+        _add_num(sets, vals, cols_prog, "nf_kg_vendido", payload.nf_kg_vendido, float)
+        _add_num(sets, vals, cols_prog, "nf_saldo", payload.nf_saldo, float)
+        _add_num(sets, vals, cols_prog, "nf_preco", payload.nf_preco, float)
+        if (payload.nf_preco is not None) and ("preco_nf" in cols_prog):
+            sets.append("preco_nf=?")
+            vals.append(float(payload.nf_preco))
+        _add_num(sets, vals, cols_prog, "media", payload.media, float)
+
+        if payload.nf_caixa_final is not None:
+            caixa_final = int(payload.nf_caixa_final or 0)
+            if "aves_caixa_final" in cols_prog:
+                sets.append("aves_caixa_final=?")
+                vals.append(caixa_final)
+            if "qnt_aves_caixa_final" in cols_prog:
+                sets.append("qnt_aves_caixa_final=?")
+                vals.append(caixa_final)
+
+        _add_num(sets, vals, cols_prog, "km_inicial", payload.km_inicial, float)
+        _add_num(sets, vals, cols_prog, "km_final", payload.km_final, float)
+        _add_num(sets, vals, cols_prog, "litros", payload.litros, float)
+        _add_num(sets, vals, cols_prog, "km_rodado", payload.km_rodado, float)
+        _add_num(sets, vals, cols_prog, "media_km_l", payload.media_km_l, float)
+        _add_num(sets, vals, cols_prog, "custo_km", payload.custo_km, float)
+
+        _add_num(sets, vals, cols_prog, "ced_200_qtd", payload.ced_200_qtd, int)
+        _add_num(sets, vals, cols_prog, "ced_100_qtd", payload.ced_100_qtd, int)
+        _add_num(sets, vals, cols_prog, "ced_50_qtd", payload.ced_50_qtd, int)
+        _add_num(sets, vals, cols_prog, "ced_20_qtd", payload.ced_20_qtd, int)
+        _add_num(sets, vals, cols_prog, "ced_10_qtd", payload.ced_10_qtd, int)
+        _add_num(sets, vals, cols_prog, "ced_5_qtd", payload.ced_5_qtd, int)
+        _add_num(sets, vals, cols_prog, "ced_2_qtd", payload.ced_2_qtd, int)
+        _add_num(sets, vals, cols_prog, "valor_dinheiro", payload.valor_dinheiro, float)
+
+        if payload.adiantamento is not None:
+            adiant = float(payload.adiantamento or 0.0)
+            if "adiantamento" in cols_prog:
+                sets.append("adiantamento=?")
+                vals.append(adiant)
+            if "adiantamento_rota" in cols_prog:
+                sets.append("adiantamento_rota=?")
+                vals.append(adiant)
+
+        if payload.rota_observacao is not None and "rota_observacao" in cols_prog:
+            sets.append("rota_observacao=?")
+            vals.append(str(payload.rota_observacao or "").strip())
+
+        if not sets:
+            raise HTTPException(status_code=500, detail="Colunas financeiras indisponiveis em programacoes.")
+
+        vals.append(prog)
+        cur.execute(
+            f"UPDATE programacoes SET {', '.join(sets)} WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))",
+            tuple(vals),
+        )
+        updated = int(cur.rowcount or 0)
+        if updated <= 0:
+            raise HTTPException(status_code=404, detail="programacao nao encontrada.")
+
+    return {"ok": True, "codigo_programacao": prog, "updated": updated}
+
+
+@app.post("/desktop/rotas/{codigo_programacao}/diarias/sync")
+def desktop_sync_diarias_despesas(
+    codigo_programacao: str,
+    payload: DesktopDiariasSyncIn,
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    prog = (codigo_programacao or "").strip().upper()
+    if not prog:
+        raise HTTPException(status_code=400, detail="codigo_programacao obrigatorio.")
+
+    qtd = float(payload.qtd_diarias or 0.0)
+    qtd_ajudantes = int(payload.qtd_ajudantes or 0)
+    total_mot = float(payload.total_motorista or 0.0)
+    total_ajud = float(payload.total_ajudantes or 0.0)
+    if qtd < 0 or qtd_ajudantes < 0 or total_mot < 0 or total_ajud < 0:
+        raise HTTPException(status_code=400, detail="Valores de diarias invalidos.")
+
+    obs_motorista = str(payload.observacao_motorista or "").strip().upper()
+    obs_ajudantes = str(payload.observacao_ajudantes or "").strip().upper()
+    now_s = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            DELETE FROM despesas
+             WHERE codigo_programacao=?
+               AND descricao IN ('DIARIAS MOTORISTA', 'DIARIAS AJUDANTES')
+               AND COALESCE(categoria, '')='DIARIAS'
+            """,
+            (prog,),
+        )
+        cur.execute(
+            """
+            INSERT INTO despesas (codigo_programacao, descricao, valor, categoria, observacao, data_registro)
+            VALUES (?, ?, ?, 'DIARIAS', ?, ?)
+            """,
+            (prog, "DIARIAS MOTORISTA", total_mot, obs_motorista, now_s),
+        )
+        cur.execute(
+            """
+            INSERT INTO despesas (codigo_programacao, descricao, valor, categoria, observacao, data_registro)
+            VALUES (?, ?, ?, 'DIARIAS', ?, ?)
+            """,
+            (prog, "DIARIAS AJUDANTES", total_ajud, obs_ajudantes, now_s),
+        )
+    return {
+        "ok": True,
+        "codigo_programacao": prog,
+        "qtd_diarias": qtd,
+        "qtd_ajudantes": qtd_ajudantes,
+        "total_motorista": total_mot,
+        "total_ajudantes": total_ajud,
+        "total_geral": round(total_mot + total_ajud, 2),
+    }
+
+
+@app.post("/desktop/rotas/{codigo_programacao}/clientes/manual")
+def desktop_upsert_cliente_manual_programacao(
+    codigo_programacao: str,
+    payload: DesktopProgramacaoClienteManualIn,
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    prog = (codigo_programacao or "").strip().upper()
+    cod = str(payload.cod_cliente or "").strip().upper()
+    nome = str(payload.nome_cliente or "").strip().upper()
+    if not prog or not cod or not nome:
+        raise HTTPException(status_code=400, detail="codigo_programacao, cod_cliente e nome_cliente sao obrigatorios.")
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT COUNT(1) AS n
+            FROM programacao_itens
+            WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))
+              AND UPPER(TRIM(COALESCE(cod_cliente,'')))=UPPER(TRIM(?))
+            """,
+            (prog, cod),
+        )
+        exists = int((cur.fetchone() or {}).get("n") or 0)
+        if exists:
+            cur.execute(
+                """
+                UPDATE programacao_itens
+                   SET nome_cliente=?
+                 WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))
+                   AND UPPER(TRIM(COALESCE(cod_cliente,'')))=UPPER(TRIM(?))
+                """,
+                (nome, prog, cod),
+            )
+            action = "updated"
+        else:
+            cur.execute(
+                """
+                INSERT INTO programacao_itens
+                    (codigo_programacao, cod_cliente, nome_cliente, qnt_caixas, kg, preco, endereco, vendedor, pedido)
+                VALUES (?, ?, ?, 0, 0, 0, '', '', 'MANUAL')
+                """,
+                (prog, cod, nome),
+            )
+            action = "created"
+    return {"ok": True, "codigo_programacao": prog, "cod_cliente": cod, "nome_cliente": nome, "action": action}
+
+
+@app.get("/desktop/rotas/{codigo_programacao}/despesas")
+def desktop_listar_despesas(
+    codigo_programacao: str,
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    prog = (codigo_programacao or "").strip().upper()
+    if not prog:
+        raise HTTPException(status_code=400, detail="codigo_programacao obrigatorio.")
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                id,
+                UPPER(TRIM(COALESCE(codigo_programacao,''))) AS codigo_programacao,
+                TRIM(COALESCE(descricao,'')) AS descricao,
+                COALESCE(valor,0) AS valor,
+                UPPER(TRIM(COALESCE(categoria,'OUTROS'))) AS categoria,
+                TRIM(COALESCE(observacao,'')) AS observacao,
+                TRIM(COALESCE(data_registro,'')) AS data_registro
+            FROM despesas
+            WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))
+            ORDER BY id DESC
+            """,
+            (prog,),
+        )
+        out: List[Dict[str, Any]] = []
+        for r in (cur.fetchall() or []):
+            out.append(
+                {
+                    "id": int(r["id"] or 0),
+                    "codigo_programacao": str(r["codigo_programacao"] or ""),
+                    "descricao": str(r["descricao"] or ""),
+                    "valor": float(r["valor"] or 0.0),
+                    "categoria": str(r["categoria"] or "OUTROS"),
+                    "observacao": str(r["observacao"] or ""),
+                    "data_registro": str(r["data_registro"] or ""),
+                }
+            )
+    return {"ok": True, "codigo_programacao": prog, "despesas": out}
+
+
+@app.post("/desktop/rotas/{codigo_programacao}/despesas")
+def desktop_criar_despesa(
+    codigo_programacao: str,
+    payload: DesktopDespesaIn,
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    prog = (codigo_programacao or "").strip().upper()
+    if not prog:
+        raise HTTPException(status_code=400, detail="codigo_programacao obrigatorio.")
+
+    desc = str(payload.descricao or "").strip().upper()
+    cat = str(payload.categoria or "OUTROS").strip().upper() or "OUTROS"
+    obs = str(payload.observacao or "").strip().upper()
+    val = float(payload.valor or 0.0)
+    if not desc:
+        raise HTTPException(status_code=400, detail="descricao obrigatoria.")
+    if val <= 0:
+        raise HTTPException(status_code=400, detail="valor deve ser maior que zero.")
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cur.execute(
+            """
+            INSERT INTO despesas (codigo_programacao, descricao, valor, categoria, observacao, data_registro)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (prog, desc, val, cat, obs, ts),
+        )
+        did = int(cur.lastrowid or 0)
+    return {"ok": True, "id": did, "codigo_programacao": prog}
+
+
+@app.get("/desktop/despesas/{despesa_id}")
+def desktop_obter_despesa(
+    despesa_id: int,
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    did = int(despesa_id or 0)
+    if did <= 0:
+        raise HTTPException(status_code=400, detail="despesa_id invalido.")
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                id,
+                UPPER(TRIM(COALESCE(codigo_programacao,''))) AS codigo_programacao,
+                TRIM(COALESCE(descricao,'')) AS descricao,
+                COALESCE(valor,0) AS valor,
+                UPPER(TRIM(COALESCE(categoria,'OUTROS'))) AS categoria,
+                TRIM(COALESCE(observacao,'')) AS observacao,
+                TRIM(COALESCE(data_registro,'')) AS data_registro
+            FROM despesas
+            WHERE id=?
+            LIMIT 1
+            """,
+            (did,),
+        )
+        row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="despesa nao encontrada.")
+    return {
+        "ok": True,
+        "despesa": {
+            "id": int(row["id"] or 0),
+            "codigo_programacao": str(row["codigo_programacao"] or ""),
+            "descricao": str(row["descricao"] or ""),
+            "valor": float(row["valor"] or 0.0),
+            "categoria": str(row["categoria"] or "OUTROS"),
+            "observacao": str(row["observacao"] or ""),
+            "data_registro": str(row["data_registro"] or ""),
+        },
+    }
+
+
+@app.put("/desktop/despesas/{despesa_id}")
+def desktop_atualizar_despesa(
+    despesa_id: int,
+    payload: DesktopDespesaIn,
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    did = int(despesa_id or 0)
+    if did <= 0:
+        raise HTTPException(status_code=400, detail="despesa_id invalido.")
+
+    desc = str(payload.descricao or "").strip().upper()
+    cat = str(payload.categoria or "OUTROS").strip().upper() or "OUTROS"
+    obs = str(payload.observacao or "").strip().upper()
+    val = float(payload.valor or 0.0)
+    if not desc:
+        raise HTTPException(status_code=400, detail="descricao obrigatoria.")
+    if val <= 0:
+        raise HTTPException(status_code=400, detail="valor deve ser maior que zero.")
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id, codigo_programacao FROM despesas WHERE id=? LIMIT 1", (did,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="despesa nao encontrada.")
+        cur.execute(
+            "UPDATE despesas SET descricao=?, valor=?, categoria=?, observacao=? WHERE id=?",
+            (desc, val, cat, obs, did),
+        )
+        prog = str(row["codigo_programacao"] or "").strip().upper()
+    return {"ok": True, "id": did, "codigo_programacao": prog}
+
+
+@app.delete("/desktop/despesas/{despesa_id}")
+def desktop_excluir_despesa(
+    despesa_id: int,
+    codigo_programacao: str = Query(""),
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    did = int(despesa_id or 0)
+    if did <= 0:
+        raise HTTPException(status_code=400, detail="despesa_id invalido.")
+    prog = (codigo_programacao or "").strip().upper()
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        if prog:
+            cur.execute(
+                "DELETE FROM despesas WHERE id=? AND UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))",
+                (did, prog),
+            )
+        else:
+            cur.execute("DELETE FROM despesas WHERE id=?", (did,))
+        deleted = int(cur.rowcount or 0)
+    if deleted <= 0:
+        raise HTTPException(status_code=404, detail="despesa nao encontrada.")
+    return {"ok": True, "id": did, "deleted": deleted}
+
+
+@app.put("/desktop/rotas/{codigo_programacao}/status")
+def desktop_atualizar_status_rota(
+    codigo_programacao: str,
+    payload: DesktopProgramacaoStatusIn,
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    prog = (codigo_programacao or "").strip().upper()
+    if not prog:
+        raise HTTPException(status_code=400, detail="codigo_programacao obrigatorio.")
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(programacoes)")
+        cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+
+        sets: List[str] = []
+        vals: List[Any] = []
+        if ("status" in cols_prog) and (payload.status is not None):
+            sets.append("status=?")
+            vals.append(str(payload.status or "").strip().upper())
+        if ("prestacao_status" in cols_prog) and (payload.prestacao_status is not None):
+            sets.append("prestacao_status=?")
+            vals.append(str(payload.prestacao_status or "").strip().upper())
+        if ("status_operacional" in cols_prog) and (payload.status_operacional is not None):
+            status_op = str(payload.status_operacional or "").strip().upper()
+            sets.append("status_operacional=?")
+            vals.append(status_op or None)
+        if ("finalizada_no_app" in cols_prog) and (payload.finalizada_no_app is not None):
+            sets.append("finalizada_no_app=?")
+            vals.append(1 if int(payload.finalizada_no_app or 0) == 1 else 0)
+
+        if not sets:
+            raise HTTPException(status_code=400, detail="Nenhum campo de status informado para atualizacao.")
+
+        vals.append(prog)
+        cur.execute(
+            f"UPDATE programacoes SET {', '.join(sets)} WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))",
+            tuple(vals),
+        )
+        updated = int(cur.rowcount or 0)
+        if updated <= 0:
+            raise HTTPException(status_code=404, detail="programacao nao encontrada.")
+    return {"ok": True, "codigo_programacao": prog, "updated": updated}
+
+
+def _is_allowed_desktop_sql_mutation(sql: str) -> bool:
+    s = str(sql or "").strip()
+    if not s:
+        return False
+    s_up = s.upper()
+    if s_up.startswith("INSERT ") or s_up.startswith("UPDATE ") or s_up.startswith("DELETE ") or s_up.startswith("REPLACE "):
+        banned = ("PRAGMA ", "ATTACH ", "DETACH ", "VACUUM ", "ALTER ", "DROP ", "CREATE ", "sqlite_master")
+        return not any(tok in s_up for tok in banned)
+    return False
+
+
+def _normalize_desktop_sql_params(params: Any):
+    if params is None:
+        return ()
+    if isinstance(params, dict):
+        out = {}
+        for k, v in params.items():
+            out[str(k)] = _normalize_desktop_sql_scalar(v)
+        return out
+    if isinstance(params, (list, tuple)):
+        return tuple(_normalize_desktop_sql_scalar(v) for v in params)
+    return (_normalize_desktop_sql_scalar(params),)
+
+
+def _normalize_desktop_sql_scalar(v: Any):
+    if v is None:
+        return None
+    if isinstance(v, (str, int, float, bool)):
+        return v
+    if isinstance(v, (bytes, bytearray)):
+        try:
+            return bytes(v).decode("utf-8", errors="replace")
+        except Exception:
+            return str(v)
+    return str(v)
+
+
+@app.post("/desktop/sql/mutate")
+def desktop_sql_mutate(payload: DesktopSqlMutateIn, _ok: bool = Depends(_require_desktop_secret)):
+    stmts = payload.statements or []
+    if not stmts:
+        return {"ok": True, "executed": 0}
+    if len(stmts) > 5000:
+        raise HTTPException(status_code=400, detail="Quantidade de statements excede o limite (5000).")
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        executed = 0
+        for st in stmts:
+            sql = str(st.sql or "").strip()
+            if not _is_allowed_desktop_sql_mutation(sql):
+                raise HTTPException(status_code=400, detail=f"SQL nao permitido para mutate: {sql[:80]}")
+            params = _normalize_desktop_sql_params(st.params)
+            try:
+                cur.execute(sql, params)
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"Falha ao executar SQL mutate: {exc}")
+            executed += 1
+    return {"ok": True, "executed": executed}
+
+
+@app.get("/desktop/overview")
+def desktop_overview(_ok: bool = Depends(_require_desktop_secret)):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        where_not_finalizadas = _rotas_not_finalizadas_clause(conn, "p")
+
+        total_prog = 0
+        total_vendas = 0
+        total_clientes_ativos = 0
+        rotas: List[Dict[str, Any]] = []
+
+        try:
+            cur.execute(
+                "SELECT COUNT(*) AS n FROM programacoes p WHERE " + where_not_finalizadas
+            )
+            row = cur.fetchone()
+            total_prog = int((row["n"] if row else 0) or 0)
+        except Exception:
+            total_prog = 0
+
+        try:
+            cur.execute("SELECT COUNT(*) AS n FROM vendas_importadas")
+            row = cur.fetchone()
+            total_vendas = int((row["n"] if row else 0) or 0)
+        except Exception:
+            total_vendas = 0
+
+        try:
+            cur.execute(
+                """
+                SELECT COUNT(DISTINCT i.cod_cliente) AS n
+                FROM programacao_itens i
+                WHERE i.codigo_programacao IN (
+                    SELECT p.codigo_programacao
+                    FROM programacoes p
+                    WHERE """ + where_not_finalizadas + """
+                )
+                """
+            )
+            row = cur.fetchone()
+            total_clientes_ativos = int((row["n"] if row else 0) or 0)
+        except Exception:
+            total_clientes_ativos = 0
+
+        try:
+            cur.execute(
+                """
+                SELECT
+                    p.codigo_programacao,
+                    COALESCE(p.motorista, '') AS motorista,
+                    COALESCE(p.veiculo, '') AS veiculo,
+                    COALESCE(p.data_criacao, '') AS data_criacao,
+                    COALESCE(p.status, '') AS status,
+                    COALESCE(p.status_operacional, '') AS status_operacional
+                FROM programacoes p
+                WHERE """ + where_not_finalizadas + """
+                ORDER BY p.id DESC
+                LIMIT 120
+                """
+            )
+            for r in (cur.fetchall() or []):
+                rotas.append(
+                    {
+                        "codigo_programacao": str(r["codigo_programacao"] or "").strip().upper(),
+                        "motorista": str(r["motorista"] or "").strip(),
+                        "veiculo": str(r["veiculo"] or "").strip(),
+                        "data_criacao": str(r["data_criacao"] or "").strip(),
+                        "status": str(r["status"] or "").strip().upper(),
+                        "status_operacional": str(r["status_operacional"] or "").strip().upper(),
+                    }
+                )
+        except Exception:
+            rotas = []
+
+    return {
+        "ok": True,
+        "total_programacoes_ativas": total_prog,
+        "total_vendas_importadas": total_vendas,
+        "total_clientes_ativos": total_clientes_ativos,
+        "rotas": rotas,
+    }
+
+
+@app.get("/desktop/programacoes")
+def desktop_programacoes_listar(
+    modo: str = Query("todas", description="todas|ativas|finalizadas_pendentes|finalizadas_prestacao"),
+    limit: int = Query(400, ge=1, le=5000),
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    modo_n = (modo or "todas").strip().lower()
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(programacoes)")
+        cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+
+        has_status = "status" in cols
+        has_status_op = "status_operacional" in cols
+        has_finalizada_app = "finalizada_no_app" in cols
+        has_prest = "prestacao_status" in cols
+
+        where = []
+        params: List[Any] = []
+
+        if modo_n == "ativas":
+            where_not_finalizadas = _rotas_not_finalizadas_clause(conn, "p")
+            where.append(where_not_finalizadas)
+        elif modo_n == "finalizadas_pendentes":
+            if has_status_op:
+                st_cond = "UPPER(TRIM(COALESCE(p.status_operacional,''))) IN ('FINALIZADA','FINALIZADO')"
+            elif has_status:
+                st_cond = "UPPER(TRIM(COALESCE(p.status,''))) IN ('FINALIZADA','FINALIZADO')"
+            else:
+                st_cond = "1=0"
+            if has_finalizada_app:
+                st_cond = f"({st_cond} AND COALESCE(p.finalizada_no_app,0)=1)"
+            where.append(st_cond)
+            if has_prest:
+                where.append("COALESCE(p.prestacao_status,'PENDENTE')='PENDENTE'")
+        elif modo_n == "finalizadas_prestacao":
+            parts = []
+            if has_status_op:
+                parts.append("UPPER(TRIM(COALESCE(p.status_operacional,''))) IN ('FINALIZADA','FINALIZADO')")
+            if has_status:
+                parts.append("UPPER(TRIM(COALESCE(p.status,''))) IN ('FINALIZADA','FINALIZADO')")
+            where.append("(" + (" OR ".join(parts) if parts else "1=0") + ")")
+            if has_prest:
+                where.append("UPPER(TRIM(COALESCE(p.prestacao_status,'PENDENTE'))) IN ('PENDENTE','FECHADA')")
+
+        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+        cur.execute(
+            f"""
+            SELECT
+                p.codigo_programacao,
+                COALESCE(p.data_criacao, '') AS data_criacao,
+                COALESCE(p.motorista, '') AS motorista,
+                COALESCE(p.veiculo, '') AS veiculo,
+                COALESCE(p.status, '') AS status,
+                COALESCE(p.status_operacional, '') AS status_operacional,
+                COALESCE(p.prestacao_status, 'PENDENTE') AS prestacao_status
+            FROM programacoes p
+            {where_sql}
+            ORDER BY p.id DESC
+            LIMIT ?
+            """,
+            tuple(params + [int(limit)]),
+        )
+        out: List[Dict[str, Any]] = []
+        for r in (cur.fetchall() or []):
+            out.append(
+                {
+                    "codigo_programacao": str(r["codigo_programacao"] or "").strip().upper(),
+                    "data_criacao": str(r["data_criacao"] or "").strip(),
+                    "data_referencia": str(r["data_criacao"] or "").strip(),
+                    "motorista": str(r["motorista"] or "").strip().upper(),
+                    "veiculo": str(r["veiculo"] or "").strip().upper(),
+                    "status": str(r["status"] or "").strip().upper(),
+                    "status_operacional": str(r["status_operacional"] or "").strip().upper(),
+                    "prestacao_status": str(r["prestacao_status"] or "").strip().upper(),
+                }
+            )
+    return {"ok": True, "modo": modo_n, "programacoes": out}
+
+
+@app.get("/desktop/centro-custos/rows")
+def desktop_centro_custos_rows(
+    limit: int = Query(5000, ge=1, le=20000),
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(programacoes)")
+        cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+
+        data_expr = "COALESCE(p.data_saida,p.data_criacao,'')"
+        km_expr = "COALESCE(p.km_rodado,0)" if "km_rodado" in cols else "0"
+        if "nf_kg_carregado" in cols:
+            kg_expr = "COALESCE(p.nf_kg_carregado, p.kg_carregado, 0)"
+        elif "kg_carregado" in cols:
+            kg_expr = "COALESCE(p.kg_carregado,0)"
+        else:
+            kg_expr = "0"
+
+        cur.execute(
+            f"""
+            SELECT p.codigo_programacao,
+                   UPPER(TRIM(COALESCE(p.veiculo,''))) AS veiculo,
+                   {data_expr} AS data_ref,
+                   {km_expr} AS km_rodado,
+                   {kg_expr} AS kg_carregado,
+                   COALESCE(d.total_desp,0) AS total_desp
+              FROM programacoes p
+         LEFT JOIN (
+                SELECT codigo_programacao, COALESCE(SUM(valor),0) AS total_desp
+                  FROM despesas
+                 GROUP BY codigo_programacao
+            ) d ON d.codigo_programacao = p.codigo_programacao
+             WHERE TRIM(COALESCE(p.veiculo,'')) <> ''
+             ORDER BY p.id DESC
+             LIMIT ?
+            """,
+            (int(limit),),
+        )
+        rows = []
+        for r in (cur.fetchall() or []):
+            rows.append(
+                {
+                    "codigo_programacao": str(r["codigo_programacao"] or "").strip(),
+                    "veiculo": str(r["veiculo"] or "").strip().upper(),
+                    "data_ref": str(r["data_ref"] or "").strip(),
+                    "km_rodado": float(r["km_rodado"] or 0.0),
+                    "kg_carregado": float(r["kg_carregado"] or 0.0),
+                    "total_desp": float(r["total_desp"] or 0.0),
+                }
+            )
+    return {"ok": True, "rows": rows}
+
+
+@app.get("/desktop/relatorios/km-veiculos")
+def desktop_relatorio_km_veiculos(_ok: bool = Depends(_require_desktop_secret)):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(programacoes)")
+        cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+        km_expr = "COALESCE(km_rodado,0)" if "km_rodado" in cols else "0"
+        media_expr = "COALESCE(media_km_l,0)" if "media_km_l" in cols else "0"
+        cur.execute(
+            f"""
+            SELECT
+                UPPER(TRIM(COALESCE(veiculo,''))) AS veiculo,
+                COUNT(1) AS viagens,
+                COALESCE(SUM({km_expr}),0) AS km_rodado,
+                COALESCE(AVG(NULLIF({media_expr},0)),0) AS media_km_l
+            FROM programacoes
+            GROUP BY UPPER(TRIM(COALESCE(veiculo,'')))
+            ORDER BY km_rodado DESC, veiculo ASC
+            """
+        )
+        out: List[Dict[str, Any]] = []
+        for r in (cur.fetchall() or []):
+            out.append(
+                {
+                    "veiculo": str(r["veiculo"] or "").strip().upper(),
+                    "viagens": int(r["viagens"] or 0),
+                    "km_rodado": float(r["km_rodado"] or 0.0),
+                    "media_km_l": float(r["media_km_l"] or 0.0),
+                }
+            )
+    return {"ok": True, "rows": out}
+
+
+@app.get("/desktop/relatorios/despesas-categorias")
+def desktop_relatorio_despesas_categorias(_ok: bool = Depends(_require_desktop_secret)):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                UPPER(TRIM(COALESCE(categoria,'OUTROS'))) AS categoria,
+                COUNT(1) AS qtd,
+                COALESCE(SUM(valor),0) AS total
+            FROM despesas
+            GROUP BY UPPER(TRIM(COALESCE(categoria,'OUTROS')))
+            ORDER BY total DESC, categoria ASC
+            """
+        )
+        out: List[Dict[str, Any]] = []
+        for r in (cur.fetchall() or []):
+            out.append(
+                {
+                    "categoria": str(r["categoria"] or "OUTROS").strip().upper() or "OUTROS",
+                    "qtd": int(r["qtd"] or 0),
+                    "total": float(r["total"] or 0.0),
+                }
+            )
+    return {"ok": True, "rows": out}
+
+
+@app.get("/desktop/relatorios/rotina-motoristas")
+def desktop_relatorio_rotina_motoristas(
+    motorista_like: str = Query("", description="Filtro parcial por motorista."),
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    filtro_mot = str(motorista_like or "").strip().upper()
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(programacoes)")
+        cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+        km_expr = "COALESCE(km_rodado,0)" if "km_rodado" in cols else "0"
+        kg_expr = "COALESCE(kg_vendido,0)" if "kg_vendido" in cols else "0"
+        sql = f"""
+            SELECT
+                COALESCE(codigo_programacao,'') AS codigo_programacao,
+                COALESCE(motorista,'') AS motorista,
+                COALESCE(equipe,'') AS equipe,
+                COALESCE(status,'') AS status,
+                {kg_expr} AS kg_vendido,
+                {km_expr} AS km_rodado
+            FROM programacoes
+            WHERE 1=1
+        """
+        params: List[Any] = []
+        if filtro_mot:
+            sql += " AND UPPER(COALESCE(motorista,'')) LIKE ?"
+            params.append(f"%{filtro_mot}%")
+        sql += " ORDER BY id DESC"
+        cur.execute(sql, tuple(params))
+        out: List[Dict[str, Any]] = []
+        for r in (cur.fetchall() or []):
+            out.append(
+                {
+                    "codigo_programacao": str(r["codigo_programacao"] or ""),
+                    "motorista": str(r["motorista"] or ""),
+                    "equipe": str(r["equipe"] or ""),
+                    "status": str(r["status"] or ""),
+                    "kg_vendido": float(r["kg_vendido"] or 0.0),
+                    "km_rodado": float(r["km_rodado"] or 0.0),
+                }
+            )
+    return {"ok": True, "rows": out}
+
+
+@app.get("/desktop/relatorios/mortalidade-motorista")
+def desktop_relatorio_mortalidade_motorista(
+    codigo_like: str = Query("", description="Filtro parcial por codigo da programacao."),
+    motorista_like: str = Query("", description="Filtro parcial por motorista."),
+    data_like: str = Query("", description="Padroes de data separados por '|'."),
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    filtro_cod = str(codigo_like or "").strip().upper()
+    filtro_mot = str(motorista_like or "").strip().upper()
+    data_patterns = [p.strip() for p in str(data_like or "").split("|") if str(p or "").strip()]
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(programacoes)")
+        cols_p = {str(c[1]).lower() for c in (cur.fetchall() or [])}
+        has_status = "status" in cols_p
+        has_data_criacao = "data_criacao" in cols_p
+        has_data = "data" in cols_p
+        data_expr = (
+            "COALESCE(p.data_criacao,'')"
+            if has_data_criacao
+            else ("COALESCE(p.data,'')" if has_data else "''")
+        )
+        status_expr = "COALESCE(p.status,'')" if has_status else "''"
+
+        sql = f"""
+            SELECT
+                COALESCE(p.codigo_programacao,'') as codigo_programacao,
+                COALESCE(p.motorista,'') as motorista,
+                {data_expr} as data_ref,
+                {status_expr} as status_ref,
+                COALESCE(SUM(COALESCE(pc.mortalidade_aves, 0)), 0) as mortalidade_total,
+                COUNT(CASE WHEN COALESCE(pc.mortalidade_aves,0) > 0 THEN 1 END) as clientes_com_mortalidade
+            FROM programacoes p
+            LEFT JOIN programacao_itens_controle pc
+              ON UPPER(COALESCE(pc.codigo_programacao,'')) = UPPER(COALESCE(p.codigo_programacao,''))
+            WHERE 1=1
+        """
+        params: List[Any] = []
+
+        if filtro_cod:
+            sql += " AND UPPER(COALESCE(p.codigo_programacao,'')) LIKE ?"
+            params.append(f"%{filtro_cod}%")
+        if filtro_mot:
+            sql += " AND UPPER(COALESCE(p.motorista,'')) LIKE ?"
+            params.append(f"%{filtro_mot}%")
+        if data_patterns:
+            clauses = []
+            for pat in data_patterns:
+                clauses.append(f"{data_expr} LIKE ?")
+                params.append(f"%{pat}%")
+            sql += " AND (" + " OR ".join(clauses) + ")"
+
+        sql += """
+            GROUP BY p.codigo_programacao, p.motorista, data_ref, status_ref
+            ORDER BY mortalidade_total ASC, p.codigo_programacao DESC
+        """
+        cur.execute(sql, tuple(params))
+        out: List[Dict[str, Any]] = []
+        for r in (cur.fetchall() or []):
+            out.append(
+                {
+                    "codigo_programacao": str(r["codigo_programacao"] or ""),
+                    "motorista": str(r["motorista"] or ""),
+                    "data_ref": str(r["data_ref"] or ""),
+                    "status_ref": str(r["status_ref"] or ""),
+                    "mortalidade_total": int(r["mortalidade_total"] or 0),
+                    "clientes_com_mortalidade": int(r["clientes_com_mortalidade"] or 0),
+                }
+            )
+    return {"ok": True, "rows": out}
+
+
+@app.get("/desktop/escala/rows")
+def desktop_escala_rows(
+    limit: int = Query(5000, ge=1, le=20000),
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(programacoes)")
+        cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+
+        local_expr = (
+            "COALESCE(local_rota,'')"
+            if "local_rota" in cols
+            else ("COALESCE(local,'')" if "local" in cols else "''")
+        )
+        km_rodado_expr = "COALESCE(km_rodado,0)" if "km_rodado" in cols else "0"
+        status_op_expr = "COALESCE(status_operacional,'')" if "status_operacional" in cols else "''"
+        finalizada_app_expr = "COALESCE(finalizada_no_app,0)" if "finalizada_no_app" in cols else "0"
+        kg_estimado_expr = "COALESCE(kg_estimado,0)" if "kg_estimado" in cols else "0"
+        data_saida_expr = "COALESCE(data_saida,'')" if "data_saida" in cols else "''"
+        hora_saida_expr = "COALESCE(hora_saida,'')" if "hora_saida" in cols else "''"
+        data_chegada_expr = "COALESCE(data_chegada,'')" if "data_chegada" in cols else "''"
+        hora_chegada_expr = "COALESCE(hora_chegada,'')" if "hora_chegada" in cols else "''"
+        data_ref_expr = (
+            "COALESCE(data_saida,data_criacao,data,'')"
+            if ("data_saida" in cols or "data_criacao" in cols or "data" in cols)
+            else "''"
+        )
+
+        cur.execute(
+            f"""
+            SELECT
+                COALESCE(codigo_programacao,'') AS codigo_programacao,
+                {data_ref_expr} AS data_ref,
+                COALESCE(motorista,'') AS motorista,
+                COALESCE(equipe,'') AS equipe,
+                COALESCE(status,'') AS status,
+                {status_op_expr} AS status_operacional,
+                {finalizada_app_expr} AS finalizada_no_app,
+                {kg_estimado_expr} AS kg_estimado,
+                {data_saida_expr} AS data_saida,
+                {hora_saida_expr} AS hora_saida,
+                {data_chegada_expr} AS data_chegada,
+                {hora_chegada_expr} AS hora_chegada,
+                {local_expr} AS local_rota,
+                {km_rodado_expr} AS km_rodado
+            FROM programacoes
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (int(limit),),
+        )
+        out: List[Dict[str, Any]] = []
+        for r in (cur.fetchall() or []):
+            out.append(
+                {
+                    "codigo_programacao": str(r["codigo_programacao"] or "").strip().upper(),
+                    "data_ref": str(r["data_ref"] or "").strip(),
+                    "motorista": str(r["motorista"] or "").strip(),
+                    "equipe": str(r["equipe"] or "").strip(),
+                    "status": str(r["status"] or "").strip(),
+                    "status_operacional": str(r["status_operacional"] or "").strip(),
+                    "finalizada_no_app": int(r["finalizada_no_app"] or 0),
+                    "kg_estimado": float(r["kg_estimado"] or 0.0),
+                    "data_saida": str(r["data_saida"] or "").strip(),
+                    "hora_saida": str(r["hora_saida"] or "").strip(),
+                    "data_chegada": str(r["data_chegada"] or "").strip(),
+                    "hora_chegada": str(r["hora_chegada"] or "").strip(),
+                    "local_rota": str(r["local_rota"] or "").strip(),
+                    "km_rodado": float(r["km_rodado"] or 0.0),
+                }
+            )
+    return {"ok": True, "rows": out}
+
+
+@app.get("/desktop/veiculos/{veiculo}/ultimo-km-final")
+def desktop_ultimo_km_final_veiculo(
+    veiculo: str,
+    exclude_programacao: str = Query("", description="Codigo da programacao a excluir da busca."),
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    v = str(veiculo or "").strip().upper()
+    ex = str(exclude_programacao or "").strip().upper()
+    if not v:
+        raise HTTPException(status_code=400, detail="veiculo obrigatorio.")
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                COALESCE(km_final, 0) AS km_final,
+                COALESCE(codigo_programacao, '') AS codigo_programacao
+            FROM programacoes
+            WHERE UPPER(TRIM(COALESCE(veiculo,''))) = UPPER(TRIM(?))
+              AND COALESCE(km_final, 0) > 0
+              AND UPPER(TRIM(COALESCE(codigo_programacao,''))) <> UPPER(TRIM(?))
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (v, ex),
+        )
+        row = cur.fetchone()
+    return {
+        "ok": True,
+        "veiculo": v,
+        "km_final": float((row["km_final"] if row else 0.0) or 0.0),
+        "codigo_programacao": str((row["codigo_programacao"] if row else "") or ""),
+    }
+
+
+@app.get("/desktop/rotas/{codigo_programacao}/logistica")
+def desktop_rota_logistica(
+    codigo_programacao: str,
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    prog = str(codigo_programacao or "").strip().upper()
+    if not prog:
+        raise HTTPException(status_code=400, detail="codigo_programacao obrigatorio.")
+
+    out: Dict[str, Any] = {
+        "pend_substituicao": 0,
+        "pend_transferencia": 0,
+        "transf_out": 0,
+        "transf_in": 0,
+        "base_cx": 0,
+        "atual_cx": 0,
+        "esperado_cx": 0,
+        "delta_cx": 0,
+        "itens_ok": True,
+        "resumo": [],
+    }
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+
+        def _has_table(tn: str) -> bool:
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (tn,))
+            return bool(cur.fetchone())
+
+        if _has_table("rota_substituicoes"):
+            cur.execute(
+                """
+                SELECT COUNT(1) AS n
+                FROM rota_substituicoes
+                WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))
+                  AND UPPER(TRIM(COALESCE(status,'')))='PENDENTE'
+                """,
+                (prog,),
+            )
+            row = cur.fetchone()
+            out["pend_substituicao"] = int((row["n"] if row else 0) or 0)
+
+        if _has_table("transferencias"):
+            cur.execute(
+                """
+                SELECT
+                    SUM(CASE
+                            WHEN UPPER(TRIM(COALESCE(status,'')))='PENDENTE'
+                             AND (UPPER(TRIM(COALESCE(codigo_origem,'')))=UPPER(TRIM(?))
+                               OR UPPER(TRIM(COALESCE(codigo_destino,'')))=UPPER(TRIM(?)))
+                            THEN 1 ELSE 0
+                        END) AS pend,
+                    SUM(CASE
+                            WHEN UPPER(TRIM(COALESCE(codigo_origem,'')))=UPPER(TRIM(?))
+                             AND UPPER(TRIM(COALESCE(status,''))) IN ('PENDENTE','ACEITA','CONVERTIDA')
+                            THEN COALESCE(qtd_caixas,0) ELSE 0
+                        END) AS out_cx,
+                    SUM(CASE
+                            WHEN UPPER(TRIM(COALESCE(codigo_destino,'')))=UPPER(TRIM(?))
+                             AND UPPER(TRIM(COALESCE(status,''))) IN ('PENDENTE','ACEITA','CONVERTIDA')
+                            THEN COALESCE(qtd_caixas,0) ELSE 0
+                        END) AS in_cx
+                FROM transferencias
+                """,
+                (prog, prog, prog, prog),
+            )
+            row = cur.fetchone()
+            out["pend_transferencia"] = int((row["pend"] if row else 0) or 0)
+            out["transf_out"] = int((row["out_cx"] if row else 0) or 0)
+            out["transf_in"] = int((row["in_cx"] if row else 0) or 0)
+
+        if _has_table("programacao_itens"):
+            cur.execute("PRAGMA table_info(programacao_itens)")
+            cols_it = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+            has_cx_atual = "caixas_atual" in cols_it
+            cur.execute(
+                f"""
+                SELECT
+                    COALESCE(SUM(COALESCE(qnt_caixas,0)),0) AS base_cx,
+                    COALESCE(SUM(COALESCE({"caixas_atual" if has_cx_atual else "qnt_caixas"},0)),0) AS atual_cx
+                FROM programacao_itens
+                WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))
+                """,
+                (prog,),
+            )
+            row = cur.fetchone()
+            out["base_cx"] = int((row["base_cx"] if row else 0) or 0)
+            atual_calc = int((row["atual_cx"] if row else 0) or 0)
+
+            if (not has_cx_atual) and _has_table("programacao_itens_controle"):
+                try:
+                    cur.execute("PRAGMA table_info(programacao_itens_controle)")
+                    cols_ctl = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+                    if "caixas_atual" in cols_ctl:
+                        cur.execute(
+                            """
+                            SELECT COALESCE(SUM(COALESCE(caixas_atual,0)),0) AS cx
+                            FROM programacao_itens_controle
+                            WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))
+                            """,
+                            (prog,),
+                        )
+                        rr = cur.fetchone()
+                        atual_calc = int((rr["cx"] if rr else 0) or 0)
+                except Exception:
+                    logging.debug("Falha ao calcular caixas_atual via controle", exc_info=True)
+
+            out["atual_cx"] = max(int(atual_calc), 0)
+            out["esperado_cx"] = 0
+            out["delta_cx"] = int(out["atual_cx"]) - int(out["esperado_cx"])
+            out["itens_ok"] = bool(out["atual_cx"] == 0)
+
+    out["resumo"] = [
+        f"Substituicoes pendentes: {out['pend_substituicao']}",
+        f"Transferencias pendentes: {out['pend_transferencia']}",
+        f"Transferencia caixas (origem): {out['transf_out']} cx",
+        f"Transferencia caixas (destino): {out['transf_in']} cx",
+        f"Caixas base: {out['base_cx']} cx",
+        f"Caixas atuais: {out['atual_cx']} cx",
+        f"Caixas esperadas no fechamento: {out['esperado_cx']} cx",
+        f"Delta caixas: {out['delta_cx']} cx",
+    ]
+    return {"ok": True, "codigo_programacao": prog, "logistica": out}
+
+
 @app.get("/desktop/monitoramento/rotas")
 def desktop_rotas_monitoramento(_ok: bool = Depends(_require_desktop_secret)):
     """
@@ -3732,7 +5132,7 @@ def salvar_controle_cliente(
 
     cod_cliente = (payload.cod_cliente or "").strip()
     if not cod_cliente:
-        raise HTTPException(status_code=400, detail="cod_cliente Ã© obrigatÃ³rio")
+        raise HTTPException(status_code=400, detail="cod_cliente é obrigatório")
 
     with get_conn() as conn:
         cur = conn.cursor()
@@ -3740,7 +5140,7 @@ def salvar_controle_cliente(
         # garante que a rota pertence ao motorista
         pr = _fetch_programacao_owned(cur, codigo_programacao, m, "p.id, p.status")
         if not pr:
-            raise HTTPException(status_code=404, detail="Rota nÃ£o encontrada para este motorista")
+            raise HTTPException(status_code=404, detail="Rota não encontrada para este motorista")
         status_atual = str(pr["status"] or "").strip().upper()
         if status_atual in ("FINALIZADA", "FINALIZADO", "CANCELADA", "CANCELADO"):
             raise HTTPException(
@@ -3769,7 +5169,7 @@ def salvar_controle_cliente(
         status_in = (payload.status_pedido or "").strip().upper() or None
         pedido = (payload.pedido or "").strip() or None
         if not pedido:
-            raise HTTPException(status_code=400, detail="pedido Ã© obrigatÃ³rio para controle do cliente.")
+            raise HTTPException(status_code=400, detail="pedido é obrigatório para controle do cliente.")
         caixas_atual = payload.caixas_atual
         preco_atual = payload.preco_atual
         alterado_por = (payload.alterado_por or nome_motorista or None)
@@ -3805,7 +5205,7 @@ def salvar_controle_cliente(
             )
             item_base = cur.fetchone()
         if not item_base:
-            raise HTTPException(status_code=404, detail="Item de cliente/pedido nÃ£o encontrado na programaÃ§Ã£o.")
+            raise HTTPException(status_code=404, detail="Item de cliente/pedido não encontrado na programação.")
 
         base_caixas = item_base["qnt_caixas"] if item_base else None
         base_preco = item_base["preco"] if item_base else None
@@ -3815,9 +5215,9 @@ def salvar_controle_cliente(
 
         allowed_status = {"PENDENTE", "ENTREGUE", "CANCELADO", "ALTERADO"}
         if status_in and status_in not in allowed_status:
-            raise HTTPException(status_code=400, detail=f"status_pedido invÃ¡lido: {status_in}.")
+            raise HTTPException(status_code=400, detail=f"status_pedido inválido: {status_in}.")
 
-        # regra: pedido ENTREGUE nÃ£o pode mais ser alterado
+        # regra: pedido ENTREGUE não pode mais ser alterado
         status_atual = None
         if has_pedido_col and pedido:
             cur.execute(
@@ -3871,7 +5271,7 @@ def salvar_controle_cliente(
         if status_atual == "ENTREGUE":
             raise HTTPException(
                 status_code=409,
-                detail="Pedido jÃ¡ estÃ¡ ENTREGUE e estÃ¡ bloqueado para alteraÃ§Ãµes.",
+                detail="Pedido já está ENTREGUE e está bloqueado para alterações.",
             )
 
         # resolve status se nao veio do app
@@ -3899,14 +5299,14 @@ def salvar_controle_cliente(
         evento_em = _evento_iso_or_now(payload.evento_em)
         alterado_em = evento_em if status == "ALTERADO" else None
 
-        # valida faixa de caixas para evitar manipulaÃ§Ã£o indevida
+        # valida faixa de caixas para evitar manipulação indevida
         if caixas_atual is not None:
             try:
                 caixas_atual = int(caixas_atual)
             except Exception:
-                raise HTTPException(status_code=400, detail="caixas_atual invÃ¡lido.")
+                raise HTTPException(status_code=400, detail="caixas_atual inválido.")
             if caixas_atual < 0:
-                raise HTTPException(status_code=400, detail="caixas_atual nÃ£o pode ser negativo.")
+                raise HTTPException(status_code=400, detail="caixas_atual não pode ser negativo.")
             if base_caixas is not None:
                 try:
                     base_caixas_int = int(base_caixas)
@@ -3915,10 +5315,10 @@ def salvar_controle_cliente(
                 if base_caixas_int is not None and caixas_atual > base_caixas_int:
                     raise HTTPException(
                         status_code=400,
-                        detail=f"caixas_atual ({caixas_atual}) nÃ£o pode ser maior que caixas do pedido ({base_caixas_int}).",
+                        detail=f"caixas_atual ({caixas_atual}) não pode ser maior que caixas do pedido ({base_caixas_int}).",
                     )
 
-        # atualiza controle por cliente (compatÃ­vel com bases sem UNIQUE)
+        # atualiza controle por cliente (compatÃvel com bases sem UNIQUE)
         caixas_eff = caixas_atual if caixas_atual is not None else base_caixas
         if status in ("ENTREGUE", "CANCELADO"):
             caixas_eff = 0
@@ -4140,7 +5540,7 @@ def listar_logs_cliente(
     cod_cliente = (cod_cliente or "").strip()
 
     if not codigo_programacao or not cod_cliente:
-        raise HTTPException(status_code=400, detail="CÃ³digo e cliente sÃ£o obrigatÃ³rios")
+        raise HTTPException(status_code=400, detail="Código e cliente são obrigatórios")
 
     with get_conn() as conn:
         cur = conn.cursor()
@@ -4153,7 +5553,7 @@ def listar_logs_cliente(
             "p.id, p.status, p.carregamento_fechado, COALESCE(p.tipo_estimativa, 'KG') AS tipo_estimativa, COALESCE(p.caixas_estimado, 0) AS caixas_estimado",
         )
         if not pr:
-            raise HTTPException(status_code=404, detail="Rota nÃ£o encontrada para este motorista")
+            raise HTTPException(status_code=404, detail="Rota não encontrada para este motorista")
 
         cur.execute(
             """
@@ -4328,13 +5728,13 @@ def iniciar_rota(
             return {"ok": True, "status": "EM_ROTA", "deduplicado": True}
         pr = _fetch_programacao_owned(cur, codigo_programacao, m, "p.id, p.status")
         if not pr:
-            raise HTTPException(status_code=404, detail="Rota nÃ£o encontrada para este motorista")
+            raise HTTPException(status_code=404, detail="Rota não encontrada para este motorista")
         if int(payload.km_inicial or 0) <= 0:
             raise HTTPException(status_code=400, detail="KM inicial deve ser maior que 0.")
 
         status_atual = str(pr["status"] or "").strip().upper()
         if status_atual in ("EM_ROTA", "EM ROTA", "INICIADA", "EM_ENTREGAS", "EM ENTREGAS", "CARREGADA"):
-            raise HTTPException(status_code=409, detail="Rota jÃ¡ estÃ¡ em andamento.")
+            raise HTTPException(status_code=409, detail="Rota já está em andamento.")
         if status_atual in ("FINALIZADA", "FINALIZADO", "CANCELADA", "CANCELADO"):
             raise HTTPException(status_code=409, detail=f"Rota encerrada (status={status_atual}).")
 
@@ -4411,15 +5811,15 @@ def finalizar_rota(codigo_programacao: str, payload: FinalizarRotaIn, m=Depends(
             return {"ok": True, "status": "FINALIZADA", "deduplicado": True}
         pr = _fetch_programacao_owned(cur, codigo_programacao, m, "p.id, p.status, p.km_inicial")
         if not pr:
-            raise HTTPException(status_code=404, detail="Rota n?o encontrada para este motorista")
+            raise HTTPException(status_code=404, detail="Rota nao encontrada para este motorista")
         if int(payload.km_final or 0) < 0:
-            raise HTTPException(status_code=400, detail="KM final inv?lido.")
+            raise HTTPException(status_code=400, detail="KM final invalido.")
 
         status_atual = str(pr["status"] or "").strip().upper()
         if status_atual in ("FINALIZADA", "FINALIZADO", "CANCELADA", "CANCELADO"):
             raise HTTPException(status_code=409, detail=f"Rota encerrada (status={status_atual}).")
         if status_atual not in ("EM_ROTA", "EM ROTA", "INICIADA", "EM_ENTREGAS", "EM ENTREGAS", "CARREGADA"):
-            raise HTTPException(status_code=409, detail=f"Transi??o inv?lida para finalizar (status={status_atual or 'N/D'}).")
+            raise HTTPException(status_code=409, detail=f"Transicao invalida para finalizar (status={status_atual or 'N/D'}).")
         if _has_pending_substituicao(cur, codigo_programacao):
             raise HTTPException(
                 status_code=409,
@@ -4434,7 +5834,7 @@ def finalizar_rota(codigo_programacao: str, payload: FinalizarRotaIn, m=Depends(
             raise HTTPException(status_code=409, detail="KM final menor que KM inicial.")
 
         # ============================
-        # RECONCILIA??O ANTIFRAUDE
+        # RECONCILIACAO ANTIFRAUDE
         # ============================
         cur.execute("PRAGMA table_info(programacoes)")
         cols_prog = {row[1] for row in cur.fetchall() or []}
@@ -4625,7 +6025,7 @@ def salvar_carregamento(
         carregamento_fechado_sel = "p.carregamento_fechado" if has("carregamento_fechado") else "0 AS carregamento_fechado"
         tipo_estimativa_sel = "p.tipo_estimativa" if has("tipo_estimativa") else "'KG' AS tipo_estimativa"
 
-        # garante que a programaÃ§Ã£o Ã© do motorista logado
+        # garante que a programação é do motorista logado
         pr = _fetch_programacao_owned(
             cur,
             codigo_programacao,
@@ -4633,7 +6033,7 @@ def salvar_carregamento(
             f"p.id, p.status, {carregamento_fechado_sel}, {tipo_estimativa_sel}",
         )
         if not pr:
-            raise HTTPException(status_code=404, detail="Rota nÃ£o encontrada para este motorista")
+            raise HTTPException(status_code=404, detail="Rota não encontrada para este motorista")
         status_atual = str(pr["status"] or "").strip().upper()
         if status_atual in ("FINALIZADA", "FINALIZADO", "CANCELADA", "CANCELADO"):
             raise HTTPException(
@@ -4748,7 +6148,7 @@ def salvar_carregamento(
         if has("carregamento_salvo_em"):
             sets.append("carregamento_salvo_em=?"); params.append(datetime.now().isoformat(timespec="seconds"))
 
-        # âœ… colunas â€œdesktopâ€/alternativas (se existirem)
+        # ✅ colunas “desktop”/alternativas (se existirem)
         if has("num_nf"):
             sets.append("num_nf=?"); params.append(nf_numero)
         if has("kg_nf"):
@@ -4768,7 +6168,7 @@ def salvar_carregamento(
         if has("mortalidade_aves"):
             sets.append("mortalidade_aves=?"); params.append(mortalidade)
 
-        # mÃ©dia (sÃ³ se vier)
+        # média (só se vier)
         if media is not None:
             if has("media"):
                 sets.append("media=?"); params.append(media)
@@ -5543,7 +6943,7 @@ def recusar_substituicao_rota(
         return _serialize_substituicao_row(out)
 
 
-# âœ… CRIAR TRANSFERÃŠNCIA (origem envia)
+# âœ… CRIAR TRANSFERÊNCIA (origem envia)
 @app.post("/rotas/{codigo_programacao}/transferencias")
 def criar_transferencia(
     codigo_programacao: str,
@@ -5555,25 +6955,25 @@ def criar_transferencia(
     codigo_destino = (payload.codigo_destino or "").strip()
 
     if not codigo_origem:
-        raise HTTPException(status_code=400, detail="CÃ³digo de origem invÃ¡lido.")
+        raise HTTPException(status_code=400, detail="Código de origem inválido.")
     if not codigo_destino:
-        raise HTTPException(status_code=400, detail="CÃ³digo de destino invÃ¡lido.")
+        raise HTTPException(status_code=400, detail="Código de destino inválido.")
     if codigo_destino == codigo_origem:
-        raise HTTPException(status_code=400, detail="Destino nÃ£o pode ser igual Ã  origem.")
+        raise HTTPException(status_code=400, detail="Destino não pode ser igual à origem.")
 
     if not _rota_pertence_ao_motorista(codigo_origem, m):
-        raise HTTPException(status_code=403, detail="Rota de origem nÃ£o pertence ao motorista logado.")
+        raise HTTPException(status_code=403, detail="Rota de origem não pertence ao motorista logado.")
 
     pedido = (payload.pedido or "").strip()
     cod_cliente = (payload.cod_cliente or "").strip()
     qtd = int(payload.qtd_caixas or 0)
 
     if not pedido:
-        raise HTTPException(status_code=400, detail="Pedido Ã© obrigatÃ³rio.")
+        raise HTTPException(status_code=400, detail="Pedido é obrigatório.")
     if not cod_cliente:
-        raise HTTPException(status_code=400, detail="CÃ³digo do cliente Ã© obrigatÃ³rio.")
+        raise HTTPException(status_code=400, detail="Código do cliente é obrigatório.")
     if qtd <= 0:
-        raise HTTPException(status_code=400, detail="Quantidade de caixas invÃ¡lida (deve ser > 0).")
+        raise HTTPException(status_code=400, detail="Quantidade de caixas inválida (deve ser > 0).")
 
     snapshot_raw = None
     if payload.snapshot:
@@ -5672,7 +7072,7 @@ def criar_transferencia(
             )
         item_origem = cur.fetchone()
         if not item_origem:
-            raise HTTPException(status_code=404, detail="Pedido de origem nÃ£o encontrado para transferÃªncia.")
+            raise HTTPException(status_code=404, detail="Pedido de origem não encontrado para transferência.")
         base_qnt = int(item_origem["qnt_caixas"] or 0)
         disponivel = base_qnt
         if has_caixas_atual_col and item_origem["caixas_atual"] is not None:
@@ -5700,7 +7100,7 @@ def criar_transferencia(
         if qtd > disponivel_liquido:
             raise HTTPException(
                 status_code=409,
-                detail=f"TransferÃªncia excede disponÃ­vel do pedido. DisponÃ­vel: {disponivel_liquido} cx.",
+                detail=f"Transferência excede disponÃvel do pedido. DisponÃvel: {disponivel_liquido} cx.",
             )
         cur.execute(
             """
@@ -5824,7 +7224,244 @@ def criar_transferencia(
         return _fetch_transferencia_by_id(conn, tid)
 
 
-# âœ… LISTAR TRANSFERÃŠNCIAS (destino recebe)
+@app.get("/desktop/vendas-importadas")
+def desktop_listar_vendas_importadas(
+    busca: str = Query("", description="Filtro textual"),
+    limit: int = Query(5000, ge=1, le=20000),
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    term = (busca or "").strip()
+    like = f"%{term}%"
+    with get_conn() as conn:
+        cur = conn.cursor()
+        if term:
+            cur.execute(
+                """
+                SELECT id, COALESCE(selecionada,0) AS selecionada, COALESCE(pedido,'') AS pedido,
+                       COALESCE(data_venda,'') AS data_venda, COALESCE(cliente,'') AS cliente,
+                       COALESCE(nome_cliente,'') AS nome_cliente, COALESCE(produto,'') AS produto,
+                       COALESCE(vr_total,0) AS vr_total, COALESCE(qnt,0) AS qnt,
+                       COALESCE(cidade,'') AS cidade, COALESCE(vendedor,'') AS vendedor
+                FROM vendas_importadas
+                WHERE IFNULL(usada,0)=0
+                  AND (
+                    pedido LIKE ? OR cliente LIKE ? OR nome_cliente LIKE ? OR vendedor LIKE ? OR produto LIKE ?
+                  )
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (like, like, like, like, like, int(limit)),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT id, COALESCE(selecionada,0) AS selecionada, COALESCE(pedido,'') AS pedido,
+                       COALESCE(data_venda,'') AS data_venda, COALESCE(cliente,'') AS cliente,
+                       COALESCE(nome_cliente,'') AS nome_cliente, COALESCE(produto,'') AS produto,
+                       COALESCE(vr_total,0) AS vr_total, COALESCE(qnt,0) AS qnt,
+                       COALESCE(cidade,'') AS cidade, COALESCE(vendedor,'') AS vendedor
+                FROM vendas_importadas
+                WHERE IFNULL(usada,0)=0
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (int(limit),),
+            )
+        out = []
+        for r in (cur.fetchall() or []):
+            out.append(
+                {
+                    "id": int(r["id"] or 0),
+                    "selecionada": int(r["selecionada"] or 0),
+                    "pedido": str(r["pedido"] or ""),
+                    "data_venda": str(r["data_venda"] or ""),
+                    "cliente": str(r["cliente"] or ""),
+                    "nome_cliente": str(r["nome_cliente"] or ""),
+                    "produto": str(r["produto"] or ""),
+                    "vr_total": float(r["vr_total"] or 0.0),
+                    "qnt": float(r["qnt"] or 0.0),
+                    "cidade": str(r["cidade"] or ""),
+                    "vendedor": str(r["vendedor"] or ""),
+                }
+            )
+    return {"ok": True, "rows": out}
+
+
+@app.post("/desktop/vendas-importadas/importar")
+def desktop_importar_vendas_importadas(
+    payload: Dict[str, Any],
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    rows = payload.get("rows") if isinstance(payload, dict) else []
+    if not isinstance(rows, list):
+        rows = []
+    if len(rows) > 20000:
+        raise HTTPException(status_code=400, detail="Quantidade de linhas excede o limite (20000).")
+
+    total = 0
+    ignoradas = 0
+    with get_conn() as conn:
+        cur = conn.cursor()
+        for rr in rows:
+            if not isinstance(rr, dict):
+                ignoradas += 1
+                continue
+            pedido_u = str(rr.get("pedido") or "").strip().upper()
+            cliente_u = str(rr.get("cliente") or "").strip().upper()
+            produto_u = str(rr.get("produto") or "").strip().upper()
+            nome_u = str(rr.get("nome_cliente") or "").strip().upper()
+            data_venda = str(rr.get("data_venda") or "").strip()
+            if (not pedido_u) or (not cliente_u) or (not produto_u) or (not nome_u):
+                ignoradas += 1
+                continue
+            cur.execute(
+                """
+                SELECT 1
+                FROM vendas_importadas
+                WHERE UPPER(TRIM(COALESCE(pedido,'')))=UPPER(TRIM(?))
+                  AND UPPER(TRIM(COALESCE(cliente,'')))=UPPER(TRIM(?))
+                  AND UPPER(TRIM(COALESCE(produto,'')))=UPPER(TRIM(?))
+                  AND COALESCE(TRIM(data_venda),'')=COALESCE(TRIM(?),'')
+                LIMIT 1
+                """,
+                (pedido_u, cliente_u, produto_u, data_venda),
+            )
+            if cur.fetchone():
+                ignoradas += 1
+                continue
+            cur.execute(
+                """
+                INSERT INTO vendas_importadas
+                (pedido, data_venda, cliente, nome_cliente, vendedor, produto, vr_total, qnt, cidade, valor_unitario, observacao, selecionada, usada, usada_em, codigo_programacao)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, '', '')
+                """,
+                (
+                    pedido_u,
+                    data_venda,
+                    cliente_u,
+                    nome_u,
+                    str(rr.get("vendedor") or "").strip().upper(),
+                    produto_u,
+                    float(rr.get("vr_total") or 0.0),
+                    float(rr.get("qnt") or 0.0),
+                    str(rr.get("cidade") or "").strip().upper(),
+                    float(rr.get("valor_unitario") or 0.0),
+                    str(rr.get("observacao") or "").strip().upper(),
+                ),
+            )
+            total += 1
+    return {"ok": True, "importadas": total, "ignoradas": ignoradas}
+
+
+@app.post("/desktop/vendas-importadas/{venda_id}/toggle-selecao")
+def desktop_toggle_venda_importada_selecao(venda_id: int, _ok: bool = Depends(_require_desktop_secret)):
+    rid = int(venda_id or 0)
+    if rid <= 0:
+        raise HTTPException(status_code=400, detail="venda_id invalido.")
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE vendas_importadas
+               SET selecionada = CASE WHEN selecionada=1 THEN 0 ELSE 1 END
+             WHERE id=? AND IFNULL(usada,0)=0
+            """,
+            (rid,),
+        )
+        updated = int(cur.rowcount or 0)
+    return {"ok": True, "id": rid, "updated": updated}
+
+
+@app.post("/desktop/vendas-importadas/marcar-todas")
+def desktop_marcar_todas_vendas_importadas(
+    selected: int = Query(1, ge=0, le=1),
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE vendas_importadas SET selecionada=? WHERE IFNULL(usada,0)=0", (int(selected),))
+        updated = int(cur.rowcount or 0)
+    return {"ok": True, "updated": updated, "selected": int(selected)}
+
+
+@app.post("/desktop/vendas-importadas/marcar-ids")
+def desktop_marcar_ids_vendas_importadas(
+    ids: str = Query("", description="CSV de ids"),
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    raw_ids = [x.strip() for x in str(ids or "").split(",") if x.strip()]
+    id_list: List[int] = []
+    for x in raw_ids:
+        try:
+            v = int(x)
+        except Exception:
+            continue
+        if v > 0:
+            id_list.append(v)
+    if not id_list:
+        return {"ok": True, "updated": 0}
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.executemany(
+            "UPDATE vendas_importadas SET selecionada=1 WHERE id=? AND IFNULL(usada,0)=0",
+            [(rid,) for rid in id_list],
+        )
+        updated = int(cur.rowcount or 0)
+    return {"ok": True, "updated": updated}
+
+
+@app.post("/desktop/vendas-importadas/consumir")
+def desktop_consumir_vendas_importadas(
+    payload: Dict[str, Any],
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    ids_raw = payload.get("ids") if isinstance(payload, dict) else []
+    codigo_programacao = str((payload or {}).get("codigo_programacao") or "").strip().upper()
+    usada_em = str((payload or {}).get("usada_em") or "").strip()
+    if not isinstance(ids_raw, list):
+        ids_raw = []
+
+    ids: List[int] = []
+    for x in ids_raw:
+        try:
+            v = int(x)
+        except Exception:
+            continue
+        if v > 0:
+            ids.append(v)
+    if not ids:
+        return {"ok": True, "updated": 0}
+
+    if not usada_em:
+        usada_em = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.executemany(
+            """
+            UPDATE vendas_importadas
+               SET usada=1,
+                   usada_em=?,
+                   codigo_programacao=?,
+                   selecionada=0
+             WHERE id=? AND IFNULL(usada,0)=0
+            """,
+            [(usada_em, codigo_programacao, rid) for rid in ids],
+        )
+        updated = int(cur.rowcount or 0)
+    return {"ok": True, "updated": updated}
+
+
+@app.delete("/desktop/vendas-importadas")
+def desktop_apagar_vendas_importadas(_ok: bool = Depends(_require_desktop_secret)):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM vendas_importadas")
+        deleted = int(cur.rowcount or 0)
+    return {"ok": True, "deleted": deleted}
+
+# âœ… LISTAR TRANSFERÊNCIAS (destino recebe)
 @app.get("/rotas/{codigo_programacao}/transferencias")
 def listar_transferencias(
     codigo_programacao: str,
@@ -5835,10 +7472,10 @@ def listar_transferencias(
     codigo = (codigo_programacao or "").strip()
 
     if not codigo:
-        raise HTTPException(status_code=400, detail="CÃ³digo invÃ¡lido.")
+        raise HTTPException(status_code=400, detail="Código inválido.")
 
     if not _rota_pertence_ao_motorista(codigo, m):
-        raise HTTPException(status_code=403, detail="Rota de destino nÃ£o pertence ao motorista logado.")
+        raise HTTPException(status_code=403, detail="Rota de destino não pertence ao motorista logado.")
 
     with get_conn() as conn:
         return _list_transferencias_por_destino(conn, codigo, status)
@@ -5853,10 +7490,10 @@ def listar_transferencias_enviadas(
     codigo = (codigo_programacao or "").strip()
 
     if not codigo:
-        raise HTTPException(status_code=400, detail="CÃƒÂ³digo invÃƒÂ¡lido.")
+        raise HTTPException(status_code=400, detail="Código inválido.")
 
     if not _rota_pertence_ao_motorista(codigo, m):
-        raise HTTPException(status_code=403, detail="Rota de origem nÃƒÂ£o pertence ao motorista logado.")
+        raise HTTPException(status_code=403, detail="Rota de origem não pertence ao motorista logado.")
 
     with get_conn() as conn:
         return _list_transferencias_por_origem(conn, codigo, status)
@@ -5870,21 +7507,21 @@ def aceitar_transferencia(
     nome_motorista = (m["nome"] or "").strip()
     tid = (transferencia_id or "").strip()
     if not tid:
-        raise HTTPException(status_code=400, detail="ID inv?lido.")
+        raise HTTPException(status_code=400, detail="ID invalido.")
 
     with get_conn() as conn:
         cur = conn.cursor()
         item = _fetch_transferencia_by_id(conn, tid)
         if item is None:
-            raise HTTPException(status_code=404, detail="Transfer?ncia n?o encontrada.")
+            raise HTTPException(status_code=404, detail="Transfer?ncia nao encontrada.")
 
         codigo_destino = str(item.get("codigo_destino", "")).strip()
         if not _rota_pertence_ao_motorista(codigo_destino, m):
-            raise HTTPException(status_code=403, detail="Transfer?ncia n?o pertence ao motorista logado (destino).")
+            raise HTTPException(status_code=403, detail="Transfer?ncia nao pertence ao motorista logado (destino).")
 
         st = str(item.get("status", "")).upper().strip()
         if st != "PENDENTE":
-            raise HTTPException(status_code=409, detail=f"Transfer?ncia n?o est? pendente (status={st}).")
+            raise HTTPException(status_code=409, detail=f"Transfer?ncia nao est? pendente (status={st}).")
 
         cur.execute(
             """
@@ -5906,22 +7543,22 @@ def recusar_transferencia(
     nome_motorista = (m["nome"] or "").strip()
     tid = (transferencia_id or "").strip()
     if not tid:
-        raise HTTPException(status_code=400, detail="ID invÃ¡lido.")
+        raise HTTPException(status_code=400, detail="ID inválido.")
 
     with get_conn() as conn:
         cur = conn.cursor()
         item = _fetch_transferencia_by_id(conn, tid)
         if item is None:
-            raise HTTPException(status_code=404, detail="TransferÃªncia nÃ£o encontrada.")
+            raise HTTPException(status_code=404, detail="Transferência não encontrada.")
 
         codigo_destino = str(item.get("codigo_destino", "")).strip()
 
         if not _rota_pertence_ao_motorista(codigo_destino, m):
-            raise HTTPException(status_code=403, detail="TransferÃªncia nÃ£o pertence ao motorista logado (destino).")
+            raise HTTPException(status_code=403, detail="Transferência não pertence ao motorista logado (destino).")
 
         st = str(item.get("status", "")).upper().strip()
         if st != "PENDENTE":
-            raise HTTPException(status_code=409, detail=f"TransferÃªncia nÃ£o estÃ¡ pendente (status={st}).")
+            raise HTTPException(status_code=409, detail=f"Transferência não está pendente (status={st}).")
 
         cur.execute(
             """
@@ -5947,7 +7584,7 @@ def recusar_transferencia(
 
 
 # =====================================================
-# ===== CONVERTER TRANSFERÃŠNCIA (RESERVA -> PEDIDO) ====
+# ===== CONVERTER TRANSFERÊNCIA (RESERVA -> PEDIDO) ====
 # =====================================================
 
 class TransferenciaConverterIn(BaseModel):
@@ -5968,7 +7605,7 @@ def converter_transferencia(
 
     tid = (transferencia_id or "").strip()
     if not tid:
-        raise HTTPException(status_code=400, detail="ID invÃ¡lido.")
+        raise HTTPException(status_code=400, detail="ID inválido.")
 
     pedido_dest = (payload.pedido_destino or "").strip()
     cod_cli_dest = (payload.cod_cliente_destino or "").strip()
@@ -5985,9 +7622,9 @@ def converter_transferencia(
         pedido_novo = (str(novo.get("pedido") or "")).strip() if isinstance(novo, dict) else ""
         cod_novo = (str(novo.get("cod_cliente") or "")).strip() if isinstance(novo, dict) else ""
         if not nome_novo:
-            raise HTTPException(status_code=400, detail="nome_cliente Ã© obrigatÃ³rio para novo cliente.")
+            raise HTTPException(status_code=400, detail="nome_cliente é obrigatório para novo cliente.")
         if not pedido_novo:
-            raise HTTPException(status_code=400, detail="pedido Ã© obrigatÃ³rio para novo cliente.")
+            raise HTTPException(status_code=400, detail="pedido é obrigatório para novo cliente.")
         if not cod_novo:
             cod_novo = f"MANUAL-{uuid4().hex[:8].upper()}"
         pedido_dest = pedido_novo
@@ -5995,9 +7632,9 @@ def converter_transferencia(
 
     if not novo:
         if not pedido_dest:
-            raise HTTPException(status_code=400, detail="pedido_destino Ã© obrigatÃ³rio.")
+            raise HTTPException(status_code=400, detail="pedido_destino é obrigatório.")
         if not cod_cli_dest:
-            raise HTTPException(status_code=400, detail="cod_cliente_destino Ã© obrigatÃ³rio.")
+            raise HTTPException(status_code=400, detail="cod_cliente_destino é obrigatório.")
     if qtd <= 0:
         raise HTTPException(status_code=400, detail="qtd_caixas deve ser > 0.")
 
@@ -6005,11 +7642,11 @@ def converter_transferencia(
         cur = conn.cursor()
         item = _fetch_transferencia_by_id(conn, tid)
         if item is None:
-            raise HTTPException(status_code=404, detail="TransferÃªncia nÃ£o encontrada.")
+            raise HTTPException(status_code=404, detail="Transferência não encontrada.")
 
         st = str(item.get("status", "")).upper().strip()
         if st != "ACEITA":
-            raise HTTPException(status_code=409, detail=f"TransferÃªncia nÃ£o estÃ¡ ACEITA (status={st}).")
+            raise HTTPException(status_code=409, detail=f"Transferência não está ACEITA (status={st}).")
 
         codigo_destino = str(item.get("codigo_destino", "")).strip()
         codigo_origem = str(item.get("codigo_origem", "")).strip()
@@ -6019,7 +7656,7 @@ def converter_transferencia(
                 detail="Conversao de transferencia bloqueada enquanto houver substituicao pendente.",
             )
         if not _rota_pertence_ao_motorista(codigo_destino, m):
-            raise HTTPException(status_code=403, detail="VocÃª nÃ£o Ã© o motorista destino desta transferÃªncia.")
+            raise HTTPException(status_code=403, detail="Você não é o motorista destino desta transferência.")
 
         total = int(item.get("qtd_caixas") or 0)
         convertido = int(item.get("qtd_convertida") or 0)
@@ -6028,7 +7665,7 @@ def converter_transferencia(
             saldo = 0
 
         if qtd > saldo:
-            raise HTTPException(status_code=409, detail=f"Quantidade maior que o saldo disponÃ­vel ({saldo}).")
+            raise HTTPException(status_code=409, detail=f"Quantidade maior que o saldo disponÃvel ({saldo}).")
 
         cur.execute(
             """

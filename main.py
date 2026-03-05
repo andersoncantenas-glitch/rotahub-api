@@ -37,9 +37,10 @@ import hashlib
 import hmac
 import secrets
 import ctypes
+import time
 
 # =========================================================
-# CONSTANTES E CONFIGURAÃ‡Ã•ES
+# CONSTANTES E CONFIGURAÇÕES
 # =========================================================
 APP_W, APP_H = 1360, 780
 DB_NAME = "rota_granja"
@@ -91,10 +92,73 @@ except Exception:
 
 def is_desktop_api_sync_enabled() -> bool:
     """Controla sincronizacao automatica Desktop <-> API central.
-    Padrao: desligado, para evitar sobreposicao acidental de dados locais em testes.
+    Padrao: ligado, para manter vinculo continuo entre estacoes e app mobile.
+    Para testes locais isolados, desative explicitamente com ROTA_DESKTOP_SYNC_API=0.
     """
-    raw = str(os.environ.get("ROTA_DESKTOP_SYNC_API", "0") or "").strip().lower()
+    raw = str(os.environ.get("ROTA_DESKTOP_SYNC_API", "1") or "").strip().lower()
     return raw in {"1", "true", "yes", "y", "sim", "on"}
+
+
+_API_BINDING_CACHE = {"ok": False, "checked_at": 0.0, "error": ""}
+
+
+def ensure_system_api_binding(context: str = "Operacao", parent=None, force_probe: bool = False) -> bool:
+    """Garante vinculo obrigatorio Desktop <-> API para operacoes criticas."""
+    if not is_desktop_api_sync_enabled():
+        messagebox.showerror(
+            "INTEGRACAO OBRIGATORIA",
+            "A integracao Desktop<->Servidor esta desativada (ROTA_DESKTOP_SYNC_API=0).\n\n"
+            f"Operacao bloqueada: {context}\n"
+            "Ative ROTA_DESKTOP_SYNC_API=1 para continuar.",
+            parent=parent,
+        )
+        return False
+
+    desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+    if not desktop_secret:
+        messagebox.showerror(
+            "INTEGRACAO OBRIGATORIA",
+            "ROTA_SECRET nao configurada.\n\n"
+            f"Operacao bloqueada: {context}\n"
+            "Defina a chave da estacao para manter o fluxo unico Desktop/Servidor/Dispositivo.",
+            parent=parent,
+        )
+        return False
+
+    now = time.time()
+    if (not force_probe) and _API_BINDING_CACHE.get("ok") and (now - float(_API_BINDING_CACHE.get("checked_at") or 0.0) <= 20.0):
+        return True
+
+    try:
+        _call_api(
+            "GET",
+            "admin/motoristas/acesso",
+            extra_headers={"X-Desktop-Secret": desktop_secret},
+        )
+        _API_BINDING_CACHE["ok"] = True
+        _API_BINDING_CACHE["checked_at"] = now
+        _API_BINDING_CACHE["error"] = ""
+        return True
+    except Exception as exc:
+        _API_BINDING_CACHE["ok"] = False
+        _API_BINDING_CACHE["checked_at"] = now
+        _API_BINDING_CACHE["error"] = str(exc or "")
+        messagebox.showerror(
+            "INTEGRACAO OBRIGATORIA",
+            "Nao foi possivel validar conexao com a API central.\n\n"
+            f"Operacao bloqueada: {context}\n"
+            f"URL base: {API_BASE_URL}\n"
+            f"Detalhe: {str(exc or 'Falha de conectividade')}",
+            parent=parent,
+        )
+        return False
+
+
+if is_desktop_api_sync_enabled() and not os.environ.get("ROTA_SECRET", "").strip():
+    logging.warning(
+        "Sincronizacao Desktop<->API esta ativa, mas ROTA_SECRET nao foi definido. "
+        "Operacoes protegidas da API podem falhar ate a configuracao da chave."
+    )
 
 # Versao/update/suporte (customizavel via variaveis de ambiente no servidor/estacao)
 APP_VERSION = "1.1.4"
@@ -378,7 +442,7 @@ _install_text_repair_hooks()
 # GERENCIADOR DE BANCO DE DADOS (CONTEXT MANAGER)
 # =========================================================
 def _configure_sqlite(conn: sqlite3.Connection) -> sqlite3.Connection:
-    """Aplica pragmas de desempenho/concorrÃªncia."""
+    """Aplica pragmas de desempenho/concorrencia."""
     try:
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA journal_mode = WAL")
@@ -388,10 +452,120 @@ def _configure_sqlite(conn: sqlite3.Connection) -> sqlite3.Connection:
         logging.debug("Falha ignorada")
     return conn
 
+
+def _is_mutating_sql(sql: str) -> bool:
+    s = str(sql or "").lstrip().upper()
+    return s.startswith("INSERT ") or s.startswith("UPDATE ") or s.startswith("DELETE ") or s.startswith("REPLACE ")
+
+
+def _normalize_sql_scalar(v):
+    if v is None:
+        return None
+    if isinstance(v, (str, int, float, bool)):
+        return v
+    if isinstance(v, (bytes, bytearray)):
+        try:
+            return bytes(v).decode("utf-8", errors="replace")
+        except Exception:
+            return str(v)
+    return str(v)
+
+
+def _normalize_sql_params(params):
+    if params is None:
+        return []
+    if isinstance(params, dict):
+        out = {}
+        for k, v in params.items():
+            out[str(k)] = _normalize_sql_scalar(v)
+        return out
+    if not isinstance(params, (list, tuple)):
+        return [_normalize_sql_scalar(params)]
+    return [_normalize_sql_scalar(v) for v in params]
+
+
+def _is_sql_mirror_enabled() -> bool:
+    raw = str(os.environ.get("ROTA_SQL_MIRROR_API", "1") or "").strip().lower()
+    return is_desktop_api_sync_enabled() and raw in {"1", "true", "yes", "y", "sim", "on"}
+
+
+def _push_sql_mutations_to_api(statements):
+    if not statements:
+        return
+    if not _is_sql_mirror_enabled():
+        return
+    desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+    if not desktop_secret:
+        raise RuntimeError("ROTA_SECRET nao configurada para espelhamento SQL.")
+    _call_api(
+        "POST",
+        "desktop/sql/mutate",
+        payload={"statements": statements},
+        extra_headers={"X-Desktop-Secret": desktop_secret},
+    )
+
+
+class SyncedCursor(sqlite3.Cursor):
+    def execute(self, sql, parameters=()):
+        result = super().execute(sql, parameters)
+        try:
+            conn = getattr(self, "connection", None)
+            if conn is not None and hasattr(conn, "_track_sql_mutation"):
+                conn._track_sql_mutation(sql, parameters)
+        except Exception:
+            logging.debug("Falha ao rastrear mutacao SQL", exc_info=True)
+        return result
+
+    def executemany(self, sql, seq_of_parameters):
+        seq = list(seq_of_parameters or [])
+        result = super().executemany(sql, seq)
+        try:
+            conn = getattr(self, "connection", None)
+            if conn is not None and hasattr(conn, "_track_sql_mutation"):
+                for p in seq:
+                    conn._track_sql_mutation(sql, p)
+        except Exception:
+            logging.debug("Falha ao rastrear mutacoes SQL (executemany)", exc_info=True)
+        return result
+
+
+class SyncedConnection(sqlite3.Connection):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._pending_sql_mutations = []
+        self._suspend_sql_mirror = False
+
+    def cursor(self, *args, **kwargs):
+        kwargs.setdefault("factory", SyncedCursor)
+        return super().cursor(*args, **kwargs)
+
+    def _track_sql_mutation(self, sql, params):
+        if self._suspend_sql_mirror:
+            return
+        if not _is_mutating_sql(sql):
+            return
+        self._pending_sql_mutations.append(
+            {
+                "sql": str(sql),
+                "params": _normalize_sql_params(params),
+            }
+        )
+
+    def commit(self):
+        if self._pending_sql_mutations and not self._suspend_sql_mirror:
+            _push_sql_mutations_to_api(self._pending_sql_mutations)
+            self._pending_sql_mutations = []
+        return super().commit()
+
+    def rollback(self):
+        self._pending_sql_mutations = []
+        return super().rollback()
+
+
 @contextmanager
 def get_db():
-    """Gerenciador de contexto para conexÃµes com o banco"""
-    conn = sqlite3.connect(DB_PATH)
+    """Gerenciador de contexto para conexões com o banco"""
+    conn = sqlite3.connect(DB_PATH, factory=SyncedConnection)
     _configure_sqlite(conn)
     conn.row_factory = sqlite3.Row
     try:
@@ -404,13 +578,13 @@ def get_db():
         conn.close()
 
 def db_connect():
-    """FunÃ§Ã£o compatÃ­vel para cÃ³digo existente"""
-    conn = sqlite3.connect(DB_PATH)
+    """Função compatÃÂÂvel para código existente"""
+    conn = sqlite3.connect(DB_PATH, factory=SyncedConnection)
     _configure_sqlite(conn)
     return conn
 
 # =========================================================
-# FUNÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ES UTILITÃƒÆ’Ã†â€™Ãƒâ€šÃ‚ÂRIAS
+# FUNÃÆââ‚¬â„¢Æâââ€š¬ââ€ž¢âââââ€š¬Å¡¬¡ÃÆââ‚¬â„¢Æâââ€š¬ââ€ž¢âââââ€š¬Å¡¬¢ES UTILITÃÆââ‚¬â„¢Æâââ€š¬ââ€ž¢Ãâââ€š¬Å¡ÂÂÂÂRIAS
 # =========================================================
 def upper(s):
     return str(s).strip().upper() if s is not None else ""
@@ -728,7 +902,7 @@ def safe_float(v, default=0.0):
         return default
 
 def safe_money(v, default=0.0):
-    """Converte valor monetÃ¡rio para float com 2 casas (Decimal)."""
+    """Converte valor monetário para float com 2 casas (Decimal)."""
     try:
         if v is None:
             return default
@@ -742,7 +916,7 @@ def safe_money(v, default=0.0):
         return default
 
 def normalize_date(s: str):
-    """Normaliza para YYYY-MM-DD. Retorna '' se vazio, None se invÃ¡lido."""
+    """Normaliza para YYYY-MM-DD. Retorna '' se vazio, None se inválido."""
     s = (s or "").strip()
     if not s:
         return ""
@@ -787,7 +961,7 @@ def normalize_date(s: str):
     return None
 
 def normalize_time(s: str):
-    """Normaliza para HH:MM:SS. Retorna '' se vazio, None se invÃ¡lido."""
+    """Normaliza para HH:MM:SS. Retorna '' se vazio, None se inválido."""
     s = (s or "").strip()
     if not s:
         return ""
@@ -825,7 +999,7 @@ def format_date_br_short(value: str) -> str:
 
 
 class SyncError(Exception):
-    """Erro especÃ­fico ao tentar sincronizar com a API mobile."""
+    """Erro especÃÂÂfico ao tentar sincronizar com a API mobile."""
 
 
 def _build_api_url(path: str) -> str:
@@ -873,11 +1047,11 @@ def _call_api(method: str, path: str, payload=None, token: str = None, extra_hea
     except urllib.error.URLError as exc:
         raise SyncError(f"Falha ao conectar-se a {url}: {exc.reason}")
     except Exception as exc:
-        raise SyncError(f"Erro inesperado ao chamar a API de sincronizaÃ§Ã£o: {exc}")
+        raise SyncError(f"Erro inesperado ao chamar a API de sincronização: {exc}")
     return None
 
 def normalize_date_time_components(data: str, hora: str):
-    """Normaliza data/hora e retorna tupla (data, hora) preservando valor original se invÃ¡lido."""
+    """Normaliza data/hora e retorna tupla (data, hora) preservando valor original se inválido."""
     nd = normalize_date(data)
     nt = normalize_time(hora)
     out_data = format_date_br_short(nd if nd is not None else (data or ""))
@@ -919,7 +1093,7 @@ def safe_int(v, default=0):
         return default
 
 def fmt_money(v):
-    """Formata valor monetÃ¡rio"""
+    """Formata valor monetário"""
     return f"R$ {safe_float(v,0.0):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 def require_pandas() -> bool:
@@ -943,7 +1117,7 @@ def require_openpyxl() -> bool:
         try:
             messagebox.showerror(
                 "ERRO",
-                "ExportaÃ§Ã£o Excel requer o pacote 'openpyxl'.\n\n"
+                "Exportação Excel requer o pacote 'openpyxl'.\n\n"
                 "Instale com: pip install openpyxl"
             )
         except Exception:
@@ -958,7 +1132,7 @@ def require_xlrd() -> bool:
         try:
             messagebox.showerror(
                 "ERRO",
-                "ImportaÃ§Ã£o de .xls requer o pacote 'xlrd'.\n\n"
+                "Importação de .xls requer o pacote 'xlrd'.\n\n"
                 "Instale com: pip install xlrd"
             )
         except Exception:
@@ -982,7 +1156,7 @@ def require_excel_support(path: str) -> bool:
     try:
         messagebox.showerror(
             "ERRO",
-            "Formato de arquivo nÃ£o suportado.\n\n"
+            "Formato de arquivo não suportado.\n\n"
             "Use .xlsx ou .xls."
         )
     except Exception:
@@ -994,7 +1168,7 @@ def require_reportlab() -> bool:
         try:
             messagebox.showerror(
                 "ERRO",
-                "GeraÃ§Ã£o de PDF requer o pacote 'reportlab'.\n\n"
+                "Geração de PDF requer o pacote 'reportlab'.\n\n"
                 "Instale com: pip install reportlab"
             )
         except Exception:
@@ -1007,7 +1181,7 @@ def now_str():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 def generate_program_code():
-    """Gera um cÃ³digo curto para programaÃ§Ã£o (PG + YYYY + sequÃªncia hÃ¡ 2 dÃ­gitos)."""
+    """Gera um código curto para programação (PG + YYYY + sequência há 2 dÃÂÂgitos)."""
     now = datetime.now()
     prefix = f"PG{now.strftime('%Y')}"
     suffix = 1
@@ -1027,12 +1201,12 @@ def generate_program_code():
                 if digits:
                     suffix = int(digits) + 1
     except Exception:
-        logging.debug("Falha ao calcular prÃ³ximo cÃ³digo de programaÃ§Ã£o")
+        logging.debug("Falha ao calcular próximo código de programação")
 
     return f"{prefix}{suffix:02d}"
 
 def generate_motorista_code(motorista_id: int = None) -> str:
-    """Gera um cÃ³digo simples e Ãºnico pro motorista (ex.: MOT000123 / MOTAB12CD)."""
+    """Gera um código simples e único pro motorista (ex.: MOT000123 / MOTAB12CD)."""
     base = "MOT"
     if motorista_id is not None:
         try:
@@ -1043,7 +1217,7 @@ def generate_motorista_code(motorista_id: int = None) -> str:
     return f"{base}{suffix}"
 
 def generate_usuario_code(usuario_id: int = None) -> str:
-    """Gera um cÃ³digo simples e Ãºnico pro usuÃ¡rio (ex.: USR000123 / USRAB12CD)."""
+    """Gera um código simples e único pro usuário (ex.: USR000123 / USRAB12CD)."""
     base = "USR"
     if usuario_id is not None:
         try:
@@ -1054,7 +1228,7 @@ def generate_usuario_code(usuario_id: int = None) -> str:
     return f"{base}{suffix}"
 
 def generate_motorista_password(length: int = 6) -> str:
-    """Senha numÃ©rica simples (pra bater com a API atual)."""
+    """Senha numérica simples (pra bater com a API atual)."""
     try:
         length = int(length)
     except Exception:
@@ -1064,7 +1238,7 @@ def generate_motorista_password(length: int = 6) -> str:
     return "".join(random.choices("0123456789", k=length))
 
 def generate_usuario_password(length: int = 6) -> str:
-    """Senha numÃ©rica simples pro usuÃ¡rio."""
+    """Senha numérica simples pro usuário."""
     return generate_motorista_password(length)
 
 def guess_col(cols, candidates):
@@ -1074,7 +1248,7 @@ def guess_col(cols, candidates):
         repl = {
             "á": "a", "à": "a", "â": "a", "ã": "a",
             "é": "e", "è": "e", "ê": "e",
-            "í": "i", "ì": "i", "î": "i",
+            "ÃÂ": "i", "ì": "i", "î": "i",
             "ó": "o", "ò": "o", "ô": "o", "õ": "o",
             "ú": "u", "ù": "u", "û": "u",
             "ç": "c",
@@ -1095,13 +1269,13 @@ def guess_col(cols, candidates):
 def validate_required(value: str, field_name: str, min_len=1, max_len=120):
     v = (value or "").strip()
     if len(v) < min_len:
-        return False, f"{field_name} Ã© obrigatÃ³rio."
+        return False, f"{field_name} é obrigatório."
     if len(v) > max_len:
-        return False, f"{field_name} muito longo (mÃ¡x {max_len})."
+        return False, f"{field_name} muito longo (máx {max_len})."
     return True, ""
 
 
-def validate_codigo(value: str, field_name="CÃ³digo", min_len=2, max_len=20):
+def validate_codigo(value: str, field_name="Código", min_len=2, max_len=20):
     v = upper((value or "").strip())
     ok, msg = validate_required(v, field_name, min_len=min_len, max_len=max_len)
     if not ok:
@@ -1117,7 +1291,7 @@ def validate_placa(value: str):
     if not ok:
         return False, msg
     if not re.match(r"^[A-Z0-9-]+$", v):
-        return False, "Placa invÃ¡lida."
+        return False, "Placa inválida."
     return True, ""
 
 
@@ -1126,14 +1300,14 @@ def validate_money(value: str, field_name="Valor"):
     try:
         f = float(v)
         if f < 0:
-            return False, f"{field_name} nÃ£o pode ser negativo."
+            return False, f"{field_name} não pode ser negativo."
         return True, ""
     except Exception:
-        return False, f"{field_name} invÃ¡lido."
+        return False, f"{field_name} inválido."
 
 
 # =========================================================
-# AUTENTICAÃ‡ÃƒO + ADMIN PADRÃƒO
+# AUTENTICAÇÃO + ADMIN PADRÃO
 # =========================================================
 
 import os
@@ -1175,11 +1349,11 @@ def verify_password_pbkdf2(password: str, stored: str) -> bool:
 
 def autenticar_usuario(login: str, senha: str):
     """
-    âœ… Login por NOME + SENHA
-    âœ… MigraÃ§Ã£o automÃ¡tica:
-       - Se senha no DB jÃ¡ for HASH: valida HASH
+    âÅâ€œââ‚¬¦ Login por NOME + SENHA
+    âÅâ€œââ‚¬¦ Migração automática:
+       - Se senha no DB já for HASH: valida HASH
        - Se senha no DB for PURA: valida pura e, se OK, converte e salva HASH
-    Retorna dict do usuÃ¡rio se ok, senÃ£o None.
+    Retorna dict do usuário se ok, senão None.
     """
     login = (login or "").strip()
     senha = (senha or "").strip()
@@ -1189,7 +1363,7 @@ def autenticar_usuario(login: str, senha: str):
     with get_db() as conn:
         cur = conn.cursor()
 
-        # Descobre colunas disponÃ­veis
+        # Descobre colunas disponÃÂÂveis
         cur.execute("PRAGMA table_info(usuarios)")
         cols = [str(r[1] or "").lower() for r in cur.fetchall()]
 
@@ -1201,7 +1375,7 @@ def autenticar_usuario(login: str, senha: str):
         if not has_senha:
             return None
 
-        # Puxa o usuÃ¡rio pelo nome (case-insensitive)
+        # Puxa o usuário pelo nome (case-insensitive)
         select_parts = ["id", "nome", "senha"]
         select_parts.append("permissoes" if has_permissoes else "'' as permissoes")
         select_parts.append("cpf" if has_cpf else "'' as cpf")
@@ -1225,7 +1399,7 @@ def autenticar_usuario(login: str, senha: str):
         cpf = row[4] if len(row) > 4 else ""
         telefone = row[5] if len(row) > 5 else ""
 
-        # 1) Se jÃ¡ Ã© hash, valida por hash
+        # 1) Se já é hash, valida por hash
         if str(senha_db).startswith("pbkdf2_sha256$"):
             if not verify_password_pbkdf2(senha, senha_db):
                 return None
@@ -1238,11 +1412,11 @@ def autenticar_usuario(login: str, senha: str):
             try:
                 novo_hash = hash_password_pbkdf2(senha)
                 cur.execute("UPDATE usuarios SET senha=? WHERE id=?", (novo_hash, user_id))
-                # conn.commit() Ã© automÃ¡tico no seu contexto get_db() se ele commita ao sair;
-                # se nÃ£o, descomente a linha abaixo:
+                # conn.commit() é automático no seu contexto get_db() se ele commita ao sair;
+                # se não, descomente a linha abaixo:
                 # conn.commit()
             except Exception as e:
-                # Se falhar a migraÃ§Ã£o, pelo menos deixa logar (jÃ¡ validou a senha pura)
+                # Se falhar a migração, pelo menos deixa logar (já validou a senha pura)
                 logging.exception("Falha ao migrar senha do usuario id=%s: %s", user_id, e)
 
     is_admin = ("ADMIN" in (permissoes or "").upper()) or (nome.strip().upper() == "ADMIN")
@@ -1257,7 +1431,7 @@ def autenticar_usuario(login: str, senha: str):
     }
 
 def _notify_admin_seed(password: str):
-    """Notifica senha temporÃ¡ria do ADMIN sem gravar em arquivo."""
+    """Notifica senha temporária do ADMIN sem gravar em arquivo."""
     msg = (
         "ADMIN criado automaticamente.\n"
         f"Senha temporaria: {password}\n\n"
@@ -1326,7 +1500,7 @@ def ensure_admin_user():
                     logging.exception("Falha ao migrar senha do ADMIN id=%s: %s", admin_id, e)
 
 # =========================================================
-# MIGRAÃ‡ÃƒO DE BANCO DE DADOS
+# MIGRAÇÃO DE BANCO DE DADOS
 # =========================================================
 def table_has_column(cur, table, col):
     """Verifica se coluna existe na tabela"""
@@ -1335,12 +1509,12 @@ def table_has_column(cur, table, col):
     return col in cols
 
 def safe_add_column(cur, table, col, coltype):
-    """Adiciona coluna apenas se nÃ£o existir"""
+    """Adiciona coluna apenas se não existir"""
     if not table_has_column(cur, table, col):
         cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {coltype}")
 
 def db_init():
-    """Inicializa/atualiza banco de dados com migraÃ§Ãµes"""
+    """Inicializa/atualiza banco de dados com migrações"""
     with get_db() as conn:
         cur = conn.cursor()
 
@@ -1381,7 +1555,7 @@ def db_init():
                 telefone TEXT
             )
         """)
-        # âœ… ADICIONADO (pra login + gerar senha/codigo)
+        # âÅâ€œââ‚¬¦ ADICIONADO (pra login + gerar senha/codigo)
         safe_add_column(cur, "usuarios", "codigo", "TEXT")
         safe_add_column(cur, "usuarios", "senha", "TEXT")
 
@@ -1396,7 +1570,7 @@ def db_init():
             )
         """)
         safe_add_column(cur, "veiculos", "capacidade_cx", "INTEGER")
-        # MigraÃ§Ã£o: se banco antigo usava capacidade_c, copiar para capacidade_cx
+        # Migração: se banco antigo usava capacidade_c, copiar para capacidade_cx
         try:
             if table_has_column(cur, "veiculos", "capacidade_c") and table_has_column(cur, "veiculos", "capacidade_cx"):
                 cur.execute("""
@@ -1442,7 +1616,7 @@ def db_init():
         except Exception:
             logging.debug("Falha ignorada")
 
-        # Migra base legada de equipes -> ajudantes (melhor esforÃ§o)
+        # Migra base legada de equipes -> ajudantes (melhor esforço)
         try:
             cur.execute("SELECT ajudante1, ajudante2 FROM equipes")
             for row in cur.fetchall() or []:
@@ -1524,7 +1698,7 @@ def db_init():
         safe_add_column(cur, "vendas_importadas", "qnt", "REAL")
         safe_add_column(cur, "vendas_importadas", "cidade", "TEXT")
 
-        # PROGRAMAÃ‡Ã•ES
+        # PROGRAMAÇÕES
         cur.execute("""
             CREATE TABLE IF NOT EXISTS programacoes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1573,10 +1747,10 @@ def db_init():
         safe_add_column(cur, "programacoes", "qnt_aves_caixa_final", "INTEGER DEFAULT 0")
         safe_add_column(cur, "programacoes", "aves_caixa_final", "INTEGER DEFAULT 0")
 
-        # âœ… SUA TELA DESPESAS USA "adiantamento_rota" (ADICIONADO)
+        # âÅâ€œââ‚¬¦ SUA TELA DESPESAS USA "adiantamento_rota" (ADICIONADO)
         safe_add_column(cur, "programacoes", "adiantamento_rota", "REAL DEFAULT 0")
 
-        # NOVAS MIGRAÃ‡Ã•ES (NF / KM / CÃ‰DULAS)
+        # NOVAS MIGRAÇÕES (NF / KM / CÉDULAS)
         safe_add_column(cur, "programacoes", "nf_numero", "TEXT")
         safe_add_column(cur, "programacoes", "nf_kg", "REAL DEFAULT 0")
         safe_add_column(cur, "programacoes", "nf_preco", "REAL DEFAULT 0")
@@ -1606,7 +1780,7 @@ def db_init():
         safe_add_column(cur, "programacoes", "ced_2_qtd", "INTEGER DEFAULT 0")
         safe_add_column(cur, "programacoes", "valor_dinheiro", "REAL DEFAULT 0")
 
-        # garante prestaÃ§Ã£o pendente em bases antigas (nÃ£o sobrescreve FECHADA)
+        # garante prestação pendente em bases antigas (não sobrescreve FECHADA)
         try:
             if table_has_column(cur, "programacoes", "prestacao_status"):
                 cur.execute("""
@@ -1617,7 +1791,7 @@ def db_init():
         except Exception as e:
             logging.exception("Falha ao garantir prestacao_status pendente: %s", e)
 
-        # ITENS DA PROGRAMAÃ‡ÃƒO
+        # ITENS DA PROGRAMAÇÃO
         cur.execute("""
             CREATE TABLE IF NOT EXISTS programacao_itens (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1643,7 +1817,7 @@ def db_init():
         safe_add_column(cur, "programacao_itens", "alterado_em", "TEXT")
         safe_add_column(cur, "programacao_itens", "alterado_por", "TEXT")
 
-        # CONTROLE/LOG (sincronizaÃ§Ã£o app)
+        # CONTROLE/LOG (sincronização app)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS programacao_itens_controle (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1698,12 +1872,12 @@ def db_init():
             )
         """)
 
-        # MIGRAÃ‡Ã•ES PARA RELATÃ“RIOS
+        # MIGRAÇÕES PARA RELATÓRIOS
         safe_add_column(cur, "despesas", "tipo_despesa", "TEXT DEFAULT 'ROTA'")
         safe_add_column(cur, "despesas", "categoria", "TEXT")
         safe_add_column(cur, "despesas", "motorista", "TEXT")
         safe_add_column(cur, "despesas", "veiculo", "TEXT")
-        safe_add_column(cur, "despesas", "observacao", "TEXT")  # âœ… sua tela usa isso
+        safe_add_column(cur, "despesas", "observacao", "TEXT")  # âÅâ€œââ‚¬¦ sua tela usa isso
 
         # NDICES (performance)
         try:
@@ -1731,17 +1905,17 @@ def db_init():
         except Exception as e:
             logging.exception("Falha ao criar indice programacao_itens_log(codigo_programacao): %s", e)
 
-    # âœ… garante ADMIN (senha segura e temporaria)
+    # âÅâ€œââ‚¬¦ garante ADMIN (senha segura e temporaria)
     ensure_admin_user()
 
 # =========================================================
 # ESTILOS DA INTERFACE (MODERNIZADO)
 # =========================================================
 def apply_style(root):
-    """Aplica estilos Tkinter (tema moderno, sem afetar a lÃ³gica do sistema)"""
+    """Aplica estilos Tkinter (tema moderno, sem afetar a lógica do sistema)"""
     style = ttk.Style(root)
 
-    # Em alguns Windows, "clam" funciona melhor e Ã© mais consistente
+    # Em alguns Windows, "clam" funciona melhor e é mais consistente
     try:
         style.theme_use("clam")
     except Exception:
@@ -1762,7 +1936,7 @@ def apply_style(root):
     GHOST = "#EEF2F7"
     GHOST_HOVER = "#E5EAF3"
 
-    # Tabelas (Treeview): linhas/colunas mais visÃ­veis
+    # Tabelas (Treeview): linhas/colunas mais visÃÂÂveis
     try:
         style.configure(
             "Treeview",
@@ -1813,7 +1987,7 @@ def apply_style(root):
         darkcolor=[("focus", PRIMARY), ("!focus", BORDER)],
     )
 
-    # BotÃµes (mantendo seus nomes de style)
+    # Botões (mantendo seus nomes de style)
     style.configure(
         "Side.TButton",
         background=PRIMARY,
@@ -1940,10 +2114,10 @@ def apply_style(root):
 
 
 # =========================================================
-# BASE PARA PÃƒÆ’Ã‚GINAS (mesma lÃƒÆ’Ã‚Â³gica, sÃƒÆ’Ã‚Â³ ajuste visual/organizaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o)
+# BASE PARA PÃÆââ‚¬â„¢ÂGINAS (mesma lÃÆââ‚¬â„¢³gica, sÃÆââ‚¬â„¢³ ajuste visual/organizaÃÆââ‚¬â„¢§ÃÆââ‚¬â„¢£o)
 # =========================================================
 class PageBase(ttk.Frame):
-    """Classe base para todas as pÃ¡ginas da aplicaÃ§Ã£o"""
+    """Classe base para todas as páginas da aplicação"""
     def __init__(self, parent, app, title):
         super().__init__(parent, style="Content.TFrame")
         self.app = app
@@ -1968,7 +2142,7 @@ class PageBase(ttk.Frame):
 
         self.lbl_status = ttk.Label(
             header,
-            text="STATUS: ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬",
+            text="STATUS: âââââ€š¬Å¡¬ââââ‚¬Å¡¬",
             background="#F4F6FB",
             foreground="#6B7280",
             font=("Segoe UI", 8, "bold")
@@ -1997,23 +2171,23 @@ class PageBase(ttk.Frame):
         self.footer_right.grid(row=0, column=1, sticky="e")
 
     def set_status(self, txt):
-        """Atualiza texto de status na pÃ¡gina"""
+        """Atualiza texto de status na página"""
         self.lbl_status.config(text=txt)
 
     def on_show(self):
-        """MÃ©todo chamado quando a pÃ¡gina Ã© exibida (pode ser sobrescrito)"""
+        """Método chamado quando a página é exibida (pode ser sobrescrito)"""
         pass
 
 
 # =========================================================
-# COMPONENTE CRUD GENÃ‰RICO (mesma lÃ³gica, layout mais robusto)
+# COMPONENTE CRUD GENÉRICO (mesma lógica, layout mais robusto)
 # =========================================================
 # ==========================
 # ===== CADASTRO CRUD (ATUALIZADO) =====
 # ==========================
 
 class CadastroCRUD(ttk.Frame):
-    """Componente CRUD reutilizÃ¡vel para cadastros (com validaÃ§Ãµes por tabela)"""
+    """Componente CRUD reutilizável para cadastros (com validações por tabela)"""
     def __init__(self, parent, titulo, table, fields, app=None):
         super().__init__(parent, style="Content.TFrame")
         self.table = table
@@ -2063,16 +2237,16 @@ class CadastroCRUD(ttk.Frame):
                 kind, precision = self._infer_entry_kind(col, label)
                 bind_entry_smart(ent, kind, precision=precision)
 
-        # BOTÃ•ES
+        # BOTÕES
         actions = ttk.Frame(card, style="Card.TFrame")
         actions.grid(row=2, column=0, sticky="ew", pady=(4, 12))
         actions.grid_columnconfigure(20, weight=1)
 
-        ttk.Button(actions, text="💾 SALVAR", style="Primary.TButton", command=self.salvar).grid(row=0, column=0, padx=6)
-        ttk.Button(actions, text="✏️ EDITAR", style="Ghost.TButton", command=self.editar).grid(row=0, column=1, padx=6)
-        ttk.Button(actions, text="🗑️ EXCLUIR", style="Danger.TButton", command=self.excluir).grid(row=0, column=2, padx=6)
-        ttk.Button(actions, text="🧹 LIMPAR", style="Ghost.TButton", command=self.limpar).grid(row=0, column=3, padx=6)
-        ttk.Button(actions, text="🔄 ATUALIZAR", style="Ghost.TButton", command=self.carregar).grid(row=0, column=4, padx=6)
+        ttk.Button(actions, text="ðÅ¸â€™¾ SALVAR", style="Primary.TButton", command=self.salvar).grid(row=0, column=0, padx=6)
+        ttk.Button(actions, text="âÅ“Âï¸Â EDITAR", style="Ghost.TButton", command=self.editar).grid(row=0, column=1, padx=6)
+        ttk.Button(actions, text="ðÅ¸â€”â€˜ï¸Â EXCLUIR", style="Danger.TButton", command=self.excluir).grid(row=0, column=2, padx=6)
+        ttk.Button(actions, text="ðÅ¸§¹ LIMPAR", style="Ghost.TButton", command=self.limpar).grid(row=0, column=3, padx=6)
+        ttk.Button(actions, text="ðŸ”„ ATUALIZAR", style="Ghost.TButton", command=self.carregar).grid(row=0, column=4, padx=6)
 
         if self.table == "ajudantes":
             self._ajudantes_status_filter = tk.StringVar(value="TODOS")
@@ -2087,11 +2261,11 @@ class CadastroCRUD(ttk.Frame):
             cb_status_filter.grid(row=0, column=11, padx=6, sticky="w")
             cb_status_filter.bind("<<ComboboxSelected>>", lambda _e: self.carregar())
 
-        # Importar clientes (se vocÃª ainda usa esse CRUD para clientes em algum lugar)
+        # Importar clientes (se você ainda usa esse CRUD para clientes em algum lugar)
         if self.table == "clientes":
             ttk.Button(
                 actions,
-                text="📥 IMPORTAR CLIENTES (EXCEL)",
+                text="ðÅ¸â€œ¥ IMPORTAR CLIENTES (EXCEL)",
                 style="Warn.TButton",
                 command=self.importar_clientes_excel
             ).grid(row=0, column=5, padx=6)
@@ -2181,7 +2355,7 @@ class CadastroCRUD(ttk.Frame):
             return "decimal", 2
         if c in {"senha", "codigo", "nome", "sobrenome", "status", "veiculo", "motorista", "equipe"}:
             return "text", 2
-        if any(k in l for k in ("VALOR", "PREÃ‡O", "CUSTO", "ADIANTAMENTO", "DIÃRIA")):
+        if any(k in l for k in ("VALOR", "PREÇO", "CUSTO", "ADIANTAMENTO", "DIÃÂÂRIA")):
             return "money", 2
         if "CPF" in l:
             return "cpf", 2
@@ -2189,7 +2363,7 @@ class CadastroCRUD(ttk.Frame):
             return "phone", 2
         if any(k in l for k in ("CAPACIDADE", "CAIXA", "QTD")):
             return "int", 2
-        if any(k in l for k in ("KG", "KM", "MÃ‰DIA", "MEDIA", "LITROS")):
+        if any(k in l for k in ("KG", "KM", "MÉDIA", "MEDIA", "LITROS")):
             return "decimal", 2
         return "text", 2
 
@@ -2266,12 +2440,12 @@ class CadastroCRUD(ttk.Frame):
                 )
             return cur.fetchone() is not None
         except Exception:
-            # Se por algum motivo a coluna nÃ£o existir no DB, nÃ£o trava o sistema.
+            # Se por algum motivo a coluna não existir no DB, não trava o sistema.
             return False
 
     def _dup_exists_exact(self, cur, colname, value, ignore_id=None):
         """
-        Verifica duplicidade exata (Ãºtil para CPF/telefone quando vocÃª normaliza para dÃ­gitos).
+        Verifica duplicidade exata (útil para CPF/telefone quando você normaliza para dÃÂÂgitos).
         """
         if not value:
             return False
@@ -2307,7 +2481,7 @@ class CadastroCRUD(ttk.Frame):
         acesso_obs = data.get("acesso_obs", None)
 
         # Regra de negócio:
-        # - se vier explícito no data, usa esse valor
+        # - se vier explÃÂcito no data, usa esse valor
         # - se NÃO vier (caso comum no formulário), preserva estado atual no banco
         #   para não desbloquear motorista sem clicar em "LIBERAR APP".
         if acesso_liberado_raw in (None, ""):
@@ -2453,7 +2627,7 @@ class CadastroCRUD(ttk.Frame):
                 if placa:
                     cur.execute("SELECT COUNT(*) FROM programacoes WHERE UPPER(COALESCE(veiculo,''))=UPPER(?)", (placa,))
                     if int((cur.fetchone() or [0])[0] or 0) > 0:
-                        return "Veículo vinculado a programação/rota."
+                        return "VeÃÂculo vinculado a programação/rota."
             elif self.table == "clientes":
                 cod = self._norm(self._get("cod_cliente"))
                 if cod:
@@ -2490,11 +2664,11 @@ class CadastroCRUD(ttk.Frame):
                     if int((cur.fetchone() or [0])[0] or 0) > 0:
                         return "Ajudante vinculado a equipe."
         except Exception:
-            logging.debug("Falha na verificação de vínculos para exclusão", exc_info=True)
+            logging.debug("Falha na verificação de vÃÂnculos para exclusão", exc_info=True)
         return ""
 
     # -------------------------
-    # AÃ§Ãµes padrÃ£o
+    # Ações padrão
     # -------------------------
     def limpar(self):
         self.selected_id = None
@@ -2507,6 +2681,79 @@ class CadastroCRUD(ttk.Frame):
         self._update_password_controls()
 
     def carregar(self):
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                api_rows = None
+                if self.table == "motoristas":
+                    api_rows = _call_api(
+                        "GET",
+                        "desktop/cadastros/motoristas",
+                        extra_headers={"X-Desktop-Secret": desktop_secret},
+                    )
+                elif self.table == "veiculos":
+                    api_rows = _call_api(
+                        "GET",
+                        "desktop/cadastros/veiculos",
+                        extra_headers={"X-Desktop-Secret": desktop_secret},
+                    )
+                elif self.table == "ajudantes":
+                    api_rows = _call_api(
+                        "GET",
+                        "desktop/cadastros/ajudantes",
+                        extra_headers={"X-Desktop-Secret": desktop_secret},
+                    )
+
+                if isinstance(api_rows, list):
+                    rows = []
+                    for r in api_rows:
+                        if not isinstance(r, dict):
+                            continue
+                        row_map = {}
+                        if self.table == "motoristas":
+                            row_map = {
+                                "nome": str(r.get("nome") or ""),
+                                "codigo": str(r.get("codigo") or ""),
+                                "senha": "",
+                                "cpf": "",
+                                "telefone": "",
+                                "status": str(r.get("status") or "ATIVO"),
+                            }
+                        elif self.table == "veiculos":
+                            row_map = {
+                                "placa": str(r.get("placa") or ""),
+                                "modelo": str(r.get("modelo") or ""),
+                                "capacidade_cx": str(r.get("capacidade_cx") or 0),
+                            }
+                        elif self.table == "ajudantes":
+                            row_map = {
+                                "nome": str(r.get("nome_base") or r.get("nome") or ""),
+                                "sobrenome": str(r.get("sobrenome") or ""),
+                                "telefone": str(r.get("telefone") or ""),
+                                "status": str(r.get("status") or "ATIVO"),
+                            }
+                        row = [int(safe_int(r.get("id"), 0))]
+                        for c, _ in self.fields:
+                            row.append(row_map.get(c, ""))
+                        rows.append(tuple(row))
+
+                    self.tree.delete(*self.tree.get_children())
+                    senha_pos = None
+                    if self.table in {"usuarios", "motoristas"}:
+                        try:
+                            senha_pos = 1 + [c for c, _ in self.fields].index("senha")
+                        except Exception:
+                            senha_pos = None
+                    for row in rows:
+                        if senha_pos is not None:
+                            row = list(row)
+                            row[senha_pos] = "******" if row[senha_pos] else ""
+                            row = tuple(row)
+                        tree_insert_aligned(self.tree, "", "end", row)
+                    return
+            except Exception:
+                logging.debug("Falha ao carregar cadastro via API; usando fallback local.", exc_info=True)
+
         with get_db() as conn:
             cur = conn.cursor()
             try:
@@ -2557,21 +2804,25 @@ class CadastroCRUD(ttk.Frame):
 
     def salvar(self):
         """
-        Salva/atualiza com validaÃ§Ãµes por cadastro:
-        - motoristas: valida NOME/CPF/TELEFONE; exige codigo e senha (manual); codigo Ãºnico; CPF Ãºnico (se houver coluna)
-        - usuarios: exige nome, senha; nome Ãºnico; sem codigo
-        - veiculos: exige placa, modelo, capacidade_cx; placa Ãºnica; capacidade int >= 0
+        Salva/atualiza com validações por cadastro:
+        - motoristas: valida NOME/CPF/TELEFONE; exige codigo e senha (manual); codigo único; CPF único (se houver coluna)
+        - usuarios: exige nome, senha; nome único; sem codigo
+        - veiculos: exige placa, modelo, capacidade_cx; placa única; capacidade int >= 0
 
-        Obs: ID Ã© a chave primÃ¡ria autogerada (sequÃªncia do SQLite). VocÃª jÃ¡ vÃª o ID na tabela.
+        Obs: ID é a chave primária autogerada (sequência do SQLite). Você já vê o ID na tabela.
         """
+        if not ensure_system_api_binding(context=f"Salvar cadastro ({self.table})", parent=self):
+            return
+
         data = {col: self.entries[col].get().strip() for col, _ in self.fields}
 
-        # NormalizaÃ§Ãµes por tabela
+        # Normalizações por tabela
         if self.table in {"motoristas", "usuarios", "veiculos", "equipes", "ajudantes", "clientes"}:
             for k in list(data.keys()):
                 data[k] = self._norm(data[k])
 
-        # Validar obrigatÃ³rios + duplicidade + tipos
+        saved_via_api = False
+        # Validar obrigatórios + duplicidade + tipos
         try:
             with get_db() as conn:
                 cur = conn.cursor()
@@ -2580,30 +2831,30 @@ class CadastroCRUD(ttk.Frame):
                 # MOTORISTAS
                 # -------------------------
                 if self.table == "motoristas":
-                    # Exige NOME, CÃ“DIGO e SENHA (manuais) + TELEFONE
-                    # CPF Ã© opcional, porÃ©m deve ser vÃ¡lido e Ãºnico quando informado.
+                    # Exige NOME, CÓDIGO e SENHA (manuais) + TELEFONE
+                    # CPF é opcional, porém deve ser válido e único quando informado.
                     ok, f = self._require_fields(["nome", "codigo", "senha", "telefone"])
                     if not ok:
-                        messagebox.showwarning("ATENÃ‡ÃƒO", f"PREENCHA O CAMPO: {f.upper()}.")
+                        messagebox.showwarning("ATENÇÃO", f"PREENCHA O CAMPO: {f.upper()}.")
                         return
 
-                    # Nome (bÃ¡sico)
+                    # Nome (básico)
                     nome = self._norm(data.get("nome"))
                     if len(nome) < 3:
-                        messagebox.showwarning("ATENÃ‡ÃƒO", "NOME deve ter pelo menos 3 caracteres.")
+                        messagebox.showwarning("ATENÇÃO", "NOME deve ter pelo menos 3 caracteres.")
                         return
                     data["nome"] = nome
 
-                    # CÃ³digo (login flutter)  manual, mas pode usar GERAR
+                    # Código (login flutter)  manual, mas pode usar GERAR
                     cod = self._norm(data.get("codigo"))
                     if not is_valid_motorista_codigo(cod):
                         messagebox.showwarning(
-                            "ATENÃ‡ÃƒO",
-                            "CÃ“DIGO invÃ¡lido. Use apenas letras/nÃºmeros/._- e 3 a 24 caracteres."
+                            "ATENÇÃO",
+                            "CÓDIGO inválido. Use apenas letras/números/._- e 3 a 24 caracteres."
                         )
                         return
                     if self._dup_exists(cur, "codigo", cod, ignore_id=self.selected_id):
-                        messagebox.showerror("ERRO", f"J EXISTE MOTORISTA COM ESTE CÃ“DIGO: {cod}")
+                        messagebox.showerror("ERRO", f"J EXISTE MOTORISTA COM ESTE CÓDIGO: {cod}")
                         return
                     data["codigo"] = cod
 
@@ -2612,12 +2863,12 @@ class CadastroCRUD(ttk.Frame):
                     if self.selected_id:
                         if senha:
                             if not self._is_admin:
-                                messagebox.showwarning("ATENÃ‡ÃƒO", "Somente ADMIN pode alterar senha do motorista.")
+                                messagebox.showwarning("ATENÇÃO", "Somente ADMIN pode alterar senha do motorista.")
                                 return
                             if not is_valid_motorista_senha(senha):
                                 messagebox.showwarning(
-                                    "ATENÃ‡ÃƒO",
-                                    "SENHA invÃ¡lida. Use 4 a 24 caracteres (nÃ£o pode ser vazia)."
+                                    "ATENÇÃO",
+                                    "SENHA inválida. Use 4 a 24 caracteres (não pode ser vazia)."
                                 )
                                 return
                             data["senha"] = hash_password_pbkdf2(senha)
@@ -2626,8 +2877,8 @@ class CadastroCRUD(ttk.Frame):
                     else:
                         if not is_valid_motorista_senha(senha):
                             messagebox.showwarning(
-                                "ATENÃ‡ÃƒO",
-                                "SENHA invÃ¡lida. Use 4 a 24 caracteres (nÃ£o pode ser vazia)."
+                                "ATENÇÃO",
+                                "SENHA inválida. Use 4 a 24 caracteres (não pode ser vazia)."
                             )
                             return
                         data["senha"] = hash_password_pbkdf2(senha)
@@ -2636,20 +2887,20 @@ class CadastroCRUD(ttk.Frame):
                     cpf_raw = self.entries.get("cpf").get().strip() if self.entries.get("cpf") else ""
                     cpf = normalize_cpf(cpf_raw)
                     if cpf and not is_valid_cpf(cpf):
-                        messagebox.showwarning("ATENÃ‡ÃƒO", "CPF invÃ¡lido.")
+                        messagebox.showwarning("ATENÇÃO", "CPF inválido.")
                         return
-                    data["cpf"] = cpf  # salva sÃ³ dÃ­gitos
+                    data["cpf"] = cpf  # salva só dÃÂÂgitos
 
                     # Telefone
                     tel_raw = self.entries.get("telefone").get().strip() if self.entries.get("telefone") else ""
                     tel = normalize_phone(tel_raw)
                     if not is_valid_phone(tel):
                         messagebox.showwarning(
-                            "ATENÃ‡ÃƒO",
-                            "TELEFONE invÃ¡lido. Informe DDD+NÃºmero (10 ou 11 dÃ­gitos)."
+                            "ATENÇÃO",
+                            "TELEFONE inválido. Informe DDD+Número (10 ou 11 dÃÂÂgitos)."
                         )
                         return
-                    data["telefone"] = tel  # salva sÃ³ dÃ­gitos
+                    data["telefone"] = tel  # salva só dÃÂÂgitos
 
                     # Status do motorista
                     status_m = self._norm(data.get("status") or "ATIVO")
@@ -2657,7 +2908,7 @@ class CadastroCRUD(ttk.Frame):
                         status_m = "ATIVO"
                     data["status"] = status_m
 
-                    # CPF Ãºnico quando informado (se a coluna existir)
+                    # CPF único quando informado (se a coluna existir)
                     if cpf and db_has_column(cur, "motoristas", "cpf"):
                         if self._dup_exists_exact(cur, "cpf", cpf, ignore_id=self.selected_id):
                             messagebox.showerror("ERRO", "J EXISTE MOTORISTA COM ESTE CPF.")
@@ -2692,7 +2943,7 @@ class CadastroCRUD(ttk.Frame):
                         senha_plana = str(data.get("senha") or "").strip()
 
                     if not nome:
-                        messagebox.showwarning("ANTENÃ‡ÃƒO", "PREENCHA O CAMPO: NOME.")
+                        messagebox.showwarning("ANTENÇÃO", "PREENCHA O CAMPO: NOME.")
                         return
                     if self._dup_exists(cur, "nome", nome, ignore_id=self.selected_id):
                         messagebox.showerror("ERRO", f"J EXISTE USURIO COM ESTE NOME:{nome}")
@@ -2702,20 +2953,20 @@ class CadastroCRUD(ttk.Frame):
                     if self.selected_id:
                         if senha_plana:
                             if not self._is_admin:
-                                messagebox.showwarning("ATENÃ‡ÃƒO", "Somente ADMIN pode alterar senha aqui.")
+                                messagebox.showwarning("ATENÇÃO", "Somente ADMIN pode alterar senha aqui.")
                                 return
                             if len(senha_plana) < 6:
-                                messagebox.showwarning("ANTENÃ‡ÃƒO", "SENHA deve ter pelo menos 6 caracteres.")
+                                messagebox.showwarning("ANTENÇÃO", "SENHA deve ter pelo menos 6 caracteres.")
                                 return
                             data["senha"] = hash_password_pbkdf2(senha_plana)
                         else:
                             data.pop("senha", None)
                     else:
                         if not senha_plana:
-                            messagebox.showwarning("ANTENÃ‡ÃƒO", "PREENCHA O CAMPO: SENHA.")
+                            messagebox.showwarning("ANTENÇÃO", "PREENCHA O CAMPO: SENHA.")
                             return
                         if len(senha_plana) < 6:
-                            messagebox.showwarning("ANTENÃ‡ÃƒO", "SENHA deve ter pelo menos 6 caracteres.")
+                            messagebox.showwarning("ANTENÇÃO", "SENHA deve ter pelo menos 6 caracteres.")
                             return
                         data["senha"] = hash_password_pbkdf2(senha_plana)
 
@@ -2725,7 +2976,7 @@ class CadastroCRUD(ttk.Frame):
                 if self.table == "ajudantes":
                     ok, f = self._require_fields(["nome", "sobrenome", "telefone", "status"])
                     if not ok:
-                        messagebox.showwarning("ATENÃƒâ€¡ÃƒÆ’O", f"PREENCHA O CAMPO: {f.upper()}.")
+                        messagebox.showwarning("ATENÃâââ€š¬¡ÃÆââ‚¬â„¢O", f"PREENCHA O CAMPO: {f.upper()}.")
                         return
 
                     nome = self._norm(data.get("nome"))
@@ -2734,19 +2985,19 @@ class CadastroCRUD(ttk.Frame):
                     status = self._norm(data.get("status"))
 
                     if len(nome) < 2:
-                        messagebox.showwarning("ATENÃƒâ€¡ÃƒÆ’O", "NOME deve ter pelo menos 2 caracteres.")
+                        messagebox.showwarning("ATENÃâââ€š¬¡ÃÆââ‚¬â„¢O", "NOME deve ter pelo menos 2 caracteres.")
                         return
                     if len(sobrenome) < 2:
-                        messagebox.showwarning("ATENÃƒâ€¡ÃƒÆ’O", "SOBRENOME deve ter pelo menos 2 caracteres.")
+                        messagebox.showwarning("ATENÃâââ€š¬¡ÃÆââ‚¬â„¢O", "SOBRENOME deve ter pelo menos 2 caracteres.")
                         return
                     if not is_valid_phone(telefone):
                         messagebox.showwarning(
-                            "ATENÃƒâ€¡ÃƒÆ’O",
-                            "TELEFONE invÃƒÂ¡lido. Informe DDD+NÃƒÂºmero (10 ou 11 dÃƒÂ­gitos)."
+                            "ATENÃâââ€š¬¡ÃÆââ‚¬â„¢O",
+                            "TELEFONE inválido. Informe DDD+Número (10 ou 11 dÃÂÂÂgitos)."
                         )
                         return
                     if status not in {"ATIVO", "DESATIVADO"}:
-                        messagebox.showwarning("ATENÃ‡ÃƒO", "STATUS invÃ¡lido para ajudante.")
+                        messagebox.showwarning("ATENÇÃO", "STATUS inválido para ajudante.")
                         return
 
                     # Evita duplicidade de pessoa com mesmo nome completo.
@@ -2770,7 +3021,7 @@ class CadastroCRUD(ttk.Frame):
                                 (nome, sobrenome),
                             )
                         if cur.fetchone():
-                            messagebox.showerror("ERRO", "JÃƒ EXISTE AJUDANTE COM ESTE NOME/SOBRENOME.")
+                            messagebox.showerror("ERRO", "JÃ EXISTE AJUDANTE COM ESTE NOME/SOBRENOME.")
                             return
                     except Exception:
                         logging.debug("Falha ignorada")
@@ -2786,7 +3037,7 @@ class CadastroCRUD(ttk.Frame):
                 if self.table == "veiculos":
                     ok, f = self._require_fields(["placa", "modelo", "capacidade_cx"])
                     if not ok:
-                        messagebox.showwarning("ATENÃ‡ÃƒO", f"PREENCHA O CAMPO: {f.upper()}.")
+                        messagebox.showwarning("ATENÇÃO", f"PREENCHA O CAMPO: {f.upper()}.")
                         return
 
                     placa = self._norm(data.get("placa"))
@@ -2796,21 +3047,35 @@ class CadastroCRUD(ttk.Frame):
 
                     cap = safe_int(data.get("capacidade_cx"), -1)
                     if cap < 0:
-                        messagebox.showwarning("ATENÃ‡ÃƒO", "CAPACIDADE (CX) deve ser um nÃºmero inteiro >= 0.")
+                        messagebox.showwarning("ATENÇÃO", "CAPACIDADE (CX) deve ser um número inteiro >= 0.")
                         return
                     data["capacidade_cx"] = cap
 
                 # -------------------------
                 # SALVAR (UPDATE/INSERT)
                 # -------------------------
-                if self.selected_id:
-                    sets = ", ".join([f"{c}=?" for c in data.keys()])
-                    values = list(data.values()) + [self.selected_id]
-                    cur.execute(f"UPDATE {self.table} SET {sets} WHERE id=?", values)
-                else:
-                    cols = ", ".join(data.keys())
-                    qs = ", ".join(["?"] * len(data))
-                    cur.execute(f"INSERT INTO {self.table} ({cols}) VALUES ({qs})", list(data.values()))
+                desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+                if self.table in {"motoristas", "veiculos", "ajudantes"} and desktop_secret and is_desktop_api_sync_enabled():
+                    try:
+                        if self.table == "motoristas":
+                            self._sync_motorista_upsert_api(data)
+                        elif self.table == "veiculos":
+                            self._sync_veiculo_upsert_api(data)
+                        elif self.table == "ajudantes":
+                            self._sync_ajudante_upsert_api(data)
+                        saved_via_api = True
+                    except Exception:
+                        logging.debug("Falha ao salvar cadastro via API; usando fallback local.", exc_info=True)
+
+                if not saved_via_api:
+                    if self.selected_id:
+                        sets = ", ".join([f"{c}=?" for c in data.keys()])
+                        values = list(data.values()) + [self.selected_id]
+                        cur.execute(f"UPDATE {self.table} SET {sets} WHERE id=?", values)
+                    else:
+                        cols = ", ".join(data.keys())
+                        qs = ", ".join(["?"] * len(data))
+                        cur.execute(f"INSERT INTO {self.table} ({cols}) VALUES ({qs})", list(data.values()))
 
         except sqlite3.IntegrityError as e:
             messagebox.showerror("ERRO", f"REGISTRO DUPLICADO OU INVLIDO.\n\n{e}")
@@ -2819,7 +3084,7 @@ class CadastroCRUD(ttk.Frame):
             messagebox.showerror("ERRO", str(e))
             return
 
-        if self.table == "motoristas":
+        if (not saved_via_api) and self.table == "motoristas":
             try:
                 self._sync_motorista_upsert_api(data)
             except Exception as e:
@@ -2828,16 +3093,16 @@ class CadastroCRUD(ttk.Frame):
                     "Motorista salvo localmente, mas falhou ao sincronizar com a API.\n"
                     f"Detalhe: {e}",
                 )
-        elif self.table == "veiculos":
+        elif (not saved_via_api) and self.table == "veiculos":
             try:
                 self._sync_veiculo_upsert_api(data)
             except Exception as e:
                 messagebox.showwarning(
                     "Sincronização",
-                    "Veículo salvo localmente, mas falhou ao sincronizar com a API.\n"
+                    "VeÃÂculo salvo localmente, mas falhou ao sincronizar com a API.\n"
                     f"Detalhe: {e}",
                 )
-        elif self.table == "ajudantes":
+        elif (not saved_via_api) and self.table == "ajudantes":
             try:
                 self._sync_ajudante_upsert_api(data)
             except Exception as e:
@@ -2855,11 +3120,44 @@ class CadastroCRUD(ttk.Frame):
 
     def excluir(self):
         if not self.selected_id:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "SELECIONE UM ITEM NA TABELA ANTES DE EXCLUIR.")
+            messagebox.showwarning("ATENÇÃO", "SELECIONE UM ITEM NA TABELA ANTES DE EXCLUIR.")
             return
 
         if not messagebox.askyesno("CONFIRMAR", "DESEJA EXCLUIR ESTE REGISTRO?"):
             return
+
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                endpoint = ""
+                if self.table == "motoristas":
+                    cod = self._norm(self._get("codigo"))
+                    if cod:
+                        endpoint = f"desktop/cadastros/motoristas/{urllib.parse.quote(cod)}"
+                elif self.table == "veiculos":
+                    placa = self._norm(self._get("placa"))
+                    if placa:
+                        endpoint = f"desktop/cadastros/veiculos/{urllib.parse.quote(placa)}"
+                elif self.table == "ajudantes":
+                    endpoint = f"desktop/cadastros/ajudantes/{int(safe_int(self.selected_id, 0))}"
+                elif self.table == "clientes":
+                    cod_cli = self._norm(self._get("cod_cliente"))
+                    if cod_cli:
+                        endpoint = f"desktop/cadastros/clientes/{urllib.parse.quote(cod_cli)}"
+
+                if endpoint:
+                    _call_api(
+                        "DELETE",
+                        endpoint,
+                        extra_headers={"X-Desktop-Secret": desktop_secret},
+                    )
+                    self.carregar()
+                    self.limpar()
+                    if self.app:
+                        self.app.refresh_programacao_comboboxes()
+                    return
+            except Exception:
+                logging.debug("Falha ao excluir cadastro via API; usando fallback local.", exc_info=True)
 
         with get_db() as conn:
             cur = conn.cursor()
@@ -2878,7 +3176,7 @@ class CadastroCRUD(ttk.Frame):
     def editar(self):
         sel = self.tree.selection()
         if not sel:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Selecione um item na tabela para editar.")
+            messagebox.showwarning("ATENÇÃO", "Selecione um item na tabela para editar.")
             return
         self._on_select()
         try:
@@ -2902,8 +3200,10 @@ class CadastroCRUD(ttk.Frame):
             self._set(col, row[i] if i < len(row) else "")
         self._update_password_controls()
 
-        # Mantive seu importar_clientes_excel como estava (se vocÃª ainda usa em algum ponto)
+        # Mantive seu importar_clientes_excel como estava (se você ainda usa em algum ponto)
     def importar_clientes_excel(self):
+        if not ensure_system_api_binding(context="Importar clientes (cadastros)", parent=self):
+            return
         path = filedialog.askopenfilename(
             title="IMPORTAR CLIENTES (EXCEL)",
             filetypes=[("Excel", "*.xls *.xlsx")]
@@ -2917,9 +3217,9 @@ class CadastroCRUD(ttk.Frame):
         try:
             df = pd.read_excel(path, engine=excel_engine_for(path))
 
-            col_cod = guess_col(df.columns, ["cod", "cÃ³d", "codigo", "cliente", "cod cliente"])
+            col_cod = guess_col(df.columns, ["cod", "cód", "codigo", "cliente", "cod cliente"])
             col_nome = guess_col(df.columns, ["nome", "cliente"])
-            col_end = guess_col(df.columns, ["endereco", "endereÃ§o", "rua", "logradouro"])
+            col_end = guess_col(df.columns, ["endereco", "endereço", "rua", "logradouro"])
             col_bairro = guess_col(df.columns, ["bairro"])
             col_cidade = guess_col(df.columns, ["cidade"])
             col_uf = guess_col(df.columns, ["uf", "estado"])
@@ -2984,10 +3284,10 @@ class CadastroCRUD(ttk.Frame):
         if self.table != "usuarios":
             return
         if not self.selected_id:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "SELECIONE UM USURIO NA TABELA.")
+            messagebox.showwarning("ATENÇÃO", "SELECIONE UM USURIO NA TABELA.")
             return
         if not self._user_can_change_password(self.selected_id):
-            messagebox.showwarning("ATENÃ‡ÃƒO", "VocÃª nÃ£o tem permissÃ£o para alterar esta senha.")
+            messagebox.showwarning("ATENÇÃO", "Você não tem permissão para alterar esta senha.")
             return
 
         require_current = not self._is_admin
@@ -3027,13 +3327,13 @@ class CadastroCRUD(ttk.Frame):
             senha_conf = ent_conf.get().strip()
 
             if not senha_nova:
-                messagebox.showwarning("ATENÃ‡ÃƒO", "Informe a nova senha.")
+                messagebox.showwarning("ATENÇÃO", "Informe a nova senha.")
                 return
             if len(senha_nova) < 6:
-                messagebox.showwarning("ATENÃ‡ÃƒO", "A nova senha deve ter pelo menos 6 caracteres.")
+                messagebox.showwarning("ATENÇÃO", "A nova senha deve ter pelo menos 6 caracteres.")
                 return
             if senha_nova != senha_conf:
-                messagebox.showwarning("ATENÃ‡ÃƒO", "ConfirmaÃ§Ã£o nÃ£o confere.")
+                messagebox.showwarning("ATENÇÃO", "Confirmação não confere.")
                 return
 
             with get_db() as conn:
@@ -3041,7 +3341,7 @@ class CadastroCRUD(ttk.Frame):
                 cur.execute("SELECT senha FROM usuarios WHERE id=?", (self.selected_id,))
                 row_db = cur.fetchone()
                 if not row_db:
-                    messagebox.showerror("ERRO", "UsuÃ¡rio nÃ£o encontrado.")
+                    messagebox.showerror("ERRO", "Usuário não encontrado.")
                     return
                 senha_db = row_db[0] or ""
 
@@ -3052,7 +3352,7 @@ class CadastroCRUD(ttk.Frame):
                     else:
                         ok = (senha_db == senha_atual)
                     if not ok:
-                        messagebox.showwarning("ATENÃ‡ÃƒO", "Senha atual invÃ¡lida.")
+                        messagebox.showwarning("ATENÇÃO", "Senha atual inválida.")
                         return
 
                 nova_hash = hash_password_pbkdf2(senha_nova)
@@ -3068,17 +3368,17 @@ class CadastroCRUD(ttk.Frame):
 
         btns = ttk.Frame(frm)
         btns.grid(row=row, column=0, columnspan=2, sticky="e", pady=(8, 0))
-        ttk.Button(btns, text="💾 SALVAR", style="Primary.TButton", command=_salvar).grid(row=0, column=0, padx=6)
-        ttk.Button(btns, text="✖ CANCELAR", style="Ghost.TButton", command=win.destroy).grid(row=0, column=1, padx=6)
+        ttk.Button(btns, text="ðÅ¸â€™¾ SALVAR", style="Primary.TButton", command=_salvar).grid(row=0, column=0, padx=6)
+        ttk.Button(btns, text="âÅ“â€“ CANCELAR", style="Ghost.TButton", command=win.destroy).grid(row=0, column=1, padx=6)
 
     def alterar_senha_motorista(self):
         if self.table != "motoristas":
             return
         if not self.selected_id:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "SELECIONE UM MOTORISTA NA TABELA.")
+            messagebox.showwarning("ATENÇÃO", "SELECIONE UM MOTORISTA NA TABELA.")
             return
         if not self._is_admin:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Somente ADMIN pode alterar senha do motorista.")
+            messagebox.showwarning("ATENÇÃO", "Somente ADMIN pode alterar senha do motorista.")
             return
 
         win = tk.Toplevel(self)
@@ -3104,16 +3404,16 @@ class CadastroCRUD(ttk.Frame):
             senha_nova = ent_nova.get().strip()
             senha_conf = ent_conf.get().strip()
             if not senha_nova:
-                messagebox.showwarning("ATENÃ‡ÃƒO", "Informe a nova senha.")
+                messagebox.showwarning("ATENÇÃO", "Informe a nova senha.")
                 return
             if not is_valid_motorista_senha(senha_nova):
                 messagebox.showwarning(
-                    "ATENÃ‡ÃƒO",
-                    "SENHA invÃ¡lida. Use 4 a 24 caracteres (nÃ£o pode ser vazia)."
+                    "ATENÇÃO",
+                    "SENHA inválida. Use 4 a 24 caracteres (não pode ser vazia)."
                 )
                 return
             if senha_nova != senha_conf:
-                messagebox.showwarning("ATENÃ‡ÃƒO", "ConfirmaÃ§Ã£o nÃ£o confere.")
+                messagebox.showwarning("ATENÇÃO", "Confirmação não confere.")
                 return
 
             codigo = self._norm(self._get("codigo"))
@@ -3121,55 +3421,32 @@ class CadastroCRUD(ttk.Frame):
                 messagebox.showwarning("ATENÇÃO", "Código do motorista não encontrado.")
                 return
 
+            if not ensure_system_api_binding(context=f"Alterar senha do motorista {codigo}", parent=self):
+                return
+
+            desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+            admin_nome = upper((getattr(self.app, "user", {}) or {}).get("nome", "")) or "ADMIN_DESKTOP"
+            payload = {
+                "nova_senha": senha_nova,
+                "admin": admin_nome,
+                "motivo": "Alteracao de senha no cadastro de motoristas (desktop)",
+            }
+            try:
+                _call_api(
+                    "POST",
+                    f"admin/motoristas/senha/{urllib.parse.quote(codigo)}",
+                    payload=payload,
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+            except Exception as exc:
+                messagebox.showerror("ERRO", f"Falha ao sincronizar senha do motorista na API:\n{exc}")
+                return
+
             with get_db() as conn:
                 cur = conn.cursor()
                 cur.execute("UPDATE motoristas SET senha=? WHERE id=?", (self._norm(senha_nova), self.selected_id))
 
-            # Tenta sincronizar senha também na API (quando desktop trabalha com app mobile)
-            desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-            sync_ok = False
-            sync_err = ""
-            if desktop_secret:
-                admin_nome = upper((getattr(self.app, "user", {}) or {}).get("nome", "")) or "ADMIN_DESKTOP"
-                payload = {
-                    "nova_senha": senha_nova,
-                    "admin": admin_nome,
-                    "motivo": "Alteração de senha no cadastro de motoristas (desktop)",
-                }
-                endpoints = [
-                    f"admin/motoristas/senha/{urllib.parse.quote(codigo)}",
-                    f"admin/motoristas/{urllib.parse.quote(codigo)}/senha",
-                ]
-                for ep in endpoints:
-                    try:
-                        _call_api(
-                            "POST",
-                            ep,
-                            payload=payload,
-                            extra_headers={"X-Desktop-Secret": desktop_secret},
-                        )
-                        sync_ok = True
-                        break
-                    except Exception as exc:
-                        sync_err = str(exc or "")
-                        if "404" in sync_err and "Not Found" in sync_err:
-                            continue
-                        break
-
-            if sync_ok:
-                msg = "Senha do motorista atualizada com sucesso (LOCAL + API)."
-            elif desktop_secret:
-                msg = (
-                    "Senha do motorista atualizada no banco LOCAL.\n"
-                    "Falha na sincronização com API.\n"
-                    f"Detalhe: {sync_err or 'endpoint indisponível'}"
-                )
-            else:
-                msg = (
-                    "Senha do motorista atualizada no banco LOCAL.\n"
-                    "ROTA_SECRET não configurada: sincronização com API não executada."
-                )
-            messagebox.showinfo("OK", msg)
+            messagebox.showinfo("OK", "Senha do motorista atualizada com sucesso (LOCAL + API).")
             try:
                 win.destroy()
             except Exception:
@@ -3179,8 +3456,8 @@ class CadastroCRUD(ttk.Frame):
 
         btns = ttk.Frame(frm)
         btns.grid(row=2, column=0, columnspan=2, sticky="e", pady=(8, 0))
-        ttk.Button(btns, text="💾 SALVAR", style="Primary.TButton", command=_salvar).grid(row=0, column=0, padx=6)
-        ttk.Button(btns, text="✖ CANCELAR", style="Ghost.TButton", command=win.destroy).grid(row=0, column=1, padx=6)
+        ttk.Button(btns, text="ðÅ¸â€™¾ SALVAR", style="Primary.TButton", command=_salvar).grid(row=0, column=0, padx=6)
+        ttk.Button(btns, text="âÅ“â€“ CANCELAR", style="Ghost.TButton", command=win.destroy).grid(row=0, column=1, padx=6)
 
     def definir_acesso_app_motorista(self, liberar: bool):
         if self.table != "motoristas":
@@ -3218,74 +3495,20 @@ class CadastroCRUD(ttk.Frame):
             "admin": admin_nome,
             "motivo": "Definido no cadastro de motoristas (desktop)",
         }
-        endpoints = [
-            f"admin/motoristas/acesso/{urllib.parse.quote(codigo)}",
-            f"admin/motoristas/{urllib.parse.quote(codigo)}/acesso",
-            f"motoristas/acesso/{urllib.parse.quote(codigo)}",
-            f"admin/motoristas/acesso?codigo={urllib.parse.quote(codigo)}",
-        ]
-        methods = ["POST", "PUT", "PATCH"]
-        last_err = ""
-        for ep in endpoints:
-            for method in methods:
-                try:
-                    _call_api(
-                        method,
-                        ep,
-                        payload=payload,
-                        extra_headers={"X-Desktop-Secret": desktop_secret},
-                    )
-                    messagebox.showinfo("OK", f"Acesso ao app atualizado para {codigo}.")
-                    return
-                except Exception as exc:
-                    err = str(exc or "")
-                    last_err = err
-                    # Tenta próxima combinação quando a API não expõe essa rota/método.
-                    if (
-                        ("404" in err and "Not Found" in err)
-                        or ("405" in err and "Method Not Allowed" in err)
-                    ):
-                        continue
-                    messagebox.showerror("ERRO", f"Falha ao atualizar acesso do motorista:\n{err}")
-                    return
-
-        # Fallback de compatibilidade:
-        # algumas APIs antigas não expõem /admin/motoristas/acesso/{codigo} com método de escrita,
-        # mas aceitam upsert no endpoint desktop.
+        if not ensure_system_api_binding(context=f"Alterar acesso do motorista {codigo}", parent=self):
+            return
         try:
-            payload_upsert = {
-                "codigo": codigo,
-                "nome": self._norm(self._get("nome")),
-                "telefone": self._norm(self._get("telefone")),
-                "cpf": self._norm(self._get("cpf")),
-                "status": self._norm(self._get("status") or "ATIVO"),
-                "acesso_liberado": bool(liberar),
-                "acesso_liberado_por": admin_nome,
-                "acesso_obs": "Definido via botão LIBERAR/BLOQUEAR no desktop",
-            }
             _call_api(
                 "POST",
-                "desktop/cadastros/motoristas/upsert",
-                payload=payload_upsert,
+                f"admin/motoristas/acesso/{urllib.parse.quote(codigo)}",
+                payload=payload,
                 extra_headers={"X-Desktop-Secret": desktop_secret},
             )
-            messagebox.showinfo("OK", f"Acesso ao app atualizado para {codigo} (fallback desktop/upsert).")
+            messagebox.showinfo("OK", f"Acesso ao app atualizado para {codigo}.")
             return
         except Exception as exc:
-            last_err = str(exc or last_err or "")
-
-        endpoint = _build_api_url(endpoints[0])
-        messagebox.showerror(
-            "ERRO",
-            "A API conectada não possui endpoint compatível para controle de acesso.\n\n"
-            f"URL base atual: {API_BASE_URL}\n"
-            f"Endpoint principal testado: {endpoint}\n"
-            f"Último erro: {last_err or '404 Not Found'}\n\n"
-            "Ação necessária: atualizar/deploy da API com suporte a:\n"
-            "- GET /admin/motoristas/acesso\n"
-            "- POST /admin/motoristas/acesso/{codigo_motorista}",
-        )
-        return
+            messagebox.showerror("ERRO", f"Falha ao atualizar acesso do motorista:\n{exc}")
+            return
 
 
 # ==========================
@@ -3306,9 +3529,9 @@ class CadastrosPage(PageBase):
 
         # -------------------------
         # MOTORISTAS
-        # - ID Ã© gerado pelo SQLite (sequÃªncia/autoincrement)
+        # - ID é gerado pelo SQLite (sequência/autoincrement)
         # - valida CPF/NOME/TELEFONE
-        # - cÃ³digo e senha sÃ£o MANUAIS (botÃ£o GERAR Ã© opcional)
+        # - código e senha são MANUAIS (botão GERAR é opcional)
         # -------------------------
         frm_motoristas = ttk.Frame(nb, style="Content.TFrame")
         crud_motoristas = CadastroCRUD(
@@ -3317,7 +3540,7 @@ class CadastrosPage(PageBase):
             "motoristas",
             [
                 ("nome", "NOME"),
-                ("codigo", "CÃ“DIGO"),
+                ("codigo", "CÓDIGO"),
                 ("senha", "SENHA"),
                 ("cpf", "CPF"),
                 ("telefone", "TELEFONE"),
@@ -3329,24 +3552,24 @@ class CadastrosPage(PageBase):
         nb.add(frm_motoristas, text="Motoristas")
 
         # -------------------------
-        # USURIOS (login por nome + senha, sem idade e sem cÃ³digo)
+        # USURIOS (login por nome + senha, sem idade e sem código)
         # -------------------------
         frm_usuarios = ttk.Frame(nb, style="Content.TFrame")
         crud_usuarios = CadastroCRUD(
             frm_usuarios,
-            "UsuÃ¡rios",
+            "Usuários",
             "usuarios",
             [
                 ("nome", "NOME"),
                 ("senha", "SENHA"),
-                ("permissoes", "PERMISSÃ•ES"),
+                ("permissoes", "PERMISSÕES"),
                 ("cpf", "CPF"),
                 ("telefone", "TELEFONE"),
             ],
             app=app
         )
         crud_usuarios.pack(fill="both", expand=True)
-        nb.add(frm_usuarios, text="UsuÃ¡rios")
+        nb.add(frm_usuarios, text="Usuários")
 
         # -------------------------
         # VECULOS (placa, modelo, capacidade_cx)
@@ -3354,7 +3577,7 @@ class CadastrosPage(PageBase):
         frm_veiculos = ttk.Frame(nb, style="Content.TFrame")
         crud_veiculos = CadastroCRUD(
             frm_veiculos,
-            "VeÃ­culos",
+            "VeÃÂÂculos",
             "veiculos",
             [
                 ("placa", "PLACA"),
@@ -3364,10 +3587,10 @@ class CadastrosPage(PageBase):
             app=app
         )
         crud_veiculos.pack(fill="both", expand=True)
-        nb.add(frm_veiculos, text="VeÃ­culos")
+        nb.add(frm_veiculos, text="VeÃÂÂculos")
 
         # -------------------------
-        # EQUIPES (mantÃ©m)
+        # EQUIPES (mantém)
         # -------------------------
         frm_ajudantes = ttk.Frame(nb, style="Content.TFrame")
         crud_ajudantes = CadastroCRUD(
@@ -3386,7 +3609,7 @@ class CadastrosPage(PageBase):
         nb.add(frm_ajudantes, text="Ajudantes")
 
         # -------------------------
-        # CLIENTES (mantÃ©m sua ClientesImportPage)
+        # CLIENTES (mantém sua ClientesImportPage)
         # -------------------------
         frm_clientes = ttk.Frame(nb, style="Content.TFrame")
         clientes_page = ClientesImportPage(frm_clientes, app=app)
@@ -3421,7 +3644,7 @@ class Sidebar(ttk.Frame):
 
         ttk.Separator(self).pack(fill="x", padx=10, pady=(6, 10))
 
-        # âœ… Menu com scroll (evita quebra/sumir item em telas pequenas)
+        # âÅâ€œââ‚¬¦ Menu com scroll (evita quebra/sumir item em telas pequenas)
         wrap = ttk.Frame(self, style="Sidebar.TFrame")
         wrap.pack(fill="both", expand=True)
 
@@ -3445,23 +3668,23 @@ class Sidebar(ttk.Frame):
         self.canvas.bind("<Configure>", _on_canvas_configure)
 
         # Itens do menu
-        self._add_btn("home", "🏠 Home", lambda: app.show_page("Home"))
-        self._add_btn("cadastros", "📚 Cadastros", lambda: app.show_page("Cadastros"))
-        self._add_btn("rotas", "🗺️ Rotas", lambda: app.show_page("Rotas"))
-        self._add_btn("vendas", "📥 Importar Vendas", lambda: app.show_page("ImportarVendas"))
-        self._add_btn("programacao", "🗓️ Programacao", lambda: app.show_page("Programacao"))
-        self._add_btn("recebimentos", "💵 Recebimentos", lambda: app.show_page("Recebimentos"))
-        self._add_btn("despesas", "💸 Despesas", lambda: app.show_page("Despesas"))
-        self._add_btn("escala", "📊 Escala", lambda: app.show_page("Escala"))
-        self._add_btn("centro_custos", "🚛 Centro de Custos", lambda: app.show_page("CentroCustos"))
-        self._add_btn("relatorios", "📄 Relatorios", lambda: app.show_page("Relatorios"))
-        self._add_btn("backup", "🗄️ Backup / Exportar", lambda: app.show_page("BackupExportar"))
+        self._add_btn("home", "ðÅ¸Â  Home", lambda: app.show_page("Home"))
+        self._add_btn("cadastros", "ðÅ¸â€œÅ¡ Cadastros", lambda: app.show_page("Cadastros"))
+        self._add_btn("rotas", "ðÅ¸â€”ºï¸Â Rotas", lambda: app.show_page("Rotas"))
+        self._add_btn("vendas", "ðÅ¸â€œ¥ Importar Vendas", lambda: app.show_page("ImportarVendas"))
+        self._add_btn("programacao", "ðÅ¸â€”â€œï¸Â Programacao", lambda: app.show_page("Programacao"))
+        self._add_btn("recebimentos", "ðÅ¸â€™µ Recebimentos", lambda: app.show_page("Recebimentos"))
+        self._add_btn("despesas", "ðÅ¸â€™¸ Despesas", lambda: app.show_page("Despesas"))
+        self._add_btn("escala", "ðÅ¸â€œÅ  Escala", lambda: app.show_page("Escala"))
+        self._add_btn("centro_custos", "ðÅ¸Å¡â€º Centro de Custos", lambda: app.show_page("CentroCustos"))
+        self._add_btn("relatorios", "ðÅ¸â€œâ€ž Relatorios", lambda: app.show_page("Relatorios"))
+        self._add_btn("backup", "ðÅ¸â€”â€žï¸Â Backup / Exportar", lambda: app.show_page("BackupExportar"))
 
-        # RodapÃ©
+        # Rodapé
         bottom = ttk.Frame(self, style="Sidebar.TFrame", padding=(10, 12))
         bottom.pack(fill="x")
 
-        ttk.Button(bottom, text="⏻ SAIR", style="Danger.TButton", command=self._safe_quit).pack(fill="x")
+        ttk.Button(bottom, text="âÂ» SAIR", style="Danger.TButton", command=self._safe_quit).pack(fill="x")
 
     def _safe_quit(self):
         """Evita travas se houver janelas abertas/toplevels"""
@@ -3480,13 +3703,13 @@ class Sidebar(ttk.Frame):
                 logging.debug("Falha ignorada")
 
     def _add_btn(self, key, text, cmd):
-        """Adiciona botÃ£o ao menu lateral"""
+        """Adiciona botão ao menu lateral"""
         b = ttk.Button(self.menu, text=text, style="Side.TButton", command=cmd)
         b.pack(fill="x", pady=2)
         self.buttons[key] = b
 
     def set_active(self, page_key):
-        """Destaca botÃ£o ativo"""
+        """Destaca botão ativo"""
         for k, b in self.buttons.items():
             b.config(style="SideActive.TButton" if k == page_key else "Side.TButton")
 
@@ -3497,7 +3720,7 @@ class App(tk.Tk):
         # Evita "flash" preto durante carga inicial pesada das páginas.
         self.withdraw()
 
-        # âœ… SeguranÃ§a bÃ¡sica: sempre garante chaves esperadas
+        # âÅâ€œââ‚¬¦ Segurança básica: sempre garante chaves esperadas
         base_user = {"nome": "ADMIN", "is_admin": True}
         if isinstance(user, dict):
             base_user.update(user)
@@ -3515,6 +3738,10 @@ class App(tk.Tk):
 
         apply_style(self)
         db_init()
+
+        if not self.ensure_integracao_sistema("Inicializacao do sistema", force_probe=True):
+            self.after(80, self.destroy)
+            return
 
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(1, weight=1)
@@ -3539,10 +3766,13 @@ class App(tk.Tk):
         self.update_idletasks()
         self.deiconify()
 
+    def ensure_integracao_sistema(self, contexto: str = "Operacao", force_probe: bool = False) -> bool:
+        return ensure_system_api_binding(context=contexto, parent=self, force_probe=force_probe)
+
     def request_close(self):
         """Confirma fechamento da aplicação."""
         try:
-            ok = messagebox.askyesno("Confirmar saída", "Deseja realmente fechar o sistema?")
+            ok = messagebox.askyesno("Confirmar saÃÂda", "Deseja realmente fechar o sistema?")
         except Exception:
             ok = True
         if not ok:
@@ -3589,7 +3819,7 @@ class App(tk.Tk):
         self._create_page_if_needed("Home")
 
     def show_page(self, name):
-        """Exibe pÃ¡gina e atualiza menu lateral"""
+        """Exibe página e atualiza menu lateral"""
         mapping = {
             "Home": "home",
             "Cadastros": "cadastros",
@@ -3609,7 +3839,7 @@ class App(tk.Tk):
 
         page = self._create_page_if_needed(name)
         if not page:
-            messagebox.showwarning("ATENÃ‡ÃƒO", f"PÃ¡gina '{name}' nÃ£o encontrada.")
+            messagebox.showwarning("ATENÇÃO", f"Página '{name}' não encontrada.")
             return
 
         page.tkraise()
@@ -3617,10 +3847,10 @@ class App(tk.Tk):
         try:
             page.on_show()
         except Exception as e:
-            messagebox.showerror("ERRO", f"Erro ao abrir pÃ¡gina '{name}':\n\n{e}")
+            messagebox.showerror("ERRO", f"Erro ao abrir página '{name}':\n\n{e}")
 
     def refresh_programacao_comboboxes(self):
-        """Atualiza comboboxes em pÃ¡ginas relevantes"""
+        """Atualiza comboboxes em páginas relevantes"""
         for nm in ["Programacao", "Despesas", "Relatorios", "Recebimentos", "Home", "CentroCustos"]:
             p = self.pages.get(nm)
             if p and hasattr(p, "refresh_comboboxes"):
@@ -3689,7 +3919,7 @@ class App(tk.Tk):
             return False
 
     def _shortcut_escape(self, _e=None):
-        # ESC: fecha modal atual; se nÃ£o houver, volta para Home.
+        # ESC: fecha modal atual; se não houver, volta para Home.
         if self._close_top_modal_if_any():
             return "break"
         if self.current_page_name and self.current_page_name != "Home":
@@ -3713,7 +3943,7 @@ class App(tk.Tk):
         return None
 
     def _shortcut_delete(self, _e=None):
-        # DEL: nÃ£o intercepta quando estiver digitando em campo.
+        # DEL: não intercepta quando estiver digitando em campo.
         if self._is_text_input_focus():
             return None
         page = self._active_page()
@@ -3748,7 +3978,7 @@ class App(tk.Tk):
         return None
 
     def _shortcut_enter(self, _e=None):
-        # ENTER global: executa aÃ§Ã£o principal da tela quando nÃ£o estÃ¡ digitando em campo.
+        # ENTER global: executa ação principal da tela quando não está digitando em campo.
         if self._is_text_input_focus():
             return None
         page = self._active_page()
@@ -3788,11 +4018,11 @@ class HomePage(PageBase):
         ttk.Label(
             card,
             text=(
-                "â€¢ Cadastre Motoristas, VeÃ­culos, Equipes e Clientes.\n"
-                "â€¢ Importe Vendas via Excel.\n"
-                "â€¢ Gere ProgramaÃ§Ãµes (cÃ³digos automÃ¡ticos) e vincule pedidos/entregas.\n"
-                "â€¢ Registre Recebimentos e Despesas.\n"
-                "â€¢ Emita RelatÃ³rios e PDF.\n"
+                "âââ€š¬¢ Cadastre Motoristas, VeÃÂÂculos, Equipes e Clientes.\n"
+                "âââ€š¬¢ Importe Vendas via Excel.\n"
+                "âââ€š¬¢ Gere Programações (códigos automáticos) e vincule pedidos/entregas.\n"
+                "âââ€š¬¢ Registre Recebimentos e Despesas.\n"
+                "âââ€š¬¢ Emita Relatórios e PDF.\n"
             ),
             style="CardLabel.TLabel",
             justify="left"
@@ -3802,7 +4032,7 @@ class HomePage(PageBase):
         self.card_stats.grid(row=1, column=0, sticky="nsew", pady=(14, 0))
         self.card_stats.grid_columnconfigure((0, 1, 2), weight=1)
 
-        self.lbl_total_prog = self._build_stat(self.card_stats, 0, "ProgramaÃ§Ãµes Ativas", "")
+        self.lbl_total_prog = self._build_stat(self.card_stats, 0, "Programações Ativas", "")
         self.lbl_total_vendas = self._build_stat(self.card_stats, 1, "Vendas Importadas", "")
         self.lbl_total_clientes_ativos = self._build_stat(self.card_stats, 2, "Clientes (Ativos)", "")
 
@@ -3867,7 +4097,7 @@ class HomePage(PageBase):
 
         self.lbl_version_remote = ttk.Label(
             panel,
-            text="Versão disponível: -",
+            text="Versão disponÃÂvel: -",
             background="white",
             foreground="#6B7280",
             font=("Segoe UI", 9),
@@ -3972,7 +4202,7 @@ class HomePage(PageBase):
         if not self._can_auto_update_from_url(url):
             messagebox.showinfo(
                 "Atualização",
-                "Não foi possível atualizar automaticamente porque o link atual não aponta para um arquivo .exe.\n\n"
+                "Não foi possÃÂvel atualizar automaticamente porque o link atual não aponta para um arquivo .exe.\n\n"
                 "Use o botão 'Baixar Setup' para baixar manualmente.",
             )
             self._open_setup()
@@ -4147,7 +4377,7 @@ class HomePage(PageBase):
         is_candidate = (remote_v > local_v) and self._is_same_release_line(local_v, remote_v)
         remote_display = remote_version if is_candidate else "0.0.0"
 
-        self.lbl_version_remote.config(text=f"Versão disponível: {remote_display}")
+        self.lbl_version_remote.config(text=f"Versão disponÃÂvel: {remote_display}")
         self.lbl_alerts.config(text=alert_txt or "Sem alertas.")
 
         if is_candidate:
@@ -4180,8 +4410,8 @@ class HomePage(PageBase):
                 is_candidate = (remote_v > local_v) and self._is_same_release_line(local_v, remote_v)
                 if is_candidate:
                     ask = messagebox.askyesno(
-                        "Atualização disponível",
-                        f"Versão local: {APP_VERSION}\nVersão disponível: {self._remote_version}\n\n"
+                        "Atualização disponÃÂvel",
+                        f"Versão local: {APP_VERSION}\nVersão disponÃÂvel: {self._remote_version}\n\n"
                         "Deseja atualizar agora?",
                     )
                     if ask:
@@ -4247,7 +4477,7 @@ class HomePage(PageBase):
             except Exception:
                 logging.debug("Falha ignorada")
 
-        return "Sem detalhes de changelog disponíveis."
+        return "Sem detalhes de changelog disponÃÂveis."
 
     def _maybe_show_post_update_notifications(self):
         if self._update_notice_shown:
@@ -4471,6 +4701,28 @@ class HomePage(PageBase):
             logging.debug("Falha ao buscar rotas da Home na API", exc_info=True)
             return []
 
+    def _home_api_overview(self):
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if not desktop_secret or not is_desktop_api_sync_enabled():
+            return None
+        try:
+            resp = _call_api(
+                "GET",
+                "desktop/overview",
+                extra_headers={"X-Desktop-Secret": desktop_secret},
+            )
+            if not isinstance(resp, dict):
+                return None
+            return {
+                "total_prog": safe_int(resp.get("total_programacoes_ativas"), 0),
+                "total_vendas": safe_int(resp.get("total_vendas_importadas"), 0),
+                "total_clientes_ativos": safe_int(resp.get("total_clientes_ativos"), 0),
+                "rotas": resp.get("rotas") if isinstance(resp.get("rotas"), list) else [],
+            }
+        except Exception:
+            logging.debug("Falha ao buscar overview da Home na API", exc_info=True)
+            return None
+
     @staticmethod
     def _home_local_not_finalized_where(cols_prog: set) -> str:
         clauses = [
@@ -4496,6 +4748,34 @@ class HomePage(PageBase):
         total_clientes_ativos = 0
         rows = []
         source = "LOCAL"
+
+        api_overview = self._home_api_overview()
+        if api_overview:
+            total_prog = safe_int(api_overview.get("total_prog"), 0)
+            total_vendas = safe_int(api_overview.get("total_vendas"), 0)
+            total_clientes_ativos = safe_int(api_overview.get("total_clientes_ativos"), 0)
+            rows = api_overview.get("rotas") or []
+            source = "API CENTRAL"
+            for i in self.tree_rotas.get_children():
+                self.tree_rotas.delete(i)
+            for r in rows:
+                if isinstance(r, dict):
+                    codigo = upper(r.get("codigo_programacao") or "")
+                    motorista = upper(r.get("motorista") or "")
+                    veiculo = upper(r.get("veiculo") or "")
+                    data_criacao = str(r.get("data_criacao") or "")
+                else:
+                    codigo = upper(r[0] if len(r) > 0 else "")
+                    motorista = upper(r[1] if len(r) > 1 else "")
+                    veiculo = upper(r[2] if len(r) > 2 else "")
+                    data_criacao = str(r[3] if len(r) > 3 else "")
+                data_fmt = self._format_home_data(data_criacao)
+                self.tree_rotas.insert("", "end", values=(codigo, motorista, veiculo, data_fmt))
+            self.lbl_total_prog.config(text=str(total_prog))
+            self.lbl_total_vendas.config(text=str(total_vendas))
+            self.lbl_total_clientes_ativos.config(text=str(total_clientes_ativos))
+            self.set_status(f"STATUS: Home carregada ({source}).")
+            return
 
         with get_db() as conn:
             cur = conn.cursor()
@@ -4585,7 +4865,7 @@ class HomePage(PageBase):
         self.set_status(f"STATUS: Logado como {nome} (ADMIN: {is_admin}). Fonte Home: {source}.")
 
     # =========================================================
-    # PREVIEW ROTA ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬ PUXA DADOS REAIS DA PROGRAMAÃƒÆ’Ã¢â‚¬Â¡ÃƒÆ’Ã†â€™O ATIVA
+    # PREVIEW ROTA âââââ€š¬Å¡¬ââââ‚¬Å¡¬ PUXA DADOS REAIS DA PROGRAMAÃÆââ‚¬â„¢ââââ‚¬Å¡¬¡ÃÆââ‚¬â„¢Æâââ€š¬ââ€ž¢O ATIVA
     # =========================================================
     def _open_rota_preview(self, event=None):
         sel = self.tree_rotas.selection()
@@ -4734,8 +5014,8 @@ class HomePage(PageBase):
 
         def _normalize_unit_price(v):
             """
-            Compatibilidade: alguns bancos guardam preÃ§o unitÃ¡rio em centavos
-            (ex.: 630 para R$ 6,30). Ajusta apenas para exibiÃ§Ã£o no preview.
+            Compatibilidade: alguns bancos guardam preço unitário em centavos
+            (ex.: 630 para R$ 6,30). Ajusta apenas para exibição no preview.
             """
             val = safe_float(v, 0.0)
             try:
@@ -4984,7 +5264,7 @@ class HomePage(PageBase):
             linhas.append(f"PROGRAMAÇÃO: {cabecalho_ctx.get('codigo') or codigo}")
             linhas.append(f"NOTA FISCAL: {cabecalho_ctx.get('nf_numero') or '-'}")
             linhas.append(
-                f"MOTORISTA: {cabecalho_ctx.get('motorista') or '-'}    VEÍCULO: {cabecalho_ctx.get('veiculo') or '-'}"
+                f"MOTORISTA: {cabecalho_ctx.get('motorista') or '-'}    VEÃÂCULO: {cabecalho_ctx.get('veiculo') or '-'}"
             )
             eq_raw = cabecalho_ctx.get("equipe") or ""
             linhas.append(f"EQUIPE: {resolve_equipe_nomes(eq_raw) or eq_raw or '-'}")
@@ -5142,7 +5422,7 @@ class HomePage(PageBase):
             lon = _coord(local.get("longitude"))
 
             st_norm = upper(status_pedido)
-            st_entregue = {"ENTREGUE", "FINALIZADO", "FINALIZADA", "CONCLUIDO", "CONCLUÍDO"}
+            st_entregue = {"ENTREGUE", "FINALIZADO", "FINALIZADA", "CONCLUIDO", "CONCLUÃÂDO"}
             st_cancelado = {"CANCELADO", "CANCELADA"}
             st_em_rota = {"EM_ROTA", "EM ROTA", "INICIADA"}
 
@@ -5171,7 +5451,7 @@ class HomePage(PageBase):
             ttk.Label(head, text=f"Programação: {codigo}").grid(row=1, column=0, sticky="w")
             ttk.Label(head, text=f"NF: {cabecalho_ctx.get('nf_numero') or '-'}").grid(row=1, column=1, sticky="w")
             ttk.Label(head, text=f"Motorista: {cabecalho_ctx.get('motorista') or '-'}").grid(row=1, column=2, sticky="w")
-            ttk.Label(head, text=f"Veículo: {cabecalho_ctx.get('veiculo') or '-'}").grid(row=1, column=3, sticky="w")
+            ttk.Label(head, text=f"VeÃÂculo: {cabecalho_ctx.get('veiculo') or '-'}").grid(row=1, column=3, sticky="w")
 
             nb = ttk.Notebook(area)
             nb.grid(row=1, column=0, sticky="nsew")
@@ -5317,7 +5597,7 @@ class HomePage(PageBase):
 
             def _open_osm():
                 if lat is None or lon is None:
-                    messagebox.showwarning("Mapa", "Latitude/Longitude não disponíveis para este cliente.")
+                    messagebox.showwarning("Mapa", "Latitude/Longitude não disponÃÂveis para este cliente.")
                     return
                 webbrowser.open(f"https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map=16/{lat}/{lon}")
 
@@ -5375,7 +5655,7 @@ class HomePage(PageBase):
             fonte_dados = "LOCAL"
             api_erro = ""
 
-            # âœ… helper local pra nÃ£o quebrar se nÃ£o existir ainda no arquivo
+            # âÅâ€œââ‚¬¦ helper local pra não quebrar se não existir ainda no arquivo
             def _db_has_column_best_effort(cur, table, col):
                 try:
                     if "db_has_column" in globals():
@@ -5764,7 +6044,7 @@ class HomePage(PageBase):
 
                 st_norm = upper(status_pedido)
                 caixas_ref = caixas_atual if caixas_atual > 0 else cx
-                if st_norm in {"ENTREGUE", "FINALIZADO", "FINALIZADA", "CONCLUIDO", "CONCLUÃDO"}:
+                if st_norm in {"ENTREGUE", "FINALIZADO", "FINALIZADA", "CONCLUIDO", "CONCLUÃÂÂDO"}:
                     total_cx_entregue += max(caixas_ref, 0)
 
                 if st_norm in {"ENTREGUE", "FINALIZADO", "FINALIZADA", "CONCLUIDO"}:
@@ -5885,7 +6165,7 @@ class HomePage(PageBase):
 
         btns = ttk.Frame(frm)
         btns.grid(row=3, column=0, sticky="e", pady=(6, 0))
-        ttk.Button(btns, text="🔄 ATUALIZAR", style="Ghost.TButton", command=_load_preview).pack(side="right")
+        ttk.Button(btns, text="ðŸ”„ ATUALIZAR", style="Ghost.TButton", command=_load_preview).pack(side="right")
 
 
 class RotasPage(PageBase):
@@ -5942,13 +6222,13 @@ class RotasPage(PageBase):
         )
         self.tree.bind("<Double-1>", lambda _e: self._abrir_mapa_selecionado())
 
-        ttk.Button(self.footer_right, text="🔄 ATUALIZAR", style="Ghost.TButton", command=self.carregar).grid(
+        ttk.Button(self.footer_right, text="ðŸ”„ ATUALIZAR", style="Ghost.TButton", command=self.carregar).grid(
             row=0, column=0, padx=4
         )
-        ttk.Button(self.footer_right, text="🗺 MAPA SELECIONADO", style="Primary.TButton", command=self._abrir_mapa_selecionado).grid(
+        ttk.Button(self.footer_right, text="ðÅ¸â€”º MAPA SELECIONADO", style="Primary.TButton", command=self._abrir_mapa_selecionado).grid(
             row=0, column=1, padx=4
         )
-        ttk.Button(self.footer_right, text="🌐 MAPA DE TODAS", style="Primary.TButton", command=self._abrir_mapa_todas).grid(
+        ttk.Button(self.footer_right, text="ðÅ¸Å’Â MAPA DE TODAS", style="Primary.TButton", command=self._abrir_mapa_todas).grid(
             row=0, column=2, padx=4
         )
 
@@ -5958,7 +6238,7 @@ class RotasPage(PageBase):
         self._refresh_job = None
         self._refresh_ms = 10000
         self._refresh_var = tk.StringVar(value="10s")
-        ttk.Label(self.footer_left, text="AtualizaÃ§Ã£o automÃ¡tica:", style="CardLabel.TLabel").grid(
+        ttk.Label(self.footer_left, text="Atualização automática:", style="CardLabel.TLabel").grid(
             row=0, column=0, padx=(0, 6), sticky="w"
         )
         self.cb_refresh = ttk.Combobox(
@@ -6196,7 +6476,7 @@ class RotasPage(PageBase):
             self._refresh_ms = 10000
         self._start_auto_refresh()
         self.set_status(
-            f"STATUS: atualizaÃ§Ã£o automÃ¡tica ajustada para {sel or '10s'}."
+            f"STATUS: atualização automática ajustada para {sel or '10s'}."
         )
 
     def _build_map_points(self, rows):
@@ -6324,18 +6604,18 @@ class RotasPage(PageBase):
 import re
 
 # =========================================================
-# ORDENAÃ‡ÃƒO UNIVERSAL PARA TREEVIEW (CLIQUE NO CABEÃ‡ALHO)
+# ORDENAÇÃO UNIVERSAL PARA TREEVIEW (CLIQUE NO CABEÇALHO)
 # =========================================================
 def enable_treeview_sorting(tree: ttk.Treeview, numeric_cols=None, money_cols=None, date_cols=None):
     """
     Habilita recursos de tabela no Treeview:
-    - Ordena??o por cabe?alho
+    - Ordenacao por cabecalho
     - Indicador de filtro ao passar mouse no cabe?alho
-    - Filtro por coluna (valores espec?ficos)
+    - Filtro por coluna (valores especificos)
 
     Uso do filtro:
     - Passe o mouse no cabe?alho para ver o indicador "\u23F7"
-    - Clique no indicador (lado direito do cabe?alho) ou bot?o direito no cabe?alho
+    - Clique no indicador (lado direito do cabecalho) ou botao direito no cabecalho
     """
     numeric_cols = set(numeric_cols or [])
     money_cols = set(money_cols or [])
@@ -6524,9 +6804,9 @@ def enable_treeview_sorting(tree: ttk.Treeview, numeric_cols=None, money_cols=No
 
         btns = ttk.Frame(frm)
         btns.grid(row=3, column=0, sticky="ew", pady=(8, 0))
-        ttk.Button(btns, text="✔ Aplicar", style="Primary.TButton", command=_apply_and_close).grid(row=0, column=0, padx=(0, 6))
-        ttk.Button(btns, text="🧹 Limpar coluna", style="Ghost.TButton", command=_clear_col_filter).grid(row=0, column=1, padx=6)
-        ttk.Button(btns, text="🧹 LIMPAR TUDO", style="Ghost.TButton", command=_clear_all_filters).grid(row=0, column=2, padx=6)
+        ttk.Button(btns, text="âœ” Aplicar", style="Primary.TButton", command=_apply_and_close).grid(row=0, column=0, padx=(0, 6))
+        ttk.Button(btns, text="ðÅ¸§¹ Limpar coluna", style="Ghost.TButton", command=_clear_col_filter).grid(row=0, column=1, padx=6)
+        ttk.Button(btns, text="ðÅ¸§¹ LIMPAR TUDO", style="Ghost.TButton", command=_clear_all_filters).grid(row=0, column=2, padx=6)
 
         search_var.trace_add("write", lambda *_: _fill_list())
         _fill_list()
@@ -6652,7 +6932,7 @@ def enable_treeview_sorting(tree: ttk.Treeview, numeric_cols=None, money_cols=No
 
 _CPF_DIGITS = re.compile(r"\D+")
 _PHONE_DIGITS = re.compile(r"\D+")
-_MOTORISTA_COD_RE = re.compile(r"^[A-Z0-9._-]{3,24}$")  # jÃ¡ normaliza em upper()
+_MOTORISTA_COD_RE = re.compile(r"^[A-Z0-9._-]{3,24}$")  # já normaliza em upper()
 
 def normalize_cpf(v: str) -> str:
     return _CPF_DIGITS.sub("", str(v or "").strip())
@@ -6660,7 +6940,7 @@ def normalize_cpf(v: str) -> str:
 def is_valid_cpf(cpf_digits: str) -> bool:
     """
     Validador de CPF (Brasil).
-    Aceita apenas 11 dÃ­gitos e verifica dÃ­gitos verificadores.
+    Aceita apenas 11 dÃÂÂgitos e verifica dÃÂÂgitos verificadores.
     """
     cpf = normalize_cpf(cpf_digits)
     if len(cpf) != 11:
@@ -6671,14 +6951,14 @@ def is_valid_cpf(cpf_digits: str) -> bool:
     try:
         nums = [int(x) for x in cpf]
 
-        # 1Âº dÃ­gito
+        # 1º dÃÂÂgito
         s1 = sum(nums[i] * (10 - i) for i in range(9))
         d1 = (s1 * 10) % 11
         d1 = 0 if d1 == 10 else d1
         if d1 != nums[9]:
             return False
 
-        # 2Âº dÃ­gito
+        # 2º dÃÂÂgito
         s2 = sum(nums[i] * (11 - i) for i in range(10))
         d2 = (s2 * 10) % 11
         d2 = 0 if d2 == 10 else d2
@@ -6691,11 +6971,11 @@ def is_valid_cpf(cpf_digits: str) -> bool:
 
 def normalize_phone(v: str) -> str:
     """
-    Normaliza telefone para dÃ­gitos.
+    Normaliza telefone para dÃÂÂgitos.
     Se vier com DDI 55 (Brasil), remove quando fizer sentido.
     """
     s = _PHONE_DIGITS.sub("", str(v or "").strip())
-    # remove 55 se vier com DDI e sobrar 10/11 dÃ­gitos
+    # remove 55 se vier com DDI e sobrar 10/11 dÃÂÂgitos
     if len(s) in (12, 13) and s.startswith("55"):
         s2 = s[2:]
         if len(s2) in (10, 11):
@@ -6724,18 +7004,18 @@ _SAFE_SQL_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 def _safe_ident(name: str) -> str:
     """
     Valida identificador SQL (tabela/coluna) para evitar SQL injection.
-    SQLite nÃ£o aceita parametrizar PRAGMA table_info(?)  entÃ£o validamos.
+    SQLite não aceita parametrizar PRAGMA table_info(?)  então validamos.
     """
     name = str(name or "").strip()
     if not _SAFE_SQL_IDENT.match(name):
-        raise ValueError(f"Identificador SQL invÃ¡lido: {name!r}")
+        raise ValueError(f"Identificador SQL inválido: {name!r}")
     return name
 
 
 def db_has_column(cur, table_name: str, column_name: str) -> bool:
     """
     Verifica se uma coluna existe numa tabela (SQLite).
-    SeguranÃ§a: nÃ£o altera nada, sÃ³ consulta PRAGMA.
+    Segurança: não altera nada, só consulta PRAGMA.
     """
     try:
         table_name = _safe_ident(table_name)
@@ -6749,9 +7029,37 @@ def db_has_column(cur, table_name: str, column_name: str) -> bool:
 
 def fetch_programacoes_ativas(limit: int = 400):
     """
-    Retorna lista de programaÃ§Ãµes ATIVAS (compatÃ­vel com bases antigas e novas).
-    SaÃ­da: lista de dicts: {codigo, motorista, veiculo, equipe, data_criacao, status}
+    Retorna lista de programações ATIVAS (compatÃÂÂvel com bases antigas e novas).
+    SaÃÂÂda: lista de dicts: {codigo, motorista, veiculo, equipe, data_criacao, status}
     """
+    desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+    if desktop_secret and is_desktop_api_sync_enabled():
+        try:
+            resp = _call_api(
+                "GET",
+                "desktop/overview",
+                extra_headers={"X-Desktop-Secret": desktop_secret},
+            )
+            api_rows = resp.get("rotas") if isinstance(resp, dict) else []
+            out_api = []
+            for r in (api_rows or [])[: max(int(limit or 0), 1)]:
+                if not isinstance(r, dict):
+                    continue
+                out_api.append(
+                    {
+                        "codigo": upper(r.get("codigo_programacao") or ""),
+                        "motorista": upper(r.get("motorista") or ""),
+                        "veiculo": upper(r.get("veiculo") or ""),
+                        "equipe": upper(r.get("equipe") or ""),
+                        "data_criacao": str(r.get("data_criacao") or ""),
+                        "status": upper(r.get("status_operacional") or r.get("status") or "ATIVA"),
+                    }
+                )
+            if out_api:
+                return out_api
+        except Exception:
+            logging.debug("Falha ao buscar programacoes ativas na API", exc_info=True)
+
     try:
         equipes_map = {}
         with get_db() as conn:
@@ -6778,7 +7086,7 @@ def fetch_programacoes_ativas(limit: int = 400):
                         LIMIT ?
                     """, (limit,))
             else:
-                # base antiga sem status: pega as Ãºltimas como "ativas"
+                # base antiga sem status: pega as últimas como "ativas"
                 if has_data:
                     cur.execute("""
                         SELECT codigo_programacao, motorista, veiculo, equipe, data_criacao, 'ATIVA' as status
@@ -6854,6 +7162,50 @@ def fetch_programacao_itens(codigo_programacao: str, limit: int = 8000):
     codigo_programacao = upper(str(codigo_programacao or "").strip())
     if not codigo_programacao:
         return []
+
+    desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+    if desktop_secret and is_desktop_api_sync_enabled():
+        try:
+            resp = _call_api(
+                "GET",
+                f"desktop/rotas/{urllib.parse.quote(codigo_programacao)}",
+                extra_headers={"X-Desktop-Secret": desktop_secret},
+            )
+            clientes = resp.get("clientes") if isinstance(resp, dict) else []
+            out_api = []
+            for d in (clientes or [])[: max(int(limit or 0), 1)]:
+                if not isinstance(d, dict):
+                    continue
+                out_api.append(
+                    {
+                        "cod_cliente": str(d.get("cod_cliente") or "").strip().upper(),
+                        "nome_cliente": str(d.get("nome_cliente") or "").strip().upper(),
+                        "endereco": str(d.get("endereco") or "").strip().upper(),
+                        "produto": str(d.get("produto") or "").strip().upper(),
+                        "qnt_caixas": safe_int(d.get("qnt_caixas"), 0),
+                        "kg": safe_float(d.get("kg"), 0.0),
+                        "preco": safe_float(d.get("preco"), 0.0),
+                        "vendedor": str(d.get("vendedor") or "").strip().upper(),
+                        "pedido": str(d.get("pedido") or "").strip().upper(),
+                        "obs": str(d.get("obs") or d.get("observacao") or "").strip(),
+                        "status_pedido": str(d.get("status_pedido") or "PENDENTE").strip().upper(),
+                        "caixas_atual": safe_int(d.get("caixas_atual"), 0),
+                        "preco_atual": safe_float(d.get("preco_atual"), 0.0),
+                        "alterado_em": str(d.get("alterado_em") or "").strip(),
+                        "alterado_por": str(d.get("alterado_por") or "").strip().upper(),
+                        "mortalidade_aves": safe_int(d.get("mortalidade_aves"), 0),
+                        "peso_previsto": safe_float(d.get("peso_previsto"), 0.0),
+                        "valor_recebido": safe_float(d.get("valor_recebido"), 0.0),
+                        "forma_recebimento": str(d.get("forma_recebimento") or "").strip().upper(),
+                        "obs_recebimento": str(d.get("obs_recebimento") or "").strip(),
+                        "alteracao_tipo": str(d.get("alteracao_tipo") or "").strip().upper(),
+                        "alteracao_detalhe": str(d.get("alteracao_detalhe") or "").strip(),
+                    }
+                )
+            if out_api:
+                return out_api
+        except Exception:
+            logging.debug("Falha ao buscar itens da programacao na API", exc_info=True)
 
     try:
         with get_db() as conn:
@@ -6990,7 +7342,7 @@ def fetch_programacao_itens(codigo_programacao: str, limit: int = 8000):
 
 def format_prog_display(p: dict) -> str:
     """
-    Formata texto amigÃ¡vel p/ lista/combobox sem quebrar.
+    Formata texto amigável p/ lista/combobox sem quebrar.
     Ex: "ABC123 (2026-01-18) - JOAO - ABC1D23"
     """
     try:
@@ -7008,12 +7360,15 @@ def format_prog_display(p: dict) -> str:
 # ===== FIM DA PARTE X (FINAL) =====
 # ==========================
 
+# Compatibilidade: o fluxo "Programacao" usa a mesma tela de "Rotas".
+ProgramacaoPage = RotasPage
+
 # ==========================
 # ===== INCIO DA PARTE 3 (FINAL / SEM DUPLICIDADE) =====
 # ==========================
 
 # =========================================================
-# 3.0.1 CLIENTES (IMPORTAÃ‡ÃƒO + EDIÃ‡ÃƒO DIRETA NA TABELA)
+# 3.0.1 CLIENTES (IMPORTAÇÃO + EDIÇÃO DIRETA NA TABELA)
 # =========================================================
 class ClientesImportPage(ttk.Frame):
     def __init__(self, parent, app):
@@ -7032,28 +7387,28 @@ class ClientesImportPage(ttk.Frame):
         actions.grid(row=1, column=0, sticky="ew", pady=(12, 10))
         actions.grid_columnconfigure(10, weight=1)
 
-        ttk.Button(actions, text="📥 IMPORTAR CLIENTES (EXCEL)", style="Warn.TButton",
+        ttk.Button(actions, text="ðÅ¸â€œ¥ IMPORTAR CLIENTES (EXCEL)", style="Warn.TButton",
                    command=self.importar_clientes_excel).grid(row=0, column=0, padx=6)
 
-        ttk.Button(actions, text="🔄 ATUALIZAR", style="Ghost.TButton",
+        ttk.Button(actions, text="ðŸ”„ ATUALIZAR", style="Ghost.TButton",
                    command=self.carregar).grid(row=0, column=1, padx=6)
 
-        ttk.Button(actions, text="➕ INSERIR LINHA", style="Ghost.TButton",
+        ttk.Button(actions, text="âÅ¾â€¢ INSERIR LINHA", style="Ghost.TButton",
                    command=self.inserir_linha).grid(row=0, column=2, padx=6)
 
-        ttk.Button(actions, text="SALVAR ALTERAÃ‡Ã•ES", style="Primary.TButton",
+        ttk.Button(actions, text="SALVAR ALTERAÇÕES", style="Primary.TButton",
                    command=self.salvar_alteracoes).grid(row=0, column=3, padx=6)
 
         self.lbl_info = ttk.Label(
             actions,
-            text="Dica: duplo clique na cÃ©lula para editar. ENTER salva a cÃ©lula. ESC cancela.",
+            text="Dica: duplo clique na célula para editar. ENTER salva a célula. ESC cancela.",
             background="white",
             foreground="#6B7280",
             font=("Segoe UI", 8, "bold")
         )
         self.lbl_info.grid(row=0, column=4, padx=12, sticky="w")
 
-        cols = ["CÃ“D CLIENTE", "NOME CLIENTE", "ENDEREÃ‡O", "TELEFONE", "VENDEDOR"]
+        cols = ["CÓD CLIENTE", "NOME CLIENTE", "ENDEREÇO", "TELEFONE", "VENDEDOR"]
         table_wrap = ttk.Frame(card, style="Card.TFrame")
         table_wrap.grid(row=2, column=0, sticky="nsew")
         table_wrap.grid_columnconfigure(0, weight=1)
@@ -7074,17 +7429,17 @@ class ClientesImportPage(ttk.Frame):
             self.tree.heading(c, text=c)
             self.tree.column(c, width=190, minwidth=120, anchor="w")
 
-        self.tree.column("ENDEREÃ‡O", width=420, minwidth=200)
+        self.tree.column("ENDEREÇO", width=420, minwidth=200)
         self.tree.bind("<Double-1>", self._start_edit_cell)
 
         enable_treeview_sorting(
             self.tree,
-            numeric_cols={"CÃ“D CLIENTE"},
+            numeric_cols={"CÓD CLIENTE"},
             money_cols=set(),
             date_cols=set()
         )
 
-        # Se rolar o tree durante ediÃ§Ã£o, fecha/commita corretamente
+        # Se rolar o tree durante edição, fecha/commita corretamente
         self.tree.bind("<MouseWheel>", self._on_tree_scroll, add=True)
         self.tree.bind("<Button-4>", self._on_tree_scroll, add=True)  # linux
         self.tree.bind("<Button-5>", self._on_tree_scroll, add=True)  # linux
@@ -7130,15 +7485,40 @@ class ClientesImportPage(ttk.Frame):
         )
 
     def carregar(self):
-        with get_db() as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT cod_cliente, nome_cliente, endereco, telefone, vendedor
-                FROM clientes
-                ORDER BY nome_cliente ASC
-                LIMIT 5000
-            """)
-            rows = cur.fetchall()
+        rows = []
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                resp = _call_api(
+                    "GET",
+                    "desktop/clientes/base?ordem=nome&limit=5000",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                if isinstance(resp, list):
+                    rows = [
+                        (
+                            str(r.get("cod_cliente") or ""),
+                            str(r.get("nome_cliente") or ""),
+                            str(r.get("endereco") or ""),
+                            str(r.get("telefone") or ""),
+                            str(r.get("vendedor") or ""),
+                        )
+                        for r in resp
+                        if isinstance(r, dict)
+                    ]
+            except Exception:
+                logging.debug("Falha ao carregar clientes via API; usando fallback local.", exc_info=True)
+
+        if not rows:
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT cod_cliente, nome_cliente, endereco, telefone, vendedor
+                    FROM clientes
+                    ORDER BY nome_cliente ASC
+                    LIMIT 5000
+                """)
+                rows = cur.fetchall()
 
         self.tree.delete(*self.tree.get_children())
 
@@ -7227,12 +7607,14 @@ class ClientesImportPage(ttk.Frame):
         self._editing = None
 
     def salvar_alteracoes(self):
+        if not ensure_system_api_binding(context="Salvar alteracoes de clientes", parent=self):
+            return
         if self._editing:
             self._commit_edit()
 
         items = self.tree.get_children()
         if not items:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "NÃ£o hÃ¡ dados para salvar.")
+            messagebox.showwarning("ATENÇÃO", "Não há dados para salvar.")
             return
 
         linhas = []
@@ -7248,41 +7630,51 @@ class ClientesImportPage(ttk.Frame):
             nome_norm = str(nome or "").strip()
 
             if not cod_norm or not nome_norm:
-                messagebox.showwarning("ATENÃ‡ÃƒO", "Todas as linhas precisam ter pelo menos CÃ“D CLIENTE e NOME CLIENTE.")
+                messagebox.showwarning("ATENÇÃO", "Todas as linhas precisam ter pelo menos CÓD CLIENTE e NOME CLIENTE.")
                 return
 
             cod_key = upper(cod_norm)
             if cod_key in cods_seen:
-                messagebox.showwarning("ATENÃ‡ÃƒO", f"CÃ“D CLIENTE duplicado na tabela: {cod_norm}\n\nCorrija antes de salvar.")
+                messagebox.showwarning("ATENÇÃO", f"CÓD CLIENTE duplicado na tabela: {cod_norm}\n\nCorrija antes de salvar.")
                 return
             cods_seen.add(cod_key)
 
             linhas.append((upper(cod_norm), upper(nome_norm), upper(endereco), upper(telefone), upper(vendedor)))
 
         if not linhas:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Nenhuma linha vÃ¡lida para salvar.")
+            messagebox.showwarning("ATENÇÃO", "Nenhuma linha válida para salvar.")
             return
 
         total = 0
         sync_falhas = 0
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        api_mode = bool(desktop_secret and is_desktop_api_sync_enabled())
         try:
-            with get_db() as conn:
-                cur = conn.cursor()
+            if api_mode:
                 for cod, nome, endereco, telefone, vendedor in linhas:
-                    cur.execute("""
-                        INSERT INTO clientes (cod_cliente, nome_cliente, endereco, telefone, vendedor)
-                        VALUES (?, ?, ?, ?, ?)
-                        ON CONFLICT(cod_cliente) DO UPDATE SET
-                            nome_cliente=excluded.nome_cliente,
-                            endereco=excluded.endereco,
-                            telefone=excluded.telefone,
-                            vendedor=excluded.vendedor
-                    """, (cod, nome, endereco, telefone, vendedor))
-                    total += 1
                     try:
                         self._sync_cliente_upsert_api(cod, nome, endereco, telefone, vendedor)
+                        total += 1
                     except Exception:
                         sync_falhas += 1
+            else:
+                with get_db() as conn:
+                    cur = conn.cursor()
+                    for cod, nome, endereco, telefone, vendedor in linhas:
+                        cur.execute("""
+                            INSERT INTO clientes (cod_cliente, nome_cliente, endereco, telefone, vendedor)
+                            VALUES (?, ?, ?, ?, ?)
+                            ON CONFLICT(cod_cliente) DO UPDATE SET
+                                nome_cliente=excluded.nome_cliente,
+                                endereco=excluded.endereco,
+                                telefone=excluded.telefone,
+                                vendedor=excluded.vendedor
+                        """, (cod, nome, endereco, telefone, vendedor))
+                        total += 1
+                        try:
+                            self._sync_cliente_upsert_api(cod, nome, endereco, telefone, vendedor)
+                        except Exception:
+                            sync_falhas += 1
 
             msg = f"Clientes salvos/atualizados: {total}"
             if sync_falhas:
@@ -7295,6 +7687,8 @@ class ClientesImportPage(ttk.Frame):
         self.carregar()
 
     def importar_clientes_excel(self):
+        if not ensure_system_api_binding(context="Importar clientes via planilha", parent=self):
+            return
         path = filedialog.askopenfilename(
             title="IMPORTAR CLIENTES (EXCEL)",
             filetypes=[("Excel", "*.xls *.xlsx")]
@@ -7308,9 +7702,9 @@ class ClientesImportPage(ttk.Frame):
         try:
             df = pd.read_excel(path, engine=excel_engine_for(path))
 
-            col_cod = guess_col(df.columns, ["cod", "cÃ³d", "codigo", "cliente", "cod cliente"])
+            col_cod = guess_col(df.columns, ["cod", "cód", "codigo", "cliente", "cod cliente"])
             col_nome = guess_col(df.columns, ["nome", "cliente"])
-            col_end = guess_col(df.columns, ["endereco", "endereÃ§o", "rua", "logradouro"])
+            col_end = guess_col(df.columns, ["endereco", "endereço", "rua", "logradouro"])
             col_tel = guess_col(df.columns, ["telefone", "fone", "celular", "contato"])
             col_vendedor = guess_col(df.columns, ["vendedor", "vend", "representante"])
 
@@ -7326,8 +7720,9 @@ class ClientesImportPage(ttk.Frame):
 
             total = 0
             sync_falhas = 0
-            with get_db() as conn:
-                cur = conn.cursor()
+            desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+            api_mode = bool(desktop_secret and is_desktop_api_sync_enabled())
+            if api_mode:
                 for _, r in df.iterrows():
                     cod = str(r.get(col_cod, "")).strip()
                     nome = str(r.get(col_nome, "")).strip()
@@ -7337,21 +7732,38 @@ class ClientesImportPage(ttk.Frame):
                     endereco = str(r.get(col_end, "")).strip() if col_end else ""
                     telefone = str(r.get(col_tel, "")).strip() if col_tel else ""
                     vendedor = str(r.get(col_vendedor, "")).strip() if col_vendedor else ""
-
-                    cur.execute("""
-                        INSERT INTO clientes (cod_cliente, nome_cliente, endereco, telefone, vendedor)
-                        VALUES (?, ?, ?, ?, ?)
-                        ON CONFLICT(cod_cliente) DO UPDATE SET
-                            nome_cliente=excluded.nome_cliente,
-                            endereco=excluded.endereco,
-                            telefone=excluded.telefone,
-                            vendedor=excluded.vendedor
-                    """, (upper(cod), upper(nome), upper(endereco), upper(telefone), upper(vendedor)))
-                    total += 1
                     try:
                         self._sync_cliente_upsert_api(cod, nome, endereco, telefone, vendedor)
+                        total += 1
                     except Exception:
                         sync_falhas += 1
+            else:
+                with get_db() as conn:
+                    cur = conn.cursor()
+                    for _, r in df.iterrows():
+                        cod = str(r.get(col_cod, "")).strip()
+                        nome = str(r.get(col_nome, "")).strip()
+                        if not cod or not nome:
+                            continue
+
+                        endereco = str(r.get(col_end, "")).strip() if col_end else ""
+                        telefone = str(r.get(col_tel, "")).strip() if col_tel else ""
+                        vendedor = str(r.get(col_vendedor, "")).strip() if col_vendedor else ""
+
+                        cur.execute("""
+                            INSERT INTO clientes (cod_cliente, nome_cliente, endereco, telefone, vendedor)
+                            VALUES (?, ?, ?, ?, ?)
+                            ON CONFLICT(cod_cliente) DO UPDATE SET
+                                nome_cliente=excluded.nome_cliente,
+                                endereco=excluded.endereco,
+                                telefone=excluded.telefone,
+                                vendedor=excluded.vendedor
+                        """, (upper(cod), upper(nome), upper(endereco), upper(telefone), upper(vendedor)))
+                        total += 1
+                        try:
+                            self._sync_cliente_upsert_api(cod, nome, endereco, telefone, vendedor)
+                        except Exception:
+                            sync_falhas += 1
 
             msg = f"CLIENTES IMPORTADOS/ATUALIZADOS: {total}"
             if sync_falhas:
@@ -7398,13 +7810,13 @@ class CadastrosPage(PageBase):
         frm_usuarios = ttk.Frame(nb, style="Content.TFrame")
         crud_usuarios = CadastroCRUD(
             frm_usuarios,
-            "UsuÃ¡rios",
+            "Usuários",
             "usuarios",
             [
                 ("nome", "NOME"),
                 ("codigo", "CODIGO"),
                 ("senha", "SENHA"),
-                ("permissoes", "PERMISSÃ•ES"),
+                ("permissoes", "PERMISSÕES"),
                 ("cpf", "CPF"),
                 
                 ("telefone", "TELEFONE"),
@@ -7412,12 +7824,12 @@ class CadastrosPage(PageBase):
             app=app
         )
         crud_usuarios.pack(fill="both", expand=True)
-        nb.add(frm_usuarios, text="UsuÃ¡rios")
+        nb.add(frm_usuarios, text="Usuários")
 
         frm_veiculos = ttk.Frame(nb, style="Content.TFrame")
         crud_veiculos = CadastroCRUD(
             frm_veiculos,
-            "VeÃ­culos",
+            "VeÃÂÂculos",
             "veiculos",
             [
                 ("placa", "PLACA"),
@@ -7428,7 +7840,7 @@ class CadastrosPage(PageBase):
             app=app
         )
         crud_veiculos.pack(fill="both", expand=True)
-        nb.add(frm_veiculos, text="VeÃ­culos")
+        nb.add(frm_veiculos, text="VeÃÂÂculos")
 
         frm_ajudantes = ttk.Frame(nb, style="Content.TFrame")
         crud_ajudantes = CadastroCRUD(
@@ -7464,7 +7876,7 @@ class CadastrosPage(PageBase):
 # ==========================
 
 # =========================================================
-# 4.0 IMPORTAÃ‡ÃƒO DE VENDAS
+# 4.0 IMPORTAÇÃO DE VENDAS
 # =========================================================
 class ImportarVendasPage(PageBase):
     def __init__(self, parent, app):
@@ -7474,13 +7886,13 @@ class ImportarVendasPage(PageBase):
         top.grid(row=0, column=0, sticky="ew")
         top.grid_columnconfigure(3, weight=1)
 
-        ttk.Button(top, text="📥 IMPORTAR EXCEL", style="Primary.TButton", command=self.importar_excel).grid(row=0, column=0, padx=6)
-        ttk.Button(top, text="🧹 LIMPAR TUDO", style="Danger.TButton", command=self.limpar_tudo).grid(row=0, column=1, sticky="w", padx=6)
-        ttk.Button(top, text="🔄 ATUALIZAR", style="Ghost.TButton", command=self.carregar).grid(row=0, column=2, padx=6)
+        ttk.Button(top, text="ðÅ¸â€œ¥ IMPORTAR EXCEL", style="Primary.TButton", command=self.importar_excel).grid(row=0, column=0, padx=6)
+        ttk.Button(top, text="ðÅ¸§¹ LIMPAR TUDO", style="Danger.TButton", command=self.limpar_tudo).grid(row=0, column=1, sticky="w", padx=6)
+        ttk.Button(top, text="ðŸ”„ ATUALIZAR", style="Ghost.TButton", command=self.carregar).grid(row=0, column=2, padx=6)
 
         self.lbl_info = ttk.Label(
             top,
-            text="Selecione as vendas que irÃ£o para ProgramaÃ§Ã£o (duplo clique marca/desmarca).",
+            text="Selecione as vendas que irão para Programação (duplo clique marca/desmarca).",
             background="#F4F6FB",
             foreground="#6B7280",
             font=("Segoe UI", 8, "bold")
@@ -7503,11 +7915,11 @@ class ImportarVendasPage(PageBase):
         self.ent_busca.grid(row=0, column=1, sticky="ew", padx=6)
         self.ent_busca.bind("<Return>", lambda e: self.carregar())
 
-        ttk.Button(filt, text="🔎 FILTRAR", style="Ghost.TButton", command=self.carregar).grid(row=0, column=2, padx=6)
-        ttk.Button(filt, text="✅ MARCAR", style="Primary.TButton", command=self.marcar_selecionadas).grid(row=0, column=3, padx=6)
+        ttk.Button(filt, text="ðŸ”Ž FILTRAR", style="Ghost.TButton", command=self.carregar).grid(row=0, column=2, padx=6)
+        ttk.Button(filt, text="âÅ“â€¦ MARCAR", style="Primary.TButton", command=self.marcar_selecionadas).grid(row=0, column=3, padx=6)
 
-        ttk.Button(filt, text="✅ MARCAR TODOS", style="Warn.TButton", command=lambda: self.set_all_selected(1)).grid(row=0, column=4, padx=6)
-        ttk.Button(filt, text="☑ DESMARCAR TODOS", style="Ghost.TButton", command=lambda: self.set_all_selected(0)).grid(row=0, column=5, padx=6)
+        ttk.Button(filt, text="âÅ“â€¦ MARCAR TODOS", style="Warn.TButton", command=lambda: self.set_all_selected(1)).grid(row=0, column=4, padx=6)
+        ttk.Button(filt, text="âËœâ€˜ DESMARCAR TODOS", style="Ghost.TButton", command=lambda: self.set_all_selected(0)).grid(row=0, column=5, padx=6)
 
         # Tabela (com scroll horizontal)
         cols = ["ID", "SEL", "PEDIDO", "DATA", "CLIENTE", "NOME COMPLETO", "PRODUTO", "VR TOTAL", "QNT", "CIDADE", "VENDEDOR"]
@@ -7552,11 +7964,11 @@ class ImportarVendasPage(PageBase):
         self.carregar()
 
     def on_show(self):
-        self.set_status("STATUS: ImportaÃ§Ã£o e seleÃ§Ã£o de vendas para programaÃ§Ã£o.")
+        self.set_status("STATUS: Importação e seleção de vendas para programação.")
         self.carregar()
 
     # -------------------------
-    # Helpers seguranÃ§a/normalizaÃ§Ã£o
+    # Helpers segurança/normalização
     # -------------------------
     def _norm(self, v):
         return upper(str(v or "").strip())
@@ -7592,7 +8004,7 @@ class ImportarVendasPage(PageBase):
 
     def _normalize_data_venda(self, v):
         """
-        Normaliza data da venda para chave estável (YYYY-MM-DD quando possível).
+        Normaliza data da venda para chave estável (YYYY-MM-DD quando possÃÂvel).
         Evita duplicidade falsa por diferença de formato no Excel.
         """
         raw = self._excel_text(v)
@@ -7604,7 +8016,10 @@ class ImportarVendasPage(PageBase):
         return raw
 
     def _ensure_vendas_usada_cols(self):
-        """Garante colunas para evitar reutilizaÃ§Ã£o (nÃ£o quebra bases antigas)."""
+        """Garante colunas para evitar reutilização (não quebra bases antigas)."""
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            return
         try:
             with get_db() as conn:
                 cur = conn.cursor()
@@ -7645,8 +8060,6 @@ class ImportarVendasPage(PageBase):
             col_vend = guess_col(df.columns, ["nome do vendedor", "vendedor", "vend"])
             col_obs = guess_col(df.columns, ["obs", "observ", "observacao"])
 
-            # Exige apenas o nucleo obrigatorio; demais campos sao opcionais.
-            # Isso permite importar arquivos com colunas extras/faltantes sem quebrar.
             missing = []
             if not col_pedido:
                 missing.append("Numero Pedido")
@@ -7660,7 +8073,6 @@ class ImportarVendasPage(PageBase):
                 missing.append("Vr. Total")
             if not col_qnt:
                 missing.append("Qnt.")
-
             if missing:
                 messagebox.showerror("ERRO", "Nao identifiquei as colunas: " + ", ".join(missing))
                 return
@@ -7678,91 +8090,115 @@ class ImportarVendasPage(PageBase):
             total = 0
             ignoradas = 0
             ignoradas_invalidas = 0
+            payload_rows = []
 
             self._ensure_vendas_usada_cols()
 
-            with get_db() as conn:
-                cur = conn.cursor()
+            for _, r in df.iterrows():
+                pedido = self._clean_pedido(r.get(col_pedido, ""))
+                if self._is_invalid_token(pedido):
+                    ignoradas_invalidas += 1
+                    continue
 
-                for _, r in df.iterrows():
-                    pedido = self._clean_pedido(r.get(col_pedido, ""))
-                    if self._is_invalid_token(pedido):
-                        ignoradas_invalidas += 1
-                        continue
+                data_venda = self._normalize_data_venda(r.get(col_data, "")) if col_data else ""
+                cliente = self._excel_text(r.get(col_cliente, ""))
+                nome_cliente = self._excel_text(r.get(col_nome, "")) if col_nome else ""
+                vendedor = self._excel_text(r.get(col_vend, "")) if col_vend else ""
+                produto = self._excel_text(r.get(col_prod, "")) if col_prod else ""
+                vr_total = safe_float(r.get(col_vr_total, 0)) if col_vr_total else 0.0
+                qnt = safe_float(r.get(col_qnt, 0)) if col_qnt else 0.0
+                cidade = self._excel_text(r.get(col_cidade, "")) if col_cidade else ""
+                valor_unit = (vr_total / qnt) if qnt else 0.0
+                obs = self._excel_text(r.get(col_obs, "")) if col_obs else ""
 
-                    # Campos opcionais com fallback seguro
-                    data_venda = self._normalize_data_venda(r.get(col_data, "")) if col_data else ""
-                    cliente = self._excel_text(r.get(col_cliente, ""))
+                pedido_u = self._norm(pedido)
+                cliente_u = self._norm(cliente)
+                produto_u = self._norm(produto)
+                nome_u = self._norm(nome_cliente)
+                if (not pedido_u) or (not cliente_u) or (not nome_u) or (not produto_u):
+                    ignoradas_invalidas += 1
+                    continue
 
-                    nome_cliente = self._excel_text(r.get(col_nome, "")) if col_nome else ""
-                    vendedor = self._excel_text(r.get(col_vend, "")) if col_vend else ""
-                    produto = self._excel_text(r.get(col_prod, "")) if col_prod else ""
-                    vr_total = safe_float(r.get(col_vr_total, 0)) if col_vr_total else 0.0
-                    qnt = safe_float(r.get(col_qnt, 0)) if col_qnt else 0.0
-                    cidade = self._excel_text(r.get(col_cidade, "")) if col_cidade else ""
-                    valor_unit = (vr_total / qnt) if qnt else 0.0
-                    obs = self._excel_text(r.get(col_obs, "")) if col_obs else ""
+                payload_rows.append(
+                    {
+                        "pedido": pedido_u,
+                        "data_venda": data_venda,
+                        "cliente": cliente_u,
+                        "nome_cliente": nome_u,
+                        "vendedor": self._norm(vendedor),
+                        "produto": produto_u,
+                        "vr_total": float(vr_total or 0),
+                        "qnt": float(qnt or 0),
+                        "cidade": self._norm(cidade),
+                        "valor_unitario": float(valor_unit or 0),
+                        "observacao": self._norm(obs),
+                    }
+                )
 
-                    # âœ… Chave natural para evitar duplicidade (sem mexer no banco)
-                    pedido_u = self._norm(pedido)
-                    cliente_u = self._norm(cliente)
-                    produto_u = self._norm(produto)
-                    nome_u = self._norm(nome_cliente)
-
-                    # Proteção extra: bloqueia importação de linhas corrompidas (NaN/NaT)
-                    if (not pedido_u) or (not cliente_u) or (not nome_u) or (not produto_u):
-                        ignoradas_invalidas += 1
-                        continue
-
-                    try:
+            desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+            if desktop_secret and is_desktop_api_sync_enabled():
+                resp = _call_api(
+                    "POST",
+                    "desktop/vendas-importadas/importar",
+                    payload={"rows": payload_rows},
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                total = safe_int((resp or {}).get("importadas"), 0)
+                ignoradas += safe_int((resp or {}).get("ignoradas"), 0)
+            else:
+                with get_db() as conn:
+                    cur = conn.cursor()
+                    for row in payload_rows:
+                        data_venda = str(row.get("data_venda") or "")
+                        pedido_u = str(row.get("pedido") or "")
+                        cliente_u = str(row.get("cliente") or "")
+                        produto_u = str(row.get("produto") or "")
+                        try:
+                            cur.execute("""
+                                SELECT 1
+                                FROM vendas_importadas
+                                WHERE UPPER(TRIM(COALESCE(pedido,'')))=UPPER(TRIM(?))
+                                  AND UPPER(TRIM(COALESCE(cliente,'')))=UPPER(TRIM(?))
+                                  AND UPPER(TRIM(COALESCE(produto,'')))=UPPER(TRIM(?))
+                                  AND COALESCE(TRIM(data_venda),'')=COALESCE(TRIM(?),'')
+                                LIMIT 1
+                            """, (pedido_u, cliente_u, produto_u, data_venda))
+                            exists = cur.fetchone()
+                        except Exception:
+                            exists = None
+                        if exists:
+                            ignoradas += 1
+                            continue
                         cur.execute("""
-                            SELECT 1
-                            FROM vendas_importadas
-                            WHERE UPPER(TRIM(COALESCE(pedido,'')))=UPPER(TRIM(?))
-                              AND UPPER(TRIM(COALESCE(cliente,'')))=UPPER(TRIM(?))
-                              AND UPPER(TRIM(COALESCE(produto,'')))=UPPER(TRIM(?))
-                              AND COALESCE(TRIM(data_venda),'')=COALESCE(TRIM(?),'')
-                            LIMIT 1
-                        """, (pedido_u, cliente_u, produto_u, data_venda))
-                        exists = cur.fetchone()
-                    except Exception:
-                        exists = None  # se schema mudar, nÃ£o bloqueia importaÃ§Ã£o
-
-                    if exists:
-                        ignoradas += 1
-                        continue
-
-                    # âœ… Insere como NÃƒO usada por padrÃ£o
-                    cur.execute("""
-                        INSERT INTO vendas_importadas
-                        (pedido, data_venda, cliente, nome_cliente, vendedor, produto, vr_total, qnt, cidade, valor_unitario, observacao, selecionada, usada, usada_em, codigo_programacao)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, '', '')
-                    """, (
-                        pedido_u,
-                        data_venda,
-                        cliente_u,
-                        nome_u,
-                        self._norm(vendedor),
-                        produto_u,
-                        float(vr_total or 0),
-                        float(qnt or 0),
-                        self._norm(cidade),
-                        float(valor_unit or 0),
-                        self._norm(obs),
-                    ))
-                    total += 1
+                            INSERT INTO vendas_importadas
+                            (pedido, data_venda, cliente, nome_cliente, vendedor, produto, vr_total, qnt, cidade, valor_unitario, observacao, selecionada, usada, usada_em, codigo_programacao)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, '', '')
+                        """, (
+                            pedido_u,
+                            data_venda,
+                            cliente_u,
+                            str(row.get("nome_cliente") or ""),
+                            str(row.get("vendedor") or ""),
+                            produto_u,
+                            float(row.get("vr_total") or 0),
+                            float(row.get("qnt") or 0),
+                            str(row.get("cidade") or ""),
+                            float(row.get("valor_unitario") or 0),
+                            str(row.get("observacao") or ""),
+                        ))
+                        total += 1
 
             msg = f"Vendas importadas: {total}"
             if ignoradas:
-                msg += f"\nIgnoradas (duplicadas/invÃ¡lidas): {ignoradas}"
+                msg += f"\nIgnoradas (duplicadas/invalidas): {ignoradas}"
             if ignoradas_invalidas:
-                msg += f"\nIgnoradas (linhas inválidas/NaN): {ignoradas_invalidas}"
+                msg += f"\nIgnoradas (linhas invalidas/NaN): {ignoradas_invalidas}"
 
             if hasattr(self, "ent_busca"):
                 try:
                     self.ent_busca.delete(0, "end")
                 except Exception:
-                    logging.debug("Falha ao limpar busca apÃ³s importaÃ§Ã£o")
+                    logging.debug("Falha ao limpar busca ap?s importa??o")
 
             if opcionais_ausentes:
                 msg += "\nCampos opcionais nao encontrados (preenchidos em branco): " + ", ".join(opcionais_ausentes)
@@ -7777,27 +8213,61 @@ class ImportarVendasPage(PageBase):
         self._ensure_vendas_usada_cols()
 
         busca = self._norm(self.ent_busca.get()) if hasattr(self, "ent_busca") else ""
+        rows = []
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                path = f"desktop/vendas-importadas?limit=5000"
+                if busca:
+                    path += f"&busca={urllib.parse.quote(busca)}"
+                resp = _call_api(
+                    "GET",
+                    path,
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                rows_api = resp.get("rows") if isinstance(resp, dict) else []
+                if isinstance(rows_api, list):
+                    rows = [
+                        (
+                            safe_int(r.get("id"), 0),
+                            safe_int(r.get("selecionada"), 0),
+                            r.get("pedido"),
+                            r.get("data_venda"),
+                            r.get("cliente"),
+                            r.get("nome_cliente"),
+                            r.get("produto"),
+                            safe_float(r.get("vr_total"), 0.0),
+                            safe_float(r.get("qnt"), 0.0),
+                            r.get("cidade"),
+                            r.get("vendedor"),
+                        )
+                        for r in rows_api
+                        if isinstance(r, dict)
+                    ]
+            except Exception:
+                logging.debug("Falha ao carregar vendas importadas via API; usando fallback local.", exc_info=True)
 
-        with get_db() as conn:
-            cur = conn.cursor()
-            if busca:
-                cur.execute("""
-                    SELECT id, selecionada, pedido, data_venda, cliente, nome_cliente, produto, vr_total, qnt, cidade, vendedor
-                    FROM vendas_importadas
-                    WHERE (IFNULL(usada,0)=0)
-                      AND (
-                        pedido LIKE ? OR cliente LIKE ? OR nome_cliente LIKE ? OR vendedor LIKE ? OR produto LIKE ?
-                      )
-                    ORDER BY id DESC
-                """, (f"%{busca}%", f"%{busca}%", f"%{busca}%", f"%{busca}%", f"%{busca}%"))
-            else:
-                cur.execute("""
-                    SELECT id, selecionada, pedido, data_venda, cliente, nome_cliente, produto, vr_total, qnt, cidade, vendedor
-                    FROM vendas_importadas
-                    WHERE (IFNULL(usada,0)=0)
-                    ORDER BY id DESC
-                """)
-            rows = cur.fetchall() or []
+        if not rows:
+            with get_db() as conn:
+                cur = conn.cursor()
+                if busca:
+                    cur.execute("""
+                        SELECT id, selecionada, pedido, data_venda, cliente, nome_cliente, produto, vr_total, qnt, cidade, vendedor
+                        FROM vendas_importadas
+                        WHERE (IFNULL(usada,0)=0)
+                          AND (
+                            pedido LIKE ? OR cliente LIKE ? OR nome_cliente LIKE ? OR vendedor LIKE ? OR produto LIKE ?
+                          )
+                        ORDER BY id DESC
+                    """, (f"%{busca}%", f"%{busca}%", f"%{busca}%", f"%{busca}%", f"%{busca}%"))
+                else:
+                    cur.execute("""
+                        SELECT id, selecionada, pedido, data_venda, cliente, nome_cliente, produto, vr_total, qnt, cidade, vendedor
+                        FROM vendas_importadas
+                        WHERE (IFNULL(usada,0)=0)
+                        ORDER BY id DESC
+                    """)
+                rows = cur.fetchall() or []
 
         self.tree.delete(*self.tree.get_children())
 
@@ -7808,7 +8278,6 @@ class ImportarVendasPage(PageBase):
             if selecionada:
                 selected_count += 1
 
-            # Quadradinhos de seleção (ASCII), evitando problemas de codificação.
             sel = "[x]" if selecionada else "[ ]"
             valor = row[7] if row[7] is not None else 0
             try:
@@ -7829,10 +8298,10 @@ class ImportarVendasPage(PageBase):
                 (rid, sel, row[2], row[3], row[4], row[5], row[6], valor_txt, qnt_txt, row[9], row[10]),
             )
 
-        self.set_status(f"STATUS: {len(rows)} registros carregados (NÃƒO usadas)  Selecionadas: {selected_count}.")
+        self.set_status(f"STATUS: {len(rows)} registros carregados (N?O usadas)  Selecionadas: {selected_count}.")
 
     def toggle_selected(self, event=None):
-        # âœ… sÃ³ alterna se clicar em uma cÃ©lula (evita bug ao clicar em cabeÃ§alho)
+        # âÅâ€œââ‚¬¦ só alterna se clicar em uma célula (evita bug ao clicar em cabeçalho)
         if event is not None:
             region = self.tree.identify("region", event.x, event.y)
             if region != "cell":
@@ -7853,6 +8322,18 @@ class ImportarVendasPage(PageBase):
         rid = safe_int(vals[0], 0)
         if rid <= 0:
             return
+
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                _call_api(
+                    "POST",
+                    f"desktop/vendas-importadas/{rid}/toggle-selecao",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                return
+            except Exception:
+                logging.debug("Falha ao alternar selecao via API; usando fallback local.", exc_info=True)
 
         with get_db() as conn:
             cur = conn.cursor()
@@ -7892,20 +8373,32 @@ class ImportarVendasPage(PageBase):
     def set_all_selected(self, val):
         self._ensure_vendas_usada_cols()
 
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                _call_api(
+                    "POST",
+                    f"desktop/vendas-importadas/marcar-todas?selected={int(val)}",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                self.carregar()
+                return
+            except Exception:
+                logging.debug("Falha ao marcar/desmarcar todas via API; usando fallback local.", exc_info=True)
+
         with get_db() as conn:
             cur = conn.cursor()
-            # âœ… sÃ³ marca/desmarca as que nÃ£o foram usadas
             cur.execute("UPDATE vendas_importadas SET selecionada=? WHERE IFNULL(usada,0)=0", (int(val),))
         self.carregar()
 
     def marcar_selecionadas(self):
         """
-        Marca apenas as vendas selecionadas na tabela (suporta seleÃ§Ã£o mÃºltipla com Shift/Ctrl).
+        Marca apenas as vendas selecionadas na tabela (suporta sele??o m?ltipla com Shift/Ctrl).
         """
         self._ensure_vendas_usada_cols()
         itens = self.tree.selection() or ()
         if not itens:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Selecione uma ou mais vendas para marcar.")
+            messagebox.showwarning("ATEN??O", "Selecione uma ou mais vendas para marcar.")
             return
 
         ids = []
@@ -7920,8 +8413,23 @@ class ImportarVendasPage(PageBase):
                 ids.append(rid)
 
         if not ids:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "NÃ£o foi possÃ­vel identificar as vendas selecionadas.")
+            messagebox.showwarning("ATEN??O", "N?o foi poss?vel identificar as vendas selecionadas.")
             return
+
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                ids_csv = ",".join(str(x) for x in ids)
+                _call_api(
+                    "POST",
+                    f"desktop/vendas-importadas/marcar-ids?ids={urllib.parse.quote(ids_csv)}",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                self.carregar()
+                self.set_status(f"STATUS: {len(ids)} venda(s) marcada(s) a partir da sele??o.")
+                return
+            except Exception:
+                logging.debug("Falha ao marcar ids via API; usando fallback local.", exc_info=True)
 
         with get_db() as conn:
             cur = conn.cursor()
@@ -7931,11 +8439,24 @@ class ImportarVendasPage(PageBase):
             )
 
         self.carregar()
-        self.set_status(f"STATUS: {len(ids)} venda(s) marcada(s) a partir da seleÃ§Ã£o.")
+        self.set_status(f"STATUS: {len(ids)} venda(s) marcada(s) a partir da sele??o.")
 
     def limpar_tudo(self):
         if not messagebox.askyesno("CONFIRMAR", "Deseja apagar TODAS as vendas importadas?"):
             return
+
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                _call_api(
+                    "DELETE",
+                    "desktop/vendas-importadas",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                self.carregar()
+                return
+            except Exception:
+                logging.debug("Falha ao limpar vendas importadas via API; usando fallback local.", exc_info=True)
 
         with get_db() as conn:
             cur = conn.cursor()
@@ -7943,21 +8464,8 @@ class ImportarVendasPage(PageBase):
 
         self.carregar()
 
-
-# ==========================
-# ===== FIM DA PARTE 4 (ATUALIZADA) =====
-# ==========================
-
-# ==========================
-# ===== INCIO DA PARTE 5 (ATUALIZADA) =====
-# ==========================
-
-# =========================================================
-# 5.0 PROGRAMACAO PAGE
-# =========================================================
-class ProgramacaoPage(PageBase):
     def __init__(self, parent, app):
-        super().__init__(parent, app, "ProgramaÃ§Ã£o")
+        super().__init__(parent, app, "Programação")
 
         self._editing = None
         self._prog_cols_checked = False  # evita PRAGMA/ALTER toda hora
@@ -7967,7 +8475,7 @@ class ProgramacaoPage(PageBase):
         self._loaded_venda_ids = []
 
         # -------------------------
-        # CabeÃ§alho (dados da programaÃ§Ã£o)
+        # Cabeçalho (dados da programação)
         # -------------------------
         card = ttk.Frame(self.body, style="Card.TFrame", padding=14)
         card.grid(row=0, column=0, sticky="ew")
@@ -7979,12 +8487,12 @@ class ProgramacaoPage(PageBase):
         self.cb_motorista = ttk.Combobox(card, state="readonly", width=16)
         self.cb_motorista.grid(row=1, column=0, sticky="ew", padx=6)
 
-        ttk.Label(card, text="VeÃ­culo", style="CardLabel.TLabel").grid(row=0, column=1, sticky="w")
+        ttk.Label(card, text="VeÃÂÂculo", style="CardLabel.TLabel").grid(row=0, column=1, sticky="w")
         self.cb_veiculo = ttk.Combobox(card, state="readonly", width=12)
         self.cb_veiculo.grid(row=1, column=1, sticky="ew", padx=6)
 
         ttk.Label(card, text="Ajudantes (multipla escolha)", style="CardLabel.TLabel").grid(row=0, column=2, sticky="w")
-        self.btn_ajudantes = ttk.Button(card, text="👥 Selecionar ajudantes", style="Ghost.TButton", command=self._open_ajudantes_selector)
+        self.btn_ajudantes = ttk.Button(card, text="ðÅ¸â€˜¥ Selecionar ajudantes", style="Ghost.TButton", command=self._open_ajudantes_selector)
         self.btn_ajudantes.grid(row=1, column=2, columnspan=2, sticky="ew", padx=6)
         self.lbl_ajudantes_sel = ttk.Label(card, text="Nenhum selecionado", style="CardLabel.TLabel")
         self.lbl_ajudantes_sel.grid(row=2, column=2, columnspan=2, sticky="w", padx=6, pady=(2, 0))
@@ -8025,7 +8533,7 @@ class ProgramacaoPage(PageBase):
         self.ent_adiantamento_prog.insert(0, "0,00")
         self._bind_money_entry(self.ent_adiantamento_prog)
 
-        ttk.Label(card, text="CÃ³digo", style="CardLabel.TLabel").grid(row=0, column=8, sticky="w")
+        ttk.Label(card, text="Código", style="CardLabel.TLabel").grid(row=0, column=8, sticky="w")
         ttk.Label(card, text="Total Caixas", style="CardLabel.TLabel").grid(row=2, column=6, sticky="w")
         self.ent_total_caixas_prog = ttk.Entry(card, style="Field.TEntry", state="readonly", width=12)
         self.ent_total_caixas_prog.grid(row=2, column=7, sticky="ew", padx=6, pady=(2, 0))
@@ -8042,7 +8550,7 @@ class ProgramacaoPage(PageBase):
         self.lbl_prog_status_badge.grid(row=2, column=8, sticky="w", padx=6, pady=(2, 0))
 
         # -------------------------
-        # Itens (vendas / ediÃ§Ã£o)
+        # Itens (vendas / edição)
         # -------------------------
         card2 = ttk.Frame(self.body, style="Card.TFrame", padding=14)
         card2.grid(row=1, column=0, sticky="nsew", pady=(14, 0))
@@ -8067,13 +8575,13 @@ class ProgramacaoPage(PageBase):
             command=self.carregar_vendas_selecionadas
         ).grid(row=0, column=0, padx=4, sticky="ew")
 
-        ttk.Button(acoes_linha_1, text="➕ INSERIR LINHA", style="Ghost.TButton",
+        ttk.Button(acoes_linha_1, text="âÅ¾â€¢ INSERIR LINHA", style="Ghost.TButton",
                    command=self.inserir_linha).grid(row=0, column=1, padx=4, sticky="ew")
 
-        ttk.Button(acoes_linha_1, text="➖ REMOVER LINHA", style="Danger.TButton",
+        ttk.Button(acoes_linha_1, text="âÅ¾â€“ REMOVER LINHA", style="Danger.TButton",
                    command=self.remover_linha).grid(row=0, column=2, padx=4, sticky="ew")
 
-        ttk.Button(acoes_linha_1, text="🧹 LIMPAR ITENS", style="Danger.TButton",
+        ttk.Button(acoes_linha_1, text="ðÅ¸§¹ LIMPAR ITENS", style="Danger.TButton",
                    command=self.limpar_itens).grid(row=0, column=3, padx=4, sticky="ew")
 
         acoes_linha_2 = ttk.Frame(top2, style="Card.TFrame")
@@ -8083,14 +8591,14 @@ class ProgramacaoPage(PageBase):
 
         ttk.Button(
             acoes_linha_2,
-            text="SALVAR PROGRAMAÃ‡ÃƒO",
+            text="SALVAR PROGRAMAÇÃO",
             style="Primary.TButton",
             command=self.salvar_programacao
         ).grid(row=0, column=0, padx=4, sticky="ew")
 
         ttk.Button(
             acoes_linha_2,
-            text="✏️ EDITAR PROGRAMAÇÃO",
+            text="âÅ“Âï¸Â EDITAR PROGRAMAÇÃO",
             style="Ghost.TButton",
             command=self.carregar_programacao_para_edicao
         ).grid(row=0, column=1, padx=4, sticky="ew")
@@ -8104,13 +8612,13 @@ class ProgramacaoPage(PageBase):
 
         ttk.Label(
             top2,
-            text="Dica: duplo clique para editar EndereÃ§o/Caixas/PreÃ§o/Vendedor/Pedido/Obs. ENTER confirma, ESC cancela.",
+            text="Dica: duplo clique para editar Endereço/Caixas/Preço/Vendedor/Pedido/Obs. ENTER confirma, ESC cancela.",
             background="white",
             foreground="#6B7280",
             font=("Segoe UI", 8, "bold")
         ).grid(row=2, column=0, padx=6, pady=(8, 0), sticky="w")
 
-        cols = ["COD CLIENTE", "NOME CLIENTE", "PRODUTO", "ENDEREÃ‡O", "CAIXAS", "KG", "PREÃ‡O", "VENDEDOR", "PEDIDO", "OBS"]
+        cols = ["COD CLIENTE", "NOME CLIENTE", "PRODUTO", "ENDEREÇO", "CAIXAS", "KG", "PREÇO", "VENDEDOR", "PEDIDO", "OBS"]
 
         table_wrap = ttk.Frame(card2, style="Card.TFrame")
         table_wrap.grid(row=1, column=0, sticky="nsew")
@@ -8123,9 +8631,9 @@ class ProgramacaoPage(PageBase):
                 "COD CLIENTE",
                 "NOME CLIENTE",
                 "PRODUTO",
-                "ENDEREÃ‡O",
+                "ENDEREÇO",
                 "CAIXAS",
-                "PREÃ‡O",
+                "PREÇO",
                 "VENDEDOR",
                 "PEDIDO",
                 "OBS",
@@ -8145,14 +8653,14 @@ class ProgramacaoPage(PageBase):
             self.tree.heading(c, text=c)
             self.tree.column(c, width=160, minwidth=90, anchor="w")
 
-        self.tree.column("ENDEREÃ‡O", width=260, minwidth=180)
+        self.tree.column("ENDEREÇO", width=260, minwidth=180)
         self.tree.column("NOME CLIENTE", width=260, minwidth=160)
         self.tree.column("PRODUTO", width=160, minwidth=120)
         self.tree.column("PEDIDO", width=160, minwidth=120)
         self.tree.column("OBS", width=260, minwidth=140)
         self.tree.column("CAIXAS", width=90, anchor="center")
         self.tree.column("KG", width=90, anchor="center")
-        self.tree.column("PREÃ‡O", width=110, anchor="e")
+        self.tree.column("PREÇO", width=110, anchor="e")
 
         self.tree.bind("<Double-1>", self._start_edit_cell)
         self.tree.bind("<MouseWheel>", self._on_tree_scroll, add=True)
@@ -8162,7 +8670,7 @@ class ProgramacaoPage(PageBase):
         enable_treeview_sorting(
             self.tree,
             numeric_cols={"CAIXAS", "KG"},
-            money_cols={"PREÃ‡O"},
+            money_cols={"PREÇO"},
             date_cols=set()
         )
 
@@ -8170,7 +8678,7 @@ class ProgramacaoPage(PageBase):
         self._refresh_total_caixas_field()
 
     # -------------------------
-    # UtilitÃ¡rios
+    # Utilitários
     # -------------------------
     def _motorista_display(self, nome: str, codigo: str) -> str:
         nome = upper(nome)
@@ -8193,7 +8701,7 @@ class ProgramacaoPage(PageBase):
         Normaliza Local da Rota para valores canônicos:
         - SERRA
         - SERTAO
-        Tolerante a acentos/mojibake (ex.: SERTÃO, SERTÃƒO).
+        Tolerante a acentos/mojibake (ex.: SERTÃO, SERTÃO).
         """
         txt = str(v or "").strip()
         txt = fix_mojibake_text(txt) if txt else ""
@@ -8334,7 +8842,7 @@ class ProgramacaoPage(PageBase):
         labels = self._get_selected_labels()
         qtd = len(labels)
         if qtd <= 0:
-            self.btn_ajudantes.configure(text="👥 Selecionar ajudantes")
+            self.btn_ajudantes.configure(text="ðÅ¸â€˜¥ Selecionar ajudantes")
             self.lbl_ajudantes_sel.configure(text="Nenhum selecionado")
             return
         self.btn_ajudantes.configure(text=f"{qtd} selecionado(s)")
@@ -8450,7 +8958,7 @@ class ProgramacaoPage(PageBase):
         search_row = ttk.Frame(frame, style="Card.TFrame")
         search_row.grid(row=1, column=0, sticky="ew", pady=(0, 8))
         search_row.grid_columnconfigure(1, weight=1)
-        ttk.Label(search_row, text="🔎 BUSCAR", style="CardLabel.TLabel").pack(side="left", padx=(0, 8))
+        ttk.Label(search_row, text="ðŸ”Ž BUSCAR", style="CardLabel.TLabel").pack(side="left", padx=(0, 8))
         ent_search = ttk.Entry(search_row, textvariable=self._ajudantes_filter_var, style="Field.TEntry")
         ent_search.pack(side="left", fill="x", expand=True)
         ent_search.bind("<KeyRelease>", lambda _e: self._rebuild_ajudantes_popup_list())
@@ -8481,8 +8989,8 @@ class ProgramacaoPage(PageBase):
         footer = ttk.Frame(frame, style="Card.TFrame")
         footer.grid(row=3, column=0, sticky="ew", pady=(12, 2))
         footer.grid_columnconfigure(0, weight=1)
-        ttk.Button(footer, text="🧹 LIMPAR", style="Ghost.TButton", command=self._clear_ajudantes_selection).pack(side="left")
-        ttk.Button(footer, text="✔ CONFIRMAR", style="Primary.TButton", command=self._confirm_ajudantes_popup).pack(side="right")
+        ttk.Button(footer, text="ðÅ¸§¹ LIMPAR", style="Ghost.TButton", command=self._clear_ajudantes_selection).pack(side="left")
+        ttk.Button(footer, text="âœ” CONFIRMAR", style="Primary.TButton", command=self._confirm_ajudantes_popup).pack(side="right")
 
         # Centraliza para evitar popup abrindo "cortado" em telas menores.
         try:
@@ -8510,6 +9018,55 @@ class ProgramacaoPage(PageBase):
             self._commit_edit()
 
     def refresh_comboboxes(self):
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                mot_resp = _call_api("GET", "desktop/cadastros/motoristas", extra_headers={"X-Desktop-Secret": desktop_secret})
+                vei_resp = _call_api("GET", "desktop/cadastros/veiculos", extra_headers={"X-Desktop-Secret": desktop_secret})
+                aju_resp = _call_api("GET", "desktop/cadastros/ajudantes", extra_headers={"X-Desktop-Secret": desktop_secret})
+
+                valores_motoristas = []
+                for r in (mot_resp or []):
+                    if not isinstance(r, dict):
+                        continue
+                    status_m = upper(r.get("status") or "ATIVO")
+                    if status_m != "ATIVO":
+                        continue
+                    valores_motoristas.append(self._motorista_display(r.get("nome") or "", r.get("codigo") or ""))
+                self.cb_motorista["values"] = valores_motoristas
+
+                self.cb_veiculo["values"] = [upper((r or {}).get("placa") or "") for r in (vei_resp or []) if isinstance(r, dict)]
+
+                self._equipe_display_map = {}
+                rows_ajudantes = []
+                for r in (aju_resp or []):
+                    if not isinstance(r, dict):
+                        continue
+                    ajudante_id = str(r.get("id") or "").strip()
+                    nome_full = upper(r.get("nome") or "")
+                    parts = nome_full.split(" ", 1)
+                    nome = parts[0] if parts else nome_full
+                    sobrenome = parts[1] if len(parts) > 1 else ""
+                    display = self._equipe_display(ajudante_id, nome, sobrenome, "")
+                    if not display:
+                        continue
+                    rows_ajudantes.append(
+                        {
+                            "key": ajudante_id,
+                            "value": ajudante_id,
+                            "label": display,
+                            "nome": upper(nome),
+                            "sobrenome": upper(sobrenome),
+                            "telefone": "",
+                        }
+                    )
+                    if ajudante_id:
+                        self._equipe_display_map[upper(display)] = ajudante_id
+                self._set_ajudantes_options(rows_ajudantes, mode="ajudantes")
+                return
+            except Exception:
+                logging.debug("Falha ao carregar comboboxes da Programacao via API", exc_info=True)
+
         with get_db() as conn:
             cur = conn.cursor()
 
@@ -8593,7 +9150,7 @@ class ProgramacaoPage(PageBase):
                     self._set_ajudantes_options([], mode="ajudantes")
 
     def on_show(self):
-        self.set_status("STATUS: Carregue vendas e ajuste dados antes de salvar a programaÃ§Ã£o.")
+        self.set_status("STATUS: Carregue vendas e ajuste dados antes de salvar a programação.")
         self.refresh_comboboxes()
         self._on_estimativa_tipo_change()
         self._refresh_programacao_status_badge()
@@ -8656,7 +9213,7 @@ class ProgramacaoPage(PageBase):
             logging.debug("Falha ignorada")
 
     # -------------------------
-    # AÃ§Ãµes de itens
+    # Ações de itens
     # -------------------------
     def inserir_linha(self):
         tree_insert_aligned(self.tree, "", "end", ("", "", "", "", "1", "0.00", "0.00", "", "", ""))
@@ -8668,7 +9225,7 @@ class ProgramacaoPage(PageBase):
     def remover_linha(self):
         sel = self.tree.selection()
         if not sel:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Selecione uma linha para remover.")
+            messagebox.showwarning("ATENÇÃO", "Selecione uma linha para remover.")
             return
         for iid in sel:
             self.tree.delete(iid)
@@ -8786,72 +9343,124 @@ class ProgramacaoPage(PageBase):
         if not codigo:
             return
 
-        with get_db() as conn:
-            cur = conn.cursor()
-            cur.execute("PRAGMA table_info(programacoes)")
-            cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+        loaded_from_api = False
+        itens_from_api = []
+        motorista_nome = veiculo = equipe_raw = ""
+        kg_estimado = 0.0
+        status = ""
+        local_rota = local_carreg = ""
+        adiantamento = 0.0
+        motorista_codigo = ""
+        motorista_id = 0
+        tipo_estimativa = "KG"
+        caixas_estimado = 0
 
-            local_expr = "COALESCE(local_rota,'')" if "local_rota" in cols_prog else ("COALESCE(tipo_rota,'')" if "tipo_rota" in cols_prog else "''")
-            carreg_cols = [c for c in ("local_carregamento", "granja_carregada", "local_carregado", "local_carreg") if c in cols_prog]
-            if carreg_cols:
-                carreg_expr = "COALESCE(" + ", ".join(carreg_cols) + ", '')"
-            else:
-                carreg_expr = "''"
-            adiant_cols = [c for c in ("adiantamento", "adiantamento_rota") if c in cols_prog]
-            if adiant_cols:
-                adiant_expr = "COALESCE(" + ", ".join(adiant_cols) + ", 0)"
-            else:
-                adiant_expr = "0"
-            mot_cod_cols = [c for c in ("motorista_codigo", "codigo_motorista") if c in cols_prog]
-            if mot_cod_cols:
-                mot_cod_expr = "COALESCE(" + ", ".join(mot_cod_cols) + ", '')"
-            else:
-                mot_cod_expr = "''"
-            mot_id_expr = "COALESCE(motorista_id, 0)" if "motorista_id" in cols_prog else "0"
-            tipo_estim_expr = "COALESCE(tipo_estimativa, 'KG')" if "tipo_estimativa" in cols_prog else "'KG'"
-            caixas_estim_expr = "COALESCE(caixas_estimado, 0)" if "caixas_estimado" in cols_prog else "0"
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                resposta = _call_api(
+                    "GET",
+                    f"desktop/rotas/{urllib.parse.quote(codigo)}",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                rota = resposta.get("rota") if isinstance(resposta, dict) else None
+                clientes_api = resposta.get("clientes") if isinstance(resposta, dict) else []
+                if isinstance(rota, dict):
+                    motorista_nome = str(rota.get("motorista") or "")
+                    veiculo = str(rota.get("veiculo") or "")
+                    equipe_raw = str(rota.get("equipe") or "")
+                    kg_estimado = safe_float(rota.get("kg_estimado"), 0.0)
+                    status = upper(str(rota.get("status") or rota.get("status_operacional") or ""))
+                    local_rota = self._normalize_local_rota(rota.get("local_rota") or rota.get("tipo_rota") or "")
+                    local_carreg = upper(
+                        str(
+                            rota.get("local_carregamento")
+                            or rota.get("granja_carregada")
+                            or rota.get("local_carregado")
+                            or rota.get("local_carreg")
+                            or ""
+                        )
+                    )
+                    adiantamento = safe_float(rota.get("adiantamento"), safe_float(rota.get("adiantamento_rota"), 0.0))
+                    motorista_codigo = upper(str(rota.get("motorista_codigo") or rota.get("codigo_motorista") or ""))
+                    motorista_id = safe_int(rota.get("motorista_id"), 0)
+                    tipo_estimativa = upper(str(rota.get("tipo_estimativa") or "KG").strip())
+                    if tipo_estimativa not in {"KG", "CX"}:
+                        tipo_estimativa = "KG"
+                    caixas_estimado = safe_int(rota.get("caixas_estimado"), 0)
+                    if isinstance(clientes_api, list):
+                        itens_from_api = [r for r in clientes_api if isinstance(r, dict)]
+                    loaded_from_api = True
+            except Exception:
+                logging.debug("Falha ao carregar programacao para edicao via API; usando fallback local.", exc_info=True)
 
-            cur.execute(
-                f"""
-                SELECT
-                    COALESCE(motorista, ''),
-                    COALESCE(veiculo, ''),
-                    COALESCE(equipe, ''),
-                    COALESCE(kg_estimado, 0),
-                    COALESCE(status, ''),
-                    {local_expr} as local_rota,
-                    {carreg_expr} as local_carreg,
-                    {adiant_expr} as adiantamento,
-                    {mot_cod_expr} as motorista_codigo,
-                    {mot_id_expr} as motorista_id,
-                    {tipo_estim_expr} as tipo_estimativa,
-                    {caixas_estim_expr} as caixas_estimado
-                FROM programacoes
-                WHERE codigo_programacao=?
-                LIMIT 1
-                """,
-                (codigo,),
-            )
-            row = cur.fetchone()
+        if not loaded_from_api:
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute("PRAGMA table_info(programacoes)")
+                cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
 
-        if not row:
-            messagebox.showwarning("ATENÇÃO", f"Programação não encontrada: {codigo}")
-            return
+                local_expr = "COALESCE(local_rota,'')" if "local_rota" in cols_prog else ("COALESCE(tipo_rota,'')" if "tipo_rota" in cols_prog else "''")
+                carreg_cols = [c for c in ("local_carregamento", "granja_carregada", "local_carregado", "local_carreg") if c in cols_prog]
+                if carreg_cols:
+                    carreg_expr = "COALESCE(" + ", ".join(carreg_cols) + ", '')"
+                else:
+                    carreg_expr = "''"
+                adiant_cols = [c for c in ("adiantamento", "adiantamento_rota") if c in cols_prog]
+                if adiant_cols:
+                    adiant_expr = "COALESCE(" + ", ".join(adiant_cols) + ", 0)"
+                else:
+                    adiant_expr = "0"
+                mot_cod_cols = [c for c in ("motorista_codigo", "codigo_motorista") if c in cols_prog]
+                if mot_cod_cols:
+                    mot_cod_expr = "COALESCE(" + ", ".join(mot_cod_cols) + ", '')"
+                else:
+                    mot_cod_expr = "''"
+                mot_id_expr = "COALESCE(motorista_id, 0)" if "motorista_id" in cols_prog else "0"
+                tipo_estim_expr = "COALESCE(tipo_estimativa, 'KG')" if "tipo_estimativa" in cols_prog else "'KG'"
+                caixas_estim_expr = "COALESCE(caixas_estimado, 0)" if "caixas_estimado" in cols_prog else "0"
 
-        motorista_nome = row[0] or ""
-        veiculo = row[1] or ""
-        equipe_raw = row[2] or ""
-        kg_estimado = safe_float(row[3], 0.0)
-        status = upper(row[4] or "")
-        local_rota = self._normalize_local_rota(row[5] or "")
-        local_carreg = upper(row[6] or "")
-        adiantamento = safe_float(row[7], 0.0)
-        motorista_codigo = upper(row[8] or "")
-        motorista_id = safe_int(row[9], 0)
-        tipo_estimativa = upper((row[10] or "KG").strip())
-        if tipo_estimativa not in {"KG", "CX"}:
-            tipo_estimativa = "KG"
-        caixas_estimado = safe_int(row[11], 0)
+                cur.execute(
+                    f"""
+                    SELECT
+                        COALESCE(motorista, ''),
+                        COALESCE(veiculo, ''),
+                        COALESCE(equipe, ''),
+                        COALESCE(kg_estimado, 0),
+                        COALESCE(status, ''),
+                        {local_expr} as local_rota,
+                        {carreg_expr} as local_carreg,
+                        {adiant_expr} as adiantamento,
+                        {mot_cod_expr} as motorista_codigo,
+                        {mot_id_expr} as motorista_id,
+                        {tipo_estim_expr} as tipo_estimativa,
+                        {caixas_estim_expr} as caixas_estimado
+                    FROM programacoes
+                    WHERE codigo_programacao=?
+                    LIMIT 1
+                    """,
+                    (codigo,),
+                )
+                row = cur.fetchone()
+
+            if not row:
+                messagebox.showwarning("ATENÇÃO", f"Programação não encontrada: {codigo}")
+                return
+
+            motorista_nome = row[0] or ""
+            veiculo = row[1] or ""
+            equipe_raw = row[2] or ""
+            kg_estimado = safe_float(row[3], 0.0)
+            status = upper(row[4] or "")
+            local_rota = self._normalize_local_rota(row[5] or "")
+            local_carreg = upper(row[6] or "")
+            adiantamento = safe_float(row[7], 0.0)
+            motorista_codigo = upper(row[8] or "")
+            motorista_id = safe_int(row[9], 0)
+            tipo_estimativa = upper((row[10] or "KG").strip())
+            if tipo_estimativa not in {"KG", "CX"}:
+                tipo_estimativa = "KG"
+            caixas_estimado = safe_int(row[11], 0)
 
         status_ref, status_api, status_local = self._obter_status_programacao_para_edicao(codigo, status)
         if not self._status_permite_edicao_programacao(status_ref):
@@ -8860,11 +9469,31 @@ class ProgramacaoPage(PageBase):
 
         if not motorista_codigo and motorista_id > 0:
             try:
-                with get_db() as conn:
-                    cur = conn.cursor()
-                    cur.execute("SELECT COALESCE(codigo,'') FROM motoristas WHERE id=? LIMIT 1", (motorista_id,))
-                    rr = cur.fetchone()
-                    motorista_codigo = upper(rr[0] if rr else "")
+                resolved = False
+                desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+                if desktop_secret and is_desktop_api_sync_enabled():
+                    try:
+                        mot_resp = _call_api(
+                            "GET",
+                            "desktop/cadastros/motoristas",
+                            extra_headers={"X-Desktop-Secret": desktop_secret},
+                        )
+                        for r in (mot_resp or []):
+                            if not isinstance(r, dict):
+                                continue
+                            if safe_int(r.get("id"), 0) == safe_int(motorista_id, 0):
+                                motorista_codigo = upper(str(r.get("codigo") or ""))
+                                resolved = True
+                                break
+                    except Exception:
+                        logging.debug("Falha ao resolver codigo do motorista via API; usando fallback local.", exc_info=True)
+
+                if not resolved:
+                    with get_db() as conn:
+                        cur = conn.cursor()
+                        cur.execute("SELECT COALESCE(codigo,'') FROM motoristas WHERE id=? LIMIT 1", (motorista_id,))
+                        rr = cur.fetchone()
+                        motorista_codigo = upper(rr[0] if rr else "")
             except Exception:
                 logging.debug("Falha ignorada")
 
@@ -8891,7 +9520,25 @@ class ProgramacaoPage(PageBase):
         self._sync_tree_selection_from_state()
         self._refresh_ajudantes_selected_label()
 
-        itens = fetch_programacao_itens(codigo)
+        itens = []
+        if loaded_from_api and itens_from_api:
+            itens = [
+                {
+                    "cod_cliente": str(it.get("cod_cliente") or ""),
+                    "nome_cliente": str(it.get("nome_cliente") or ""),
+                    "produto": str(it.get("produto") or ""),
+                    "endereco": str(it.get("endereco") or ""),
+                    "qnt_caixas": safe_int(it.get("qnt_caixas"), 0),
+                    "kg": safe_float(it.get("kg"), 0.0),
+                    "preco": safe_float(it.get("preco"), 0.0),
+                    "vendedor": str(it.get("vendedor") or ""),
+                    "pedido": str(it.get("pedido") or ""),
+                    "obs": str(it.get("obs") or it.get("observacao") or ""),
+                }
+                for it in (itens_from_api or [])
+            ]
+        if not itens:
+            itens = fetch_programacao_itens(codigo)
         self.limpar_itens()
         for it in (itens or []):
             tree_insert_aligned(
@@ -8932,8 +9579,8 @@ class ProgramacaoPage(PageBase):
 
     def carregar_vendas_selecionadas(self):
         """
-        Carrega todas as vendas selecionadas em uma query única.
-        Evita duplicar item por chave (pedido + cod_cliente + produto).
+        Carrega todas as vendas selecionadas.
+        API-first com fallback local.
         """
         def _is_bad(v):
             return upper(str(v or "").strip()) in {"", "NAN", "NAT", "NONE", "NULL", "<NA>"}
@@ -8950,31 +9597,80 @@ class ProgramacaoPage(PageBase):
             except Exception:
                 return upper(s)
 
-        with get_db() as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT
-                    v.id,
-                    v.pedido,
-                    v.data_venda,
-                    v.cliente AS cod_cliente,
-                    v.nome_cliente,
-                    v.vendedor,
-                    v.produto,
-                    v.vr_total,
-                    v.qnt,
-                    v.valor_unitario,
-                    v.observacao,
-                    v.cidade,
-                    COALESCE(c.endereco, '') AS endereco
-                FROM vendas_importadas v
-                LEFT JOIN clientes c
-                       ON c.cod_cliente = v.cliente
-                WHERE v.selecionada = 1
-                  AND IFNULL(v.usada, 0) = 0
-                ORDER BY v.id ASC
-            """)
-            vendas = cur.fetchall() or []
+        vendas = []
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                resp_v = _call_api(
+                    "GET",
+                    "desktop/vendas-importadas?limit=5000",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                rows_v = resp_v.get("rows") if isinstance(resp_v, dict) else []
+
+                resp_c = _call_api(
+                    "GET",
+                    "desktop/clientes/base?ordem=codigo&limit=5000",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                rows_c = resp_c if isinstance(resp_c, list) else []
+                end_map = {
+                    upper(str((r or {}).get("cod_cliente") or "")): upper(str((r or {}).get("endereco") or ""))
+                    for r in rows_c
+                    if isinstance(r, dict)
+                }
+
+                for r in (rows_v or []):
+                    if not isinstance(r, dict):
+                        continue
+                    if safe_int(r.get("selecionada"), 0) != 1:
+                        continue
+                    vendas.append(
+                        (
+                            safe_int(r.get("id"), 0),
+                            r.get("pedido"),
+                            r.get("data_venda"),
+                            r.get("cliente"),
+                            r.get("nome_cliente"),
+                            r.get("vendedor"),
+                            r.get("produto"),
+                            safe_float(r.get("vr_total"), 0.0),
+                            safe_float(r.get("qnt"), 0.0),
+                            0.0,
+                            "",
+                            r.get("cidade"),
+                            end_map.get(upper(str(r.get("cliente") or "")), ""),
+                        )
+                    )
+            except Exception:
+                logging.debug("Falha ao carregar vendas selecionadas via API; usando fallback local.", exc_info=True)
+
+        if not vendas:
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT
+                        v.id,
+                        v.pedido,
+                        v.data_venda,
+                        v.cliente AS cod_cliente,
+                        v.nome_cliente,
+                        v.vendedor,
+                        v.produto,
+                        v.vr_total,
+                        v.qnt,
+                        v.valor_unitario,
+                        v.observacao,
+                        v.cidade,
+                        COALESCE(c.endereco, '') AS endereco
+                    FROM vendas_importadas v
+                    LEFT JOIN clientes c
+                           ON c.cod_cliente = v.cliente
+                    WHERE v.selecionada = 1
+                      AND IFNULL(v.usada, 0) = 0
+                    ORDER BY v.id ASC
+                """)
+                vendas = cur.fetchall() or []
 
         self.limpar_itens()
         self._loaded_venda_ids = []
@@ -9037,12 +9733,9 @@ class ProgramacaoPage(PageBase):
         self._refresh_total_caixas_field()
         msg = f"STATUS: Itens carregados: {len(self.tree.get_children())} vendas selecionadas (nao usadas). (edite antes de salvar)"
         if ignorados_invalidos:
-            msg += f" Ignoradas inválidas: {ignorados_invalidos}."
+            msg += f" Ignoradas invalidas: {ignorados_invalidos}."
         self.set_status(msg)
 
-    # -------------------------
-    # EdiÃ§Ã£o de cÃ©lula (com regras)
-    # -------------------------
     def _start_edit_cell(self, event=None):
         if self._editing:
             self._commit_edit()
@@ -9064,8 +9757,8 @@ class ProgramacaoPage(PageBase):
 
         col_name = cols[col_index]
 
-        # âœ… Regra: sÃ³ permite editar essas colunas
-        editable = {"ENDEREÃ‡O", "CAIXAS", "KG", "PREÃ‡O", "VENDEDOR", "PEDIDO", "OBS"}
+        # âÅâ€œââ‚¬¦ Regra: só permite editar essas colunas
+        editable = {"ENDEREÇO", "CAIXAS", "KG", "PREÇO", "VENDEDOR", "PEDIDO", "OBS"}
         if col_name not in editable:
             return
 
@@ -9096,14 +9789,14 @@ class ProgramacaoPage(PageBase):
         row_id, col_index, col_name, entry = self._editing
         new_value = str(entry.get() or "").strip()
 
-        # âœ… ValidaÃ§Ã£o por tipo
+        # âÅâ€œââ‚¬¦ Validação por tipo
         if col_name == "CAIXAS":
             v = safe_int(new_value, 0)
             if v < 0:
                 v = 0
             new_value = str(v)
 
-        elif col_name in {"KG", "PREÃ‡O"}:
+        elif col_name in {"KG", "PREÇO"}:
             v = safe_float(new_value, 0.0)
             if v < 0:
                 v = 0.0
@@ -9167,7 +9860,7 @@ class ProgramacaoPage(PageBase):
         add_col("finalizada_no_app", "INTEGER DEFAULT 0")
 
     def _ensure_vendas_usada_cols(self, cur):
-        """Garante colunas para bloquear reutilizaÃ§Ã£o (compatÃ­vel com bases antigas)."""
+        """Garante colunas para bloquear reutilização (compatÃÂÂvel com bases antigas)."""
         try:
             cur.execute("PRAGMA table_info(vendas_importadas)")
             cols = [str(r[1]).lower() for r in cur.fetchall()]
@@ -9189,6 +9882,8 @@ class ProgramacaoPage(PageBase):
     def salvar_programacao(self):
         if self._editing:
             self._commit_edit()
+        if not ensure_system_api_binding(context="Salvar programacao", parent=self):
+            return
 
         motorista_sel = upper(self.cb_motorista.get()).strip()
         motorista_nome, motorista_codigo = self._parse_motorista_display(motorista_sel)
@@ -9216,33 +9911,33 @@ class ProgramacaoPage(PageBase):
         usuario_logado = upper(str((getattr(self.app, "user", {}) or {}).get("nome", "")).strip()) or "ADMIN"
         adiantamento_val = safe_money(self.ent_adiantamento_prog.get(), 0.0)
         if adiantamento_val < 0:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Adiantamento nÃ£o pode ser negativo.")
+            messagebox.showwarning("ATENÇÃO", "Adiantamento não pode ser negativo.")
             return
         if tipo_estimativa == "CX":
             if caixas_estimado <= 0:
-                messagebox.showwarning("ATENÃ‡ÃƒO", "Informe a estimativa em caixas (CX) para CIF.")
+                messagebox.showwarning("ATENÇÃO", "Informe a estimativa em caixas (CX) para CIF.")
                 return
         else:
             if kg_estimado <= 0:
-                messagebox.showwarning("ATENÃ‡ÃƒO", "Informe o KG estimado para FOB.")
+                messagebox.showwarning("ATENÇÃO", "Informe o KG estimado para FOB.")
                 return
 
         if not motorista_nome or not veiculo:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Selecione Motorista e VeÃ­culo.")
+            messagebox.showwarning("ATENÇÃO", "Selecione Motorista e VeÃÂÂculo.")
             return
         if self._ajudantes_mode == "equipes":
             if not ajudante1:
-                messagebox.showwarning("ATENÃ‡ÃƒO", "Selecione a equipe da programaÃ§Ã£o.")
+                messagebox.showwarning("ATENÇÃO", "Selecione a equipe da programação.")
                 return
         else:
             if not ajudante1 or not ajudante2:
-                messagebox.showwarning("ATENÃ‡ÃƒO", "Selecione exatamente 2 ajudantes da programaÃ§Ã£o.")
+                messagebox.showwarning("ATENÇÃO", "Selecione exatamente 2 ajudantes da programação.")
                 return
             if upper(ajudante1) == upper(ajudante2):
-                messagebox.showwarning("ATENÃ‡ÃƒO", "Os ajudantes selecionados devem ser diferentes.")
+                messagebox.showwarning("ATENÇÃO", "Os ajudantes selecionados devem ser diferentes.")
                 return
         if local_rota not in {"SERRA", "SERTAO"}:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Selecione o Local da Rota (SERRA ou SERTAO).")
+            messagebox.showwarning("ATENÇÃO", "Selecione o Local da Rota (SERRA ou SERTAO).")
             return
         if not local_carreg:
             messagebox.showwarning("ATENCAO", "Informe o local de Carregamento.")
@@ -9253,15 +9948,15 @@ class ProgramacaoPage(PageBase):
             itens.append(self._get_row_values(iid))
 
         if not itens:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Carregue itens (vendas selecionadas) antes de salvar.")
+            messagebox.showwarning("ATENÇÃO", "Carregue itens (vendas selecionadas) antes de salvar.")
             return
 
-        # âœ… validaÃ§Ã£o mÃ­nima por linha (seguranÃ§a)
+        # âÅâ€œââ‚¬¦ validação mÃÂÂnima por linha (segurança)
         for v in itens:
             cod_cliente = v[0]
             nome_cliente = v[1]
             if not str(cod_cliente).strip() or not str(nome_cliente).strip():
-                messagebox.showwarning("ATENÃ‡ÃƒO", "HÃ¡ linhas sem COD CLIENTE ou NOME CLIENTE. Corrija antes de salvar.")
+                messagebox.showwarning("ATENÇÃO", "Há linhas sem COD CLIENTE ou NOME CLIENTE. Corrija antes de salvar.")
                 return
 
         codigo = None
@@ -9279,11 +9974,136 @@ class ProgramacaoPage(PageBase):
         except Exception:
             total_quilos = 0.0
 
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                vei_resp = _call_api(
+                    "GET",
+                    "desktop/cadastros/veiculos",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                capacidade_cx = -1
+                for r in (vei_resp or []):
+                    if not isinstance(r, dict):
+                        continue
+                    if upper(r.get("placa") or "") == upper(veiculo):
+                        capacidade_cx = safe_int(r.get("capacidade_cx"), -1)
+                        break
+                if capacidade_cx >= 0:
+                    caixas_para_validar = caixas_estimado if tipo_estimativa == "CX" else total_caixas
+                    if caixas_para_validar > capacidade_cx:
+                        messagebox.showwarning(
+                            "ATENÇÃO",
+                            f"Capacidade excedida para o veículo {veiculo}.\n\n"
+                            f"Caixas na programação: {caixas_para_validar}\n"
+                            f"Capacidade do veículo: {capacidade_cx}"
+                        )
+                        return
+            except Exception:
+                logging.debug("Falha ao validar capacidade via API; usando validacao local/fallback.", exc_info=True)
+
         motorista_id = None
+        api_saved = False
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
 
         try:
-            with get_db() as conn:
-                cur = conn.cursor()
+            if desktop_secret and is_desktop_api_sync_enabled():
+                itens_payload = []
+                for (cod_cliente, nome_cliente, produto, endereco, caixas, kg, preco, vendedor, pedido, obs) in itens:
+                    itens_payload.append({
+                        "cod_cliente": upper(cod_cliente),
+                        "nome_cliente": upper(nome_cliente),
+                        "qnt_caixas": safe_int(caixas, 0),
+                        "kg": safe_float(kg, 0.0),
+                        "preco": safe_float(preco, 0.0),
+                        "endereco": upper(endereco),
+                        "vendedor": upper(vendedor),
+                        "pedido": upper(pedido),
+                        "produto": upper(produto),
+                        "obs": upper(obs),
+                    })
+
+                try:
+                    mot_resp = _call_api(
+                        "GET",
+                        "desktop/cadastros/motoristas",
+                        extra_headers={"X-Desktop-Secret": desktop_secret},
+                    )
+                    for r in (mot_resp or []):
+                        if not isinstance(r, dict):
+                            continue
+                        cod_r = upper(r.get("codigo") or "")
+                        nome_r = upper(r.get("nome") or "")
+                        if (motorista_codigo and cod_r == upper(motorista_codigo)) or (nome_r == upper(motorista_nome)):
+                            motorista_id = safe_int(r.get("id"), 0)
+                            break
+                except Exception:
+                    motorista_id = None
+
+                explicit_edit_mode = upper(str(self._editing_programacao_codigo or "").strip()) == codigo_atual
+                is_update_existing = bool(codigo_atual and explicit_edit_mode)
+
+                max_tries = 5 if not is_update_existing else 1
+                last_api_error = None
+                for _ in range(max_tries):
+                    codigo_try = codigo_atual if is_update_existing else generate_program_code()
+                    payload_sync = {
+                        "codigo_programacao": codigo_try,
+                        "data_criacao": data_criacao,
+                        "motorista": motorista_nome,
+                        "motorista_id": safe_int(motorista_id, 0),
+                        "motorista_codigo": motorista_codigo,
+                        "codigo_motorista": motorista_codigo,
+                        "veiculo": veiculo,
+                        "equipe": equipe,
+                        "kg_estimado": safe_float(kg_estimado, 0.0),
+                        "tipo_estimativa": tipo_estimativa,
+                        "caixas_estimado": safe_int(caixas_estimado, 0),
+                        "status": "ATIVA",
+                        "local_rota": local_rota,
+                        "local_carregamento": local_carreg,
+                        "adiantamento": safe_float(adiantamento_val, 0.0),
+                        "total_caixas": safe_int(total_caixas, 0),
+                        "quilos": safe_float(total_quilos, 0.0),
+                        "usuario_criacao": usuario_logado,
+                        "usuario_ultima_edicao": usuario_logado,
+                        "itens": itens_payload,
+                    }
+                    try:
+                        _call_api(
+                            "POST",
+                            "desktop/rotas/upsert",
+                            payload=payload_sync,
+                            extra_headers={"X-Desktop-Secret": desktop_secret},
+                        )
+                        ids_carregados_api = [safe_int(x, 0) for x in (self._loaded_venda_ids or []) if safe_int(x, 0) > 0]
+                        if ids_carregados_api:
+                            _call_api(
+                                "POST",
+                                "desktop/vendas-importadas/consumir",
+                                payload={
+                                    "ids": ids_carregados_api,
+                                    "codigo_programacao": upper(codigo_try),
+                                    "usada_em": data_criacao,
+                                },
+                                extra_headers={"X-Desktop-Secret": desktop_secret},
+                            )
+                        codigo = codigo_try
+                        api_saved = True
+                        break
+                    except Exception as exc_try:
+                        last_api_error = exc_try
+                        if is_update_existing:
+                            break
+                if (not api_saved) and last_api_error:
+                    logging.warning(
+                        "Falha ao salvar programacao via API; aplicando fallback local. Erro: %s",
+                        last_api_error,
+                    )
+
+            if not api_saved:
+                with get_db() as conn:
+                    cur = conn.cursor()
 
                 if not self._prog_cols_checked:
                     self._ensure_prog_columns_for_api(cur)
@@ -9293,7 +10113,7 @@ class ProgramacaoPage(PageBase):
                     self._ensure_vendas_usada_cols(cur)
                     self._vendas_cols_checked = True
 
-                # Valida capacidade do veÃ­culo (CX) antes de salvar programaÃ§Ã£o.
+                # Valida capacidade do veÃÂÂculo (CX) antes de salvar programação.
                 cap_col = "capacidade_cx"
                 try:
                     cur.execute("PRAGMA table_info(veiculos)")
@@ -9314,26 +10134,26 @@ class ProgramacaoPage(PageBase):
 
                 if not vrow:
                     messagebox.showwarning(
-                        "ATENÃ‡ÃƒO",
-                        f"VeÃ­culo nÃ£o encontrado no cadastro: {veiculo}."
+                        "ATENÇÃO",
+                        f"VeÃÂÂculo não encontrado no cadastro: {veiculo}."
                     )
                     return
 
                 capacidade_cx = safe_int(vrow[0], -1)
                 if capacidade_cx < 0:
                     messagebox.showwarning(
-                        "ATENÃ‡ÃƒO",
-                        f"Capacidade (CX) invÃ¡lida para o veÃ­culo {veiculo}. Ajuste no cadastro de veÃ­culos."
+                        "ATENÇÃO",
+                        f"Capacidade (CX) inválida para o veÃÂÂculo {veiculo}. Ajuste no cadastro de veÃÂÂculos."
                     )
                     return
 
                 caixas_para_validar = caixas_estimado if tipo_estimativa == "CX" else total_caixas
                 if caixas_para_validar > capacidade_cx:
                     messagebox.showwarning(
-                        "ATENÃ‡ÃƒO",
-                        f"Capacidade excedida para o veÃ­culo {veiculo}.\n\n"
-                        f"Caixas na programaÃ§Ã£o: {caixas_para_validar}\n"
-                        f"Capacidade do veÃ­culo: {capacidade_cx}"
+                        "ATENÇÃO",
+                        f"Capacidade excedida para o veÃÂÂculo {veiculo}.\n\n"
+                        f"Caixas na programação: {caixas_para_validar}\n"
+                        f"Capacidade do veÃÂÂculo: {capacidade_cx}"
                     )
                     return
 
@@ -9417,7 +10237,7 @@ class ProgramacaoPage(PageBase):
                         ),
                     )
 
-                # Insert compatÃ­vel (tenta gerar cÃ³digo Ãºnico)
+                # Insert compatÃÂÂvel (tenta gerar código único)
                 if not row_exist:
                     inserted = False
                     for _ in range(5):
@@ -9464,7 +10284,7 @@ class ProgramacaoPage(PageBase):
                                 continue
 
                     if not inserted:
-                        raise sqlite3.IntegrityError("Falha ao gerar cÃ³digo Ãºnico para programaÃ§Ã£o.")
+                        raise sqlite3.IntegrityError("Falha ao gerar código único para programação.")
 
                 # Salva local da rota com compatibilidade de bases.
                 try:
@@ -9565,7 +10385,7 @@ class ProgramacaoPage(PageBase):
                 except Exception:
                     logging.debug("Falha ignorada")
 
-                # garante prestaÃ§Ã£o pendente quando coluna existir
+                # garante prestação pendente quando coluna existir
                 try:
                     if db_has_column(cur, "programacoes", "prestacao_status"):
                         cur.execute(
@@ -9607,7 +10427,7 @@ class ProgramacaoPage(PageBase):
                         upper(produto)
                     ))
 
-                    # MantÃ©m clientes atualizados (compatÃ­vel com bases antigas)
+                    # Mantém clientes atualizados (compatÃÂÂvel com bases antigas)
                     if cod_cliente and nome_cliente:
                         try:
                             cur.execute("""
@@ -9628,7 +10448,7 @@ class ProgramacaoPage(PageBase):
                             """, (upper(cod_cliente), upper(nome_cliente), upper(endereco)))
 
                 # =========================================================
-                # âœ… REGRA NOVA: Vendas selecionadas viram "usadas" e somem
+                # âÅâ€œââ‚¬¦ REGRA NOVA: Vendas selecionadas viram "usadas" e somem
                 # =========================================================
                 try:
                     ids_carregados = [safe_int(x, 0) for x in (self._loaded_venda_ids or []) if safe_int(x, 0) > 0]
@@ -9652,7 +10472,7 @@ class ProgramacaoPage(PageBase):
                     logging.debug("Falha ao marcar vendas importadas como usadas.", exc_info=True)
 
         except Exception as e:
-            messagebox.showerror("ERRO", f"Erro ao salvar programaÃ§Ã£o: {str(e)}")
+            messagebox.showerror("ERRO", f"Erro ao salvar programação: {str(e)}")
             return
 
         self.ent_codigo.config(state="normal")
@@ -9666,13 +10486,13 @@ class ProgramacaoPage(PageBase):
             messagebox.showinfo("OK", f"Programação atualizada: {codigo}")
             self.set_status(f"STATUS: Programação atualizada: {codigo}")
         else:
-            messagebox.showinfo("OK", f"ProgramaÃ§Ã£o salva: {codigo} (ABERTA/ATIVA)")
-            self.set_status(f"STATUS: ProgramaÃ§Ã£o salva: {codigo} (ABERTA/ATIVA)")
+            messagebox.showinfo("OK", f"Programação salva: {codigo} (ABERTA/ATIVA)")
+            self.set_status(f"STATUS: Programação salva: {codigo} (ABERTA/ATIVA)")
 
         # Sincroniza programação com a API central (para aparecer no app mobile).
         try:
             desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-            if desktop_secret:
+            if (not api_saved) and desktop_secret:
                 itens_payload = []
                 for (cod_cliente, nome_cliente, produto, endereco, caixas, kg, preco, vendedor, pedido, obs) in itens:
                     itens_payload.append({
@@ -9716,6 +10536,18 @@ class ProgramacaoPage(PageBase):
                     payload=payload_sync,
                     extra_headers={"X-Desktop-Secret": desktop_secret},
                 )
+                ids_carregados_api = [safe_int(x, 0) for x in (self._loaded_venda_ids or []) if safe_int(x, 0) > 0]
+                if ids_carregados_api:
+                    _call_api(
+                        "POST",
+                        "desktop/vendas-importadas/consumir",
+                        payload={
+                            "ids": ids_carregados_api,
+                            "codigo_programacao": upper(codigo),
+                            "usada_em": data_criacao,
+                        },
+                        extra_headers={"X-Desktop-Secret": desktop_secret},
+                    )
         except Exception as exc:
             logging.warning("Falha ao sincronizar programacao %s com API: %s", codigo, exc)
 
@@ -9737,7 +10569,7 @@ class ProgramacaoPage(PageBase):
         except Exception:
             logging.debug("Falha ignorada")
 
-        if messagebox.askyesno("PDF", "Deseja gerar o PDF da programaÃ§Ã£o agora?\n\n(Pronto para impressÃ£o A4)"):
+        if messagebox.askyesno("PDF", "Deseja gerar o PDF da programação agora?\n\n(Pronto para impressão A4)"):
             self.gerar_pdf_programacao_salva(
                 codigo, motorista_nome, veiculo, equipe, kg_estimado, tipo_estimativa, caixas_estimado, usuario_logado
             )
@@ -9753,7 +10585,7 @@ class ProgramacaoPage(PageBase):
         if not require_reportlab():
             return
         path = filedialog.asksaveasfilename(
-            title="Salvar PDF da ProgramaÃ§Ã£o",
+            title="Salvar PDF da Programação",
             defaultextension=".pdf",
             filetypes=[("PDF", "*.pdf")],
             initialfile=f"PROGRAMACAO_{codigo}.pdf"
@@ -9766,32 +10598,15 @@ class ProgramacaoPage(PageBase):
             itens.append(self._get_row_values(iid))
 
         if not itens:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Sem itens na programaÃ§Ã£o.")
+            messagebox.showwarning("ATENÇÃO", "Sem itens na programação.")
             return
 
         try:
             usuario_edicao = ""
             try:
-                with get_db() as conn:
-                    cur = conn.cursor()
-                    cur.execute("PRAGMA table_info(programacoes)")
-                    cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
-                    campos = []
-                    if "usuario_criacao" in cols_prog:
-                        campos.append("COALESCE(usuario_criacao,'')")
-                    else:
-                        campos.append("''")
-                    if "usuario_ultima_edicao" in cols_prog:
-                        campos.append("COALESCE(usuario_ultima_edicao,'')")
-                    else:
-                        campos.append("''")
-                    cur.execute(
-                        f"SELECT {', '.join(campos)} FROM programacoes WHERE codigo_programacao=? ORDER BY id DESC LIMIT 1",
-                        (codigo,),
-                    )
-                    rr = cur.fetchone() or ("", "")
-                    usuario_criacao = upper((rr[0] or usuario_criacao or "").strip())
-                    usuario_edicao = upper((rr[1] or "").strip())
+                meta_prog = self._buscar_meta_programacao(codigo)
+                usuario_criacao = upper(str(meta_prog.get("usuario_criacao") or usuario_criacao or "").strip())
+                usuario_edicao = upper(str(meta_prog.get("usuario_ultima_edicao") or "").strip())
             except Exception:
                 usuario_criacao = upper((usuario_criacao or "").strip())
 
@@ -9887,7 +10702,7 @@ class ProgramacaoPage(PageBase):
             c.drawCentredString(w / 2, 26, '"Tudo posso naquele que me fortalece." (Filipenses 4:13)')
 
             c.save()
-            messagebox.showinfo("OK", "PDF gerado com sucesso! (A4 pronto para impressÃ£o)")
+            messagebox.showinfo("OK", "PDF gerado com sucesso! (A4 pronto para impressão)")
 
         except Exception as e:
             messagebox.showerror("ERRO", str(e))
@@ -9925,6 +10740,52 @@ class ProgramacaoPage(PageBase):
             "usuario_criacao": "",
             "usuario_ultima_edicao": "",
         }
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                resp = _call_api(
+                    "GET",
+                    f"desktop/rotas/{urllib.parse.quote(upper(codigo or '').strip())}",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                rota = resp.get("rota") if isinstance(resp, dict) else None
+                if isinstance(rota, dict):
+                    meta["motorista"] = upper(str(rota.get("motorista") or ""))
+                    meta["veiculo"] = upper(str(rota.get("veiculo") or ""))
+                    meta["equipe"] = upper(str(rota.get("equipe") or ""))
+                    meta["data_criacao"] = str(rota.get("data_criacao") or rota.get("data") or "")
+                    meta["kg_estimado"] = safe_float(rota.get("kg_estimado"), 0.0)
+                    meta["tipo_estimativa"] = upper(str(rota.get("tipo_estimativa") or "KG").strip()) or "KG"
+                    meta["caixas_estimado"] = safe_int(rota.get("caixas_estimado"), 0)
+                    meta["usuario_criacao"] = upper(
+                        str(
+                            rota.get("usuario_criacao")
+                            or rota.get("usuario")
+                            or rota.get("criado_por")
+                            or rota.get("created_by")
+                            or rota.get("autor")
+                            or ""
+                        ).strip()
+                    )
+                    meta["usuario_ultima_edicao"] = upper(str(rota.get("usuario_ultima_edicao") or "").strip())
+                    meta["local_rota"] = upper(str(rota.get("local_rota") or rota.get("tipo_rota") or ""))
+                    meta["local_carregamento"] = upper(
+                        str(
+                            rota.get("local_carregamento")
+                            or rota.get("granja_carregada")
+                            or rota.get("local_carregado")
+                            or rota.get("local_carreg")
+                            or ""
+                        )
+                    )
+                    for cand in ("qnt_aves_por_cx", "aves_por_caixa", "qnt_aves_por_caixa"):
+                        apc = safe_int(rota.get(cand), 0)
+                        if apc > 0:
+                            meta["aves_por_caixa"] = apc
+                            break
+                    return meta
+            except Exception:
+                logging.debug("Falha ao buscar metadados da programacao via API; usando fallback local.", exc_info=True)
         try:
             with get_db() as conn:
                 cur = conn.cursor()
@@ -10393,10 +11254,10 @@ class ProgramacaoPage(PageBase):
             except Exception as e:
                 messagebox.showerror("ERRO", f"Erro ao gerar romaneios: {str(e)}")
 
-        ttk.Button(bottom, text="⬅ Anterior", style="Ghost.TButton", command=_prev).pack(side="left")
-        ttk.Button(bottom, text="Próximo ➡", style="Ghost.TButton", command=_next).pack(side="left", padx=8)
-        ttk.Button(bottom, text="📄 GERAR PDF", style="Primary.TButton", command=_export_pdf).pack(side="right")
-        ttk.Button(bottom, text="✖ Fechar", style="Danger.TButton", command=win.destroy).pack(side="right", padx=8)
+        ttk.Button(bottom, text="â¬â€¦ Anterior", style="Ghost.TButton", command=_prev).pack(side="left")
+        ttk.Button(bottom, text="Próximo âÅ¾¡", style="Ghost.TButton", command=_next).pack(side="left", padx=8)
+        ttk.Button(bottom, text="ðÅ¸â€œâ€ž GERAR PDF", style="Primary.TButton", command=_export_pdf).pack(side="right")
+        ttk.Button(bottom, text="âÅ“â€“ Fechar", style="Danger.TButton", command=win.destroy).pack(side="right", padx=8)
 
         cb.bind("<<ComboboxSelected>>", _on_sel)
         vias_var.trace_add("write", lambda *_: _render())
@@ -10431,22 +11292,22 @@ class ProgramacaoPage(PageBase):
 # ==========================
 
 # =========================================================
-# 6.0 FUNÃ‡ÃƒO SIMPLE INPUT (antes de RecebimentosPage)
+# 6.0 FUNÇÃO SIMPLE INPUT (antes de RecebimentosPage)
 # =========================================================
 def simple_input(title, prompt, master=None, initial="", allow_empty=True, max_len=200):
     """
-    Janela de diÃ¡logo simples para entrada de texto.
+    Janela de diálogo simples para entrada de texto.
 
-    CompatÃ­vel com seu uso atual:
-        simple_input("TÃ­tulo", "Pergunta?")
+    CompatÃÂÂvel com seu uso atual:
+        simple_input("TÃÂÂtulo", "Pergunta?")
 
-    Extras opcionais (nÃ£o quebram):
-        master=app  -> mantÃ©m a janela presa ao app
+    Extras opcionais (não quebram):
+        master=app  -> mantém a janela presa ao app
         initial="..." -> valor inicial
         allow_empty=False -> obriga preencher
-        max_len -> limita tamanho (seguranÃ§a)
+        max_len -> limita tamanho (segurança)
     """
-    # Se nÃ£o passar master, tenta usar a janela root atual
+    # Se não passar master, tenta usar a janela root atual
     if master is None:
         try:
             master = tk._default_root
@@ -10496,7 +11357,7 @@ def simple_input(title, prompt, master=None, initial="", allow_empty=True, max_l
     def ok():
         v = _get_value()
         if (not allow_empty) and (not v):
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Preencha o campo antes de confirmar.")
+            messagebox.showwarning("ATENÇÃO", "Preencha o campo antes de confirmar.")
             ent.focus_set()
             return
         result["value"] = v
@@ -10522,8 +11383,8 @@ def simple_input(title, prompt, master=None, initial="", allow_empty=True, max_l
     left = ttk.Frame(btns, style="Card.TFrame")
     left.grid(row=0, column=0, sticky="w")
 
-    ttk.Button(left, text="✔ CONFIRMAR", style="Primary.TButton", command=ok).pack(side="left")
-    ttk.Button(left, text="✖ CANCELAR", style="Ghost.TButton", command=cancel).pack(side="left", padx=8)
+    ttk.Button(left, text="âœ” CONFIRMAR", style="Primary.TButton", command=ok).pack(side="left")
+    ttk.Button(left, text="âÅ“â€“ CANCELAR", style="Ghost.TButton", command=cancel).pack(side="left", padx=8)
 
     # Atalhos
     win.bind("<Return>", lambda e: ok())
@@ -10581,7 +11442,7 @@ class RecebimentosPage(PageBase):
         self.cb_prog = ttk.Combobox(self.card, state="readonly", width=24)
         self.cb_prog.grid(row=1, column=0, sticky="w", padx=(0, 10))
 
-        ttk.Button(self.card, text="📂 CARREGAR", style="Ghost.TButton", command=self.carregar_programacao)\
+        ttk.Button(self.card, text="ðÅ¸â€œâ€š CARREGAR", style="Ghost.TButton", command=self.carregar_programacao)\
             .grid(row=1, column=1, padx=(0, 14))
 
         info_frame = ttk.Frame(self.card, style="Card.TFrame")
@@ -10714,13 +11575,13 @@ class RecebimentosPage(PageBase):
         top2.grid(row=0, column=0, sticky="ew")
         top2.grid_columnconfigure(30, weight=1)
 
-        ttk.Button(top2, text="👤 INSERIR CLIENTE MANUAL", style="Warn.TButton", command=self.inserir_cliente_manual)\
+        ttk.Button(top2, text="ðÅ¸â€˜¤ INSERIR CLIENTE MANUAL", style="Warn.TButton", command=self.inserir_cliente_manual)\
             .grid(row=0, column=0, padx=6)
 
-        ttk.Button(top2, text="🧽 ZERAR RECEBIMENTO", style="Danger.TButton", command=self.zerar_recebimento)\
+        ttk.Button(top2, text="ðÅ¸§½ ZERAR RECEBIMENTO", style="Danger.TButton", command=self.zerar_recebimento)\
             .grid(row=0, column=1, padx=6)
 
-        ttk.Button(top2, text="➡ IR PARA DESPESAS", style="Primary.TButton", command=self._ir_para_despesas)\
+        ttk.Button(top2, text="âÅ¾¡ IR PARA DESPESAS", style="Primary.TButton", command=self._ir_para_despesas)\
             .grid(row=0, column=2, padx=6)
 
         self.lbl_total = ttk.Label(
@@ -10780,13 +11641,13 @@ class RecebimentosPage(PageBase):
         self.tree.bind("<Double-1>", self._on_tree_double_click_value, add=True)
 
         # -------------------------
-        # FormulÃ¡rio de recebimento
+        # Formulário de recebimento
         # -------------------------
         frm = ttk.Frame(self.card2, style="Card.TFrame")
         frm.grid(row=3, column=0, sticky="ew", pady=(12, 0))
         frm.grid_columnconfigure(4, weight=1)
 
-        ttk.Label(frm, text="CÃ³d Cliente", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(frm, text="Cód Cliente", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w")
         self.ent_cod = ttk.Entry(frm, style="Field.TEntry", width=12)
         self.ent_cod.grid(row=1, column=0, sticky="w", padx=6)
         bind_entry_smart(self.ent_cod, "int")
@@ -10813,23 +11674,23 @@ class RecebimentosPage(PageBase):
         self.cb_forma.grid(row=1, column=3, sticky="w", padx=6)
         self.cb_forma.set("DINHEIRO")
 
-        ttk.Label(frm, text="ObservaÃ§Ã£o", style="CardLabel.TLabel").grid(row=0, column=4, sticky="w")
+        ttk.Label(frm, text="Observação", style="CardLabel.TLabel").grid(row=0, column=4, sticky="w")
         self.ent_obs = ttk.Entry(frm, style="Field.TEntry", width=40)
         self.ent_obs.grid(row=1, column=4, sticky="ew", padx=6)
         bind_entry_smart(self.ent_obs, "text")
 
-        ttk.Button(frm, text="💾 SALVAR RECEBIMENTOS", style="Primary.TButton", command=self.salvar_recebimento)\
+        ttk.Button(frm, text="ðÅ¸â€™¾ SALVAR RECEBIMENTOS", style="Primary.TButton", command=self.salvar_recebimento)\
             .grid(row=1, column=5, sticky="e", padx=(12, 0))
 
-        # âœ… TROCA: no lugar do Excel, botÃ£o IMPRIMIR PDF
-        ttk.Button(frm, text="🖨 IMPRIMIR PDF", style="Warn.TButton", command=self.imprimir_pdf)\
+        # âÅâ€œââ‚¬¦ TROCA: no lugar do Excel, botão IMPRIMIR PDF
+        ttk.Button(frm, text="ðÅ¸â€“¨ IMPRIMIR PDF", style="Warn.TButton", command=self.imprimir_pdf)\
             .grid(row=1, column=6, sticky="e", padx=6)
 
-        # Por padrÃ£o: COD/NOME nÃ£o editÃ¡veis
+        # Por padrão: COD/NOME não editáveis
         self._set_cliente_fields_readonly(True)
 
         # -------------------------
-        # Painel ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œmodo ocultoÃƒÂ¢Ã¢â€šÂ¬Ã‚ (apÃƒÆ’Ã‚Â³s finalizar prestaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o)
+        # Painel âââââ€š¬Å¡¬Åâââ€š¬Åâ€œmodo ocultoâââââ€š¬Å¡¬Â (apÃÆââ‚¬â„¢³s finalizar prestaÃÆââ‚¬â„¢§ÃÆââ‚¬â„¢£o)
         # -------------------------
         self._wrap_collapsed = ttk.Frame(self.body, style="Card.TFrame", padding=14)
         self._wrap_collapsed.grid(row=2, column=0, sticky="ew", pady=(14, 0))
@@ -10837,7 +11698,7 @@ class RecebimentosPage(PageBase):
 
         self._lbl_collapsed = ttk.Label(
             self._wrap_collapsed,
-            text="PRESTAÃ‡ÃƒO FECHADA / SALVA.\nCabeÃ§alhos e tabela foram ocultados.",
+            text="PRESTAÇÃO FECHADA / SALVA.\nCabeçalhos e tabela foram ocultados.",
             background="white",
             foreground="#111827",
             font=("Segoe UI", 10, "bold"),
@@ -10849,13 +11710,13 @@ class RecebimentosPage(PageBase):
         btns.grid(row=1, column=0, sticky="ew", pady=(6, 0))
         btns.grid_columnconfigure(10, weight=1)
 
-        ttk.Button(btns, text="🖨 IMPRIMIR PDF", style="Warn.TButton", command=self.imprimir_pdf)\
+        ttk.Button(btns, text="ðÅ¸â€“¨ IMPRIMIR PDF", style="Warn.TButton", command=self.imprimir_pdf)\
             .grid(row=0, column=0, padx=6, sticky="w")
 
-        ttk.Button(btns, text="👁 MOSTRAR DADOS (CONSULTA)", style="Ghost.TButton", command=self._expand_view)\
+        ttk.Button(btns, text="ðÅ¸â€˜Â MOSTRAR DADOS (CONSULTA)", style="Ghost.TButton", command=self._expand_view)\
             .grid(row=0, column=1, padx=6, sticky="w")
 
-        ttk.Button(btns, text="LIMPAR / NOVA PROGRAMAÃ‡ÃƒO", style="Primary.TButton", command=self._reset_view)\
+        ttk.Button(btns, text="LIMPAR / NOVA PROGRAMAÇÃO", style="Primary.TButton", command=self._reset_view)\
             .grid(row=0, column=2, padx=6, sticky="w")
 
         self.refresh_comboboxes()
@@ -10863,10 +11724,10 @@ class RecebimentosPage(PageBase):
         self._refresh_diarias_preview()
 
     # =========================
-    # Modos de visualizaÃ§Ã£o (ocultar/mostrar)
+    # Modos de visualização (ocultar/mostrar)
     # =========================
     def _collapse_view(self):
-        """Oculta cabeÃ§alhos e dados de tabela (mantÃ©m imprimir/limpar)."""
+        """Oculta cabeçalhos e dados de tabela (mantém imprimir/limpar)."""
         self._is_collapsed_after_close = True
         try:
             self.card.grid_remove()
@@ -10882,7 +11743,7 @@ class RecebimentosPage(PageBase):
             logging.debug("Falha ignorada")
 
     def _expand_view(self):
-        """Mostra novamente cabeÃ§alho e tabela."""
+        """Mostra novamente cabeçalho e tabela."""
         self._is_collapsed_after_close = False  # modo oculto apos finalizar/salvar
         try:
             self._wrap_collapsed.grid_remove()
@@ -10903,7 +11764,7 @@ class RecebimentosPage(PageBase):
             self.set_status(f"STATUS: Programacao {self._current_prog}")
 
     def _reset_view(self):
-        """Limpa seleÃ§Ã£o e volta para estado inicial."""
+        """Limpa seleção e volta para estado inicial."""
         self._expand_view()
         self._current_prog = ""
         self.cb_prog.set("")
@@ -10942,7 +11803,7 @@ class RecebimentosPage(PageBase):
         self.set_status("STATUS: Selecione uma programacao FINALIZADA e lance os pagantes (prestacao de contas).")
 
     # -------------------------
-    # Helpers de seguranÃ§a UI (readonly sem quebrar inserts)
+    # Helpers de segurança UI (readonly sem quebrar inserts)
     # -------------------------
     def _set_cliente_fields_readonly(self, readonly: bool):
         try:
@@ -10975,12 +11836,29 @@ class RecebimentosPage(PageBase):
                 logging.debug("Falha ignorada")
 
     # -------------------------
-    # ResoluÃ§Ã£o de nomes (motorista/equipe)
+    # Resolução de nomes (motorista/equipe)
     # -------------------------
     def _resolve_motorista_nome(self, motorista_raw: str) -> str:
         m = (motorista_raw or "").strip()
         if not m:
             return ""
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                resp = _call_api(
+                    "GET",
+                    "desktop/cadastros/motoristas",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                alvo = upper(m)
+                for r in (resp or []):
+                    if not isinstance(r, dict):
+                        continue
+                    cod = upper(str(r.get("codigo") or "").strip())
+                    if cod and cod == alvo:
+                        return upper(str(r.get("nome") or "").strip())
+            except Exception:
+                logging.debug("Falha ao resolver motorista via API; usando fallback local.", exc_info=True)
         try:
             with get_db() as conn:
                 cur = conn.cursor()
@@ -11022,7 +11900,7 @@ class RecebimentosPage(PageBase):
         return resolve_equipe_nomes(equipe_raw)
 
     # -------------------------
-    # OrdenaÃ§Ã£o (padronizada / robusta)
+    # Ordenação (padronizada / robusta)
     # -------------------------
     def sort_by_column(self, col):
         if self._current_sort_column == col:
@@ -11083,25 +11961,45 @@ class RecebimentosPage(PageBase):
         for idx, (_, child) in enumerate(data):
             self.tree.move(child, "", idx)
 
-        arrow = " Ã¢â€ â€œ" if reverse else " Ã¢â€ â€˜"
+        arrow = " ââââ€š¬ âââ€š¬Åâ€œ" if reverse else " ââââ€š¬ âââ€š¬ËÅ“"
         for c in self.tree["columns"]:
             current_text = self.tree.heading(c, "text")
-            if current_text.endswith(" Ã¢â€ â€˜") or current_text.endswith(" Ã¢â€ â€œ"):
+            if current_text.endswith(" ââââ€š¬ âââ€š¬ËÅ“") or current_text.endswith(" ââââ€š¬ âââ€š¬Åâ€œ"):
                 current_text = current_text[:-2]
             self.tree.heading(c, text=current_text)
 
         current_text = self.tree.heading(col, "text")
-        if current_text.endswith(" Ã¢â€ â€˜") or current_text.endswith(" Ã¢â€ â€œ"):
+        if current_text.endswith(" ââââ€š¬ âââ€š¬ËÅ“") or current_text.endswith(" ââââ€š¬ âââ€š¬Åâ€œ"):
             current_text = current_text[:-2]
         self.tree.heading(col, text=current_text + arrow)
 
     # -------------------------
-    # Combobox programaÃ§Ã£o (pendentes)
+    # Combobox programação (pendentes)
     # -------------------------
     def _rota_apt_para_recebimentos(self, prog: str) -> bool:
         prog = upper(str(prog or "").strip())
         if not prog:
             return False
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                resp = _call_api(
+                    "GET",
+                    f"desktop/rotas/{urllib.parse.quote(prog)}",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                rota = resp.get("rota") if isinstance(resp, dict) else None
+                if isinstance(rota, dict):
+                    st_op = upper(str(rota.get("status_operacional") or rota.get("status") or ""))
+                    fin_app = safe_int(rota.get("finalizada_no_app"), 0)
+                    prest = upper(str(rota.get("prestacao_status") or "PENDENTE"))
+                    if st_op:
+                        if fin_app != 1:
+                            return False
+                        return st_op in {"FINALIZADA", "FINALIZADO"} and prest != "FECHADA"
+                    return False
+            except Exception:
+                logging.debug("Falha ao validar rota apta via API; usando fallback local.", exc_info=True)
         try:
             with get_db() as conn:
                 cur = conn.cursor()
@@ -11146,67 +12044,18 @@ class RecebimentosPage(PageBase):
         return False
 
     def _sync_status_finalizacao_from_api(self, max_rows: int = 80):
-        """Atualiza status_operacional/finalizada_no_app no banco local para refletir finalizações do app."""
+        """Mantido por compatibilidade: valida conectividade API sem persistencia local."""
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-        if not desktop_secret:
+        if not desktop_secret or not is_desktop_api_sync_enabled():
             return
         try:
-            with get_db() as conn:
-                cur = conn.cursor()
-                cur.execute("PRAGMA table_info(programacoes)")
-                cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
-                if "status_operacional" not in cols_prog and "finalizada_no_app" not in cols_prog:
-                    return
-                cur.execute(
-                    """
-                    SELECT codigo_programacao
-                    FROM programacoes
-                    WHERE codigo_programacao IS NOT NULL
-                      AND TRIM(codigo_programacao) <> ''
-                    ORDER BY id DESC
-                    LIMIT ?
-                    """,
-                    (max_rows,),
-                )
-                codigos = [upper(str(r[0] or "").strip()) for r in (cur.fetchall() or []) if str(r[0] or "").strip()]
+            _call_api(
+                "GET",
+                f"desktop/programacoes?modo=finalizadas_pendentes&limit={max(int(max_rows or 0), 1)}",
+                extra_headers={"X-Desktop-Secret": desktop_secret},
+            )
         except Exception:
-            logging.debug("Falha ignorada")
-            return
-
-        for codigo in codigos:
-            try:
-                resp = _call_api(
-                    "GET",
-                    f"desktop/rotas/{codigo}",
-                    extra_headers={"X-Desktop-Secret": desktop_secret},
-                )
-                rota = resp.get("rota") if isinstance(resp, dict) else None
-                if not isinstance(rota, dict):
-                    continue
-                st_op = upper(str(rota.get("status_operacional") or rota.get("status") or "").strip())
-                if not st_op:
-                    continue
-                fin_app = 1 if st_op in {"FINALIZADA", "FINALIZADO"} else 0
-                with get_db() as conn:
-                    cur = conn.cursor()
-                    cur.execute("PRAGMA table_info(programacoes)")
-                    cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
-                    sets = []
-                    params = []
-                    if "status_operacional" in cols_prog:
-                        sets.append("status_operacional=?")
-                        params.append(st_op)
-                    if "finalizada_no_app" in cols_prog:
-                        sets.append("finalizada_no_app=?")
-                        params.append(fin_app)
-                    if sets:
-                        params.append(codigo)
-                        cur.execute(
-                            f"UPDATE programacoes SET {', '.join(sets)} WHERE codigo_programacao=?",
-                            tuple(params),
-                        )
-            except Exception:
-                logging.debug("Falha ao sincronizar status operacional no recebimentos", exc_info=True)
+            logging.debug("Falha ao consultar finalizacoes na API (recebimentos)", exc_info=True)
 
     def refresh_comboboxes(self):
         try:
@@ -11214,6 +12063,23 @@ class RecebimentosPage(PageBase):
             self._sync_status_finalizacao_from_api(max_rows=80)
         except Exception:
             logging.debug("Falha ignorada")
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                resp = _call_api(
+                    "GET",
+                    "desktop/programacoes?modo=finalizadas_pendentes&limit=300",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                arr = resp.get("programacoes") if isinstance(resp, dict) else []
+                valores = [upper((r or {}).get("codigo_programacao") or "") for r in (arr or []) if isinstance(r, dict)]
+                self.cb_prog["values"] = valores
+                atual = upper(str(self.cb_prog.get() or "").strip())
+                if atual and atual not in {upper(str(v or "").strip()) for v in valores}:
+                    self.cb_prog.set("")
+                return
+            except Exception:
+                logging.debug("Falha ao carregar combobox Recebimentos via API", exc_info=True)
         with get_db() as conn:
             cur = conn.cursor()
             try:
@@ -11259,20 +12125,40 @@ class RecebimentosPage(PageBase):
         prog = upper(prog)
         if not prog:
             return False
+        row = None
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                resp = _call_api(
+                    "GET",
+                    f"desktop/rotas/{urllib.parse.quote(prog)}",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                rota = resp.get("rota") if isinstance(resp, dict) else None
+                if isinstance(rota, dict):
+                    row = (
+                        str(rota.get("data_saida") or ""),
+                        str(rota.get("hora_saida") or ""),
+                        str(rota.get("data_chegada") or ""),
+                        str(rota.get("hora_chegada") or ""),
+                    )
+            except Exception:
+                logging.debug("Falha ao sincronizar horarios via API; usando fallback local.", exc_info=True)
 
-        with get_db() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                """
-                SELECT data_saida, hora_saida, data_chegada, hora_chegada
-                FROM programacoes
-                WHERE codigo_programacao=?
-                ORDER BY id DESC
-                LIMIT 1
-                """,
-                (prog,),
-            )
-            row = cur.fetchone()
+        if row is None:
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    SELECT data_saida, hora_saida, data_chegada, hora_chegada
+                    FROM programacoes
+                    WHERE codigo_programacao=?
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (prog,),
+                )
+                row = cur.fetchone()
 
         if not row:
             return False
@@ -11325,7 +12211,7 @@ class RecebimentosPage(PageBase):
         self.set_status("STATUS: Selecione uma programacao FINALIZADA e lance os pagantes (prestacao de contas).")
 
     def _sync_programacao_from_api(self, prog: str, silent: bool = True) -> bool:
-        """Sincroniza dados da programação com a API central e persiste no banco local."""
+        """Valida disponibilidade da programacao na API central (sem persistencia local)."""
         prog = upper(prog)
         if not prog:
             return False
@@ -11341,26 +12227,7 @@ class RecebimentosPage(PageBase):
                 extra_headers={"X-Desktop-Secret": desktop_secret},
             )
             rota = resposta.get("rota") if isinstance(resposta, dict) else None
-            clientes = resposta.get("clientes") if isinstance(resposta, dict) else []
-            if not isinstance(rota, dict):
-                return False
-
-            despesas_page = None
-            try:
-                if hasattr(self.app, "pages"):
-                    despesas_page = self.app.pages.get("Despesas")
-            except Exception:
-                despesas_page = None
-            if not despesas_page:
-                return False
-
-            with get_db() as conn:
-                cur = conn.cursor()
-                despesas_page._apply_api_programacao(cur, prog, rota)
-                despesas_page._apply_api_clientes(cur, prog, clientes or [])
-                conn.commit()
-
-            return True
+            return isinstance(rota, dict)
         except Exception:
             logging.debug("Falha ao sincronizar recebimentos/despesas pela API central", exc_info=True)
             if not silent:
@@ -11377,6 +12244,19 @@ class RecebimentosPage(PageBase):
     def _is_prestacao_fechada(self, prog: str) -> bool:
         if not prog:
             return False
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                resp = _call_api(
+                    "GET",
+                    f"desktop/rotas/{urllib.parse.quote(upper(prog))}",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                rota = resp.get("rota") if isinstance(resp, dict) else None
+                if isinstance(rota, dict):
+                    return upper(str(rota.get("prestacao_status") or "")) == "FECHADA"
+            except Exception:
+                logging.debug("Falha ao consultar prestacao via API; usando fallback local.", exc_info=True)
         try:
             with get_db() as conn:
                 cur = conn.cursor()
@@ -11389,7 +12269,7 @@ class RecebimentosPage(PageBase):
 
     def _warn_if_fechada(self) -> bool:
         if self._is_prestacao_fechada(self._current_prog):
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Esta prestaÃ§Ã£o jÃ¡ estÃ¡ FECHADA. NÃ£o Ã© possÃ­vel alterar recebimentos.")
+            messagebox.showwarning("ATENÇÃO", "Esta prestação já está FECHADA. Não é possÃÂÂvel alterar recebimentos.")
             return True
         return False
 
@@ -11505,7 +12385,7 @@ class RecebimentosPage(PageBase):
                 raw = str(ent.get() or "")
                 digits = re.sub(r"\D", "", raw)[:8]
 
-                # Bloqueia valores invÃ¡lidos removendo o Ãºltimo dÃ­gito invÃ¡lido.
+                # Bloqueia valores inválidos removendo o último dÃÂÂgito inválido.
                 while digits and (not _is_partial_date_digits_valid(digits)):
                     digits = digits[:-1]
 
@@ -11566,7 +12446,7 @@ class RecebimentosPage(PageBase):
                 raw = str(ent.get() or "")
                 digits = re.sub(r"\D", "", raw)[:6]
 
-                # Bloqueia valores invÃ¡lidos removendo o Ãºltimo dÃ­gito invÃ¡lido.
+                # Bloqueia valores inválidos removendo o último dÃÂÂgito inválido.
                 while digits and (not _is_partial_time_digits_valid(digits)):
                     digits = digits[:-1]
 
@@ -11659,10 +12539,10 @@ class RecebimentosPage(PageBase):
 
     def _abrir_despesas_com_programacao(self):
         if not self._current_prog:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Carregue uma programaÃ§Ã£o primeiro.")
+            messagebox.showwarning("ATENÇÃO", "Carregue uma programação primeiro.")
             return False
         prog = self._current_prog
-        # Tenta persistir o cabeÃ§alho sem bloquear a navegaÃ§Ã£o.
+        # Tenta persistir o cabeçalho sem bloquear a navegação.
         try:
             self.salvar_dados_rota(silent=True)
         except Exception:
@@ -11683,9 +12563,9 @@ class RecebimentosPage(PageBase):
                 except Exception:
                     logging.debug("Falha ignorada")
             if synced:
-                self.set_status(f"STATUS: Indo para DESPESAS - programaÃ§Ã£o {prog} (dados sincronizados da API).")
+                self.set_status(f"STATUS: Indo para DESPESAS - programação {prog} (dados sincronizados da API).")
             else:
-                self.set_status(f"STATUS: Indo para DESPESAS - programaÃ§Ã£o {prog}.")
+                self.set_status(f"STATUS: Indo para DESPESAS - programação {prog}.")
             return True
         except Exception:
             logging.debug("Falha ignorada")
@@ -11695,12 +12575,12 @@ class RecebimentosPage(PageBase):
         self._abrir_despesas_com_programacao()
 
     # -------------------------
-    # Carregar programaÃ§Ã£o
+    # Carregar programação
     # -------------------------
     def carregar_programacao(self):
         prog = upper(self.cb_prog.get())
         if not prog:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Selecione uma programaÃ§Ã£o pendente.")
+            messagebox.showwarning("ATENÇÃO", "Selecione uma programação pendente.")
             return
 
         if not self._rota_apt_para_recebimentos(prog):
@@ -11729,38 +12609,77 @@ class RecebimentosPage(PageBase):
             return
 
         self._current_prog = prog
+        motorista = veiculo = equipe = nf = ""
+        data_saida = hora_saida = data_chegada = hora_chegada = ""
+        rota = ""
+        diaria_motorista = 0.0
+        found_prog = False
 
-        with get_db() as conn:
-            cur = conn.cursor()
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        api_enabled = bool(desktop_secret and is_desktop_api_sync_enabled())
+        api_failed = False
+        api_checked = False
+        if api_enabled:
             try:
-                cur.execute("PRAGMA table_info(programacoes)")
-                cols_prog = [str(r[1]).lower() for r in cur.fetchall()]
+                api_checked = True
+                resp = _call_api(
+                    "GET",
+                    f"desktop/rotas/{urllib.parse.quote(upper(prog))}",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                rota_obj = resp.get("rota") if isinstance(resp, dict) else None
+                if isinstance(rota_obj, dict):
+                    motorista = str(rota_obj.get("motorista") or "")
+                    veiculo = str(rota_obj.get("veiculo") or "")
+                    equipe = str(rota_obj.get("equipe") or "")
+                    nf = str(rota_obj.get("num_nf") or rota_obj.get("nf_numero") or "")
+                    data_saida = str(rota_obj.get("data_saida") or "")
+                    hora_saida = str(rota_obj.get("hora_saida") or "")
+                    data_chegada = str(rota_obj.get("data_chegada") or "")
+                    hora_chegada = str(rota_obj.get("hora_chegada") or "")
+                    rota = str(rota_obj.get("local_rota") or rota_obj.get("tipo_rota") or "")
+                    diaria_motorista = safe_float(rota_obj.get("diaria_motorista_valor"), 0.0)
+                    found_prog = True
             except Exception:
-                cols_prog = []
-            col_rota = "local_rota" if "local_rota" in cols_prog else ("tipo_rota" if "tipo_rota" in cols_prog else "''")
-            col_diaria = "diaria_motorista_valor" if "diaria_motorista_valor" in cols_prog else "0"
-            col_nf = (
-                "COALESCE(NULLIF(num_nf,''), NULLIF(nf_numero,''), '')"
-                if ("num_nf" in cols_prog and "nf_numero" in cols_prog)
-                else ("num_nf" if "num_nf" in cols_prog else ("nf_numero" if "nf_numero" in cols_prog else "''"))
-            )
-            cur.execute("""
-                SELECT motorista, veiculo, equipe, {col_nf} as num_nf,
-                       data_saida, hora_saida, data_chegada, hora_chegada,
-                       {col_rota} as rota, COALESCE({col_diaria}, 0) as diaria_motorista
-                FROM programacoes
-                WHERE codigo_programacao=?
-                ORDER BY id DESC
-                LIMIT 1
-            """.format(col_nf=col_nf, col_rota=col_rota, col_diaria=col_diaria), (prog,))
-            row = cur.fetchone()
+                api_failed = True
+                logging.debug("Falha ao carregar programacao em recebimentos via API; usando fallback local.", exc_info=True)
 
-        if not row:
-            messagebox.showwarning("ATENÃ‡ÃƒO", f"ProgramaÃ§Ã£o nÃ£o encontrada: {prog}")
+        if api_enabled and api_checked and (not api_failed) and (not found_prog):
+            messagebox.showwarning("ATENÇÃO", f"Programação não encontrada no servidor: {prog}")
             self._reset_view()
             return
 
-        motorista, veiculo, equipe, nf, data_saida, hora_saida, data_chegada, hora_chegada, rota, diaria_motorista = row
+        if not found_prog:
+            with get_db() as conn:
+                cur = conn.cursor()
+                try:
+                    cur.execute("PRAGMA table_info(programacoes)")
+                    cols_prog = [str(r[1]).lower() for r in cur.fetchall()]
+                except Exception:
+                    cols_prog = []
+                col_rota = "local_rota" if "local_rota" in cols_prog else ("tipo_rota" if "tipo_rota" in cols_prog else "''")
+                col_diaria = "diaria_motorista_valor" if "diaria_motorista_valor" in cols_prog else "0"
+                col_nf = (
+                    "COALESCE(NULLIF(num_nf,''), NULLIF(nf_numero,''), '')"
+                    if ("num_nf" in cols_prog and "nf_numero" in cols_prog)
+                    else ("num_nf" if "num_nf" in cols_prog else ("nf_numero" if "nf_numero" in cols_prog else "''"))
+                )
+                cur.execute("""
+                    SELECT motorista, veiculo, equipe, {col_nf} as num_nf,
+                           data_saida, hora_saida, data_chegada, hora_chegada,
+                           {col_rota} as rota, COALESCE({col_diaria}, 0) as diaria_motorista
+                    FROM programacoes
+                    WHERE codigo_programacao=?
+                    ORDER BY id DESC
+                    LIMIT 1
+                """.format(col_nf=col_nf, col_rota=col_rota, col_diaria=col_diaria), (prog,))
+                row = cur.fetchone()
+
+            if not row:
+                messagebox.showwarning("ATENÇÃO", f"Programação não encontrada: {prog}")
+                self._reset_view()
+                return
+            motorista, veiculo, equipe, nf, data_saida, hora_saida, data_chegada, hora_chegada, rota, diaria_motorista = row
 
         motorista_nome = self._resolve_motorista_nome(motorista)
         equipe_nomes = self._resolve_equipe_integrantes(equipe)
@@ -11800,7 +12719,7 @@ class RecebimentosPage(PageBase):
                 self.set_status(f"STATUS: Programacao carregada: {prog}")
 
     # -------------------------
-    # ValidaÃ§Ã£o leve de data/hora
+    # Validação leve de data/hora
     # -------------------------
     def _validate_date(self, s: str) -> bool:
         s = (s or "").strip()
@@ -11817,7 +12736,9 @@ class RecebimentosPage(PageBase):
     def salvar_dados_rota(self, silent: bool = False):
         if not self._current_prog:
             if not silent:
-                messagebox.showwarning("ATENÃ‡ÃƒO", "Carregue uma programaÃ§Ã£o primeiro.")
+                messagebox.showwarning("ATENCAO", "Carregue uma programacao primeiro.")
+            return False
+        if not ensure_system_api_binding(context=f"Salvar cabecalho rota ({self._current_prog})", parent=self):
             return False
         if self._warn_if_fechada():
             return False
@@ -11825,7 +12746,7 @@ class RecebimentosPage(PageBase):
         diaria_motorista = safe_money(self.ent_diaria_motorista.get(), 0.0)
         if diaria_motorista < 0:
             if not silent:
-                messagebox.showwarning("ATENÃ‡ÃƒO", "DiÃ¡ria do motorista nÃ£o pode ser negativa.")
+                messagebox.showwarning("ATENCAO", "Diaria do motorista nao pode ser negativa.")
             return False
 
         data_saida = normalize_date(self.ent_data_saida.get())
@@ -11835,11 +12756,11 @@ class RecebimentosPage(PageBase):
 
         if data_saida is None or data_chegada is None:
             if not silent:
-                messagebox.showwarning("ATENÃ‡ÃƒO", "Formato de data invÃ¡lido. Use DD/MM/AA.")
+                messagebox.showwarning("ATENCAO", "Formato de data invalido. Use DD/MM/AA.")
             return False
         if hora_saida is None or hora_chegada is None:
             if not silent:
-                messagebox.showwarning("ATENÃ‡ÃƒO", "Formato de hora invÃ¡lido. Use HH:MM:SS (ex.: 07:30:00).")
+                messagebox.showwarning("ATENCAO", "Formato de hora invalido. Use HH:MM:SS (ex.: 07:30:00).")
             return False
 
         # atualiza campos com formato normalizado
@@ -11851,56 +12772,48 @@ class RecebimentosPage(PageBase):
         self._refresh_diarias_preview()
 
         try:
-            resumo_diarias = None
-            with get_db() as conn:
-                cur = conn.cursor()
-                try:
-                    cur.execute("PRAGMA table_info(programacoes)")
-                    cols_prog = [str(r[1]).lower() for r in cur.fetchall()]
-                except Exception:
-                    cols_prog = []
-                cur.execute("""
-                    UPDATE programacoes
-                       SET data_saida=?,
-                           hora_saida=?,
-                           data_chegada=?,
-                           hora_chegada=?
-                     WHERE codigo_programacao=?
-                """, (data_saida, hora_saida, data_chegada, hora_chegada, self._current_prog))
-                if "diaria_motorista_valor" in cols_prog:
-                    cur.execute(
-                        "UPDATE programacoes SET diaria_motorista_valor=? WHERE codigo_programacao=?",
-                        (diaria_motorista, self._current_prog)
-                    )
-                resumo_diarias = self._sync_diarias_despesas(
-                    cur=cur,
-                    prog=self._current_prog,
-                    rota=self._rota_atual,
-                    equipe_raw=self._equipe_raw,
-                    data_saida=data_saida,
-                    hora_saida=hora_saida,
-                    data_chegada=data_chegada,
-                    hora_chegada=hora_chegada,
-                    diaria_motorista=diaria_motorista,
-                )
+            desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+            _call_api(
+                "PUT",
+                f"desktop/rotas/{urllib.parse.quote(upper(self._current_prog))}/cabecalho",
+                payload={
+                    "data_saida": data_saida,
+                    "hora_saida": hora_saida,
+                    "data_chegada": data_chegada,
+                    "hora_chegada": hora_chegada,
+                    "diaria_motorista_valor": float(diaria_motorista),
+                },
+                extra_headers={"X-Desktop-Secret": desktop_secret},
+            )
+            resumo_diarias = self._sync_diarias_despesas(
+                prog=self._current_prog,
+                rota=self._rota_atual,
+                equipe_raw=self._equipe_raw,
+                data_saida=data_saida,
+                hora_saida=hora_saida,
+                data_chegada=data_chegada,
+                hora_chegada=hora_chegada,
+                diaria_motorista=diaria_motorista,
+            )
 
             if not silent:
                 messagebox.showinfo("OK", "Dados da rota atualizados!")
             if resumo_diarias:
                 self.set_status(
-                    "STATUS: DiÃ¡rias atualizadas - "
+                    "STATUS: Diarias atualizadas - "
                     f"QTD: {resumo_diarias['qtd_diarias']:g} | "
                     f"Motorista: {fmt_money(resumo_diarias['total_motorista'])} | "
                     f"Equipe ({resumo_diarias['qtd_ajudantes']}): {fmt_money(resumo_diarias['total_ajudantes'])} | "
                     f"Total: {fmt_money(resumo_diarias['total_geral'])}"
                 )
             else:
-                self.set_status("STATUS: Dados do cabeÃ§alho atualizados.")
+                self.set_status("STATUS: Dados do cabecalho atualizados.")
             return True
         except Exception as e:
             if not silent:
                 messagebox.showerror("ERRO", f"Erro ao salvar dados: {str(e)}")
             return False
+    
 
     def _parse_dt_diaria(self, data_s: str, hora_s: str):
         data_s = (data_s or "").strip()
@@ -11958,7 +12871,7 @@ class RecebimentosPage(PageBase):
             return len(parts_nome)
         return 1
 
-    def _sync_diarias_despesas(self, cur, prog: str, rota: str, equipe_raw: str, data_saida: str, hora_saida: str, data_chegada: str, hora_chegada: str, diaria_motorista: float):
+    def _sync_diarias_despesas(self, prog: str, rota: str, equipe_raw: str, data_saida: str, hora_saida: str, data_chegada: str, hora_chegada: str, diaria_motorista: float):
         qtd = self._calc_qtd_diarias_regra(data_saida, hora_saida, data_chegada, hora_chegada)
         diaria_motorista = safe_float(diaria_motorista, 0.0)
         qtd_ajudantes = self._count_ajudantes(equipe_raw)
@@ -11969,17 +12882,34 @@ class RecebimentosPage(PageBase):
 
         motorista_nome = ""
         ajudantes_nome = ""
-        try:
-            cur.execute(
-                "SELECT COALESCE(motorista,''), COALESCE(equipe,'') FROM programacoes WHERE codigo_programacao=? ORDER BY id DESC LIMIT 1",
-                (prog,),
-            )
-            rr = cur.fetchone() or ("", "")
-            motorista_nome = self._resolve_motorista_nome(rr[0] or "")
-            ajudantes_nome = self._resolve_equipe_integrantes(rr[1] or equipe_raw or "")
-        except Exception:
-            motorista_nome = self._resolve_motorista_nome("")
-            ajudantes_nome = self._resolve_equipe_integrantes(equipe_raw or "")
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                resp = _call_api(
+                    "GET",
+                    f"desktop/rotas/{urllib.parse.quote(upper(prog))}",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                rota_obj = resp.get("rota") if isinstance(resp, dict) else None
+                if isinstance(rota_obj, dict):
+                    motorista_nome = self._resolve_motorista_nome(str(rota_obj.get("motorista") or ""))
+                    ajudantes_nome = self._resolve_equipe_integrantes(str(rota_obj.get("equipe") or equipe_raw or ""))
+            except Exception:
+                logging.debug("Falha ao carregar equipe/motorista via API para diarias; usando fallback local.", exc_info=True)
+        if not motorista_nome and not ajudantes_nome:
+            try:
+                with get_db() as conn:
+                    cur = conn.cursor()
+                    cur.execute(
+                        "SELECT COALESCE(motorista,''), COALESCE(equipe,'') FROM programacoes WHERE codigo_programacao=? ORDER BY id DESC LIMIT 1",
+                        (prog,),
+                    )
+                    rr = cur.fetchone() or ("", "")
+                    motorista_nome = self._resolve_motorista_nome(rr[0] or "")
+                    ajudantes_nome = self._resolve_equipe_integrantes(rr[1] or equipe_raw or "")
+            except Exception:
+                motorista_nome = self._resolve_motorista_nome("")
+                ajudantes_nome = self._resolve_equipe_integrantes(equipe_raw or "")
         if not motorista_nome:
             motorista_nome = "-"
         if not ajudantes_nome:
@@ -11987,22 +12917,19 @@ class RecebimentosPage(PageBase):
 
         obs_motorista = f"QTD DIARIAS: {qtd:g} | MOTORISTA: {motorista_nome}"
         obs_ajudantes = f"QTD DIARIAS: {qtd:g} | AJUDANTES: {ajudantes_nome}"
-        cur.execute("""
-            DELETE FROM despesas
-             WHERE codigo_programacao=?
-               AND descricao IN ('DIARIAS MOTORISTA', 'DIARIAS AJUDANTES')
-               AND COALESCE(categoria, '')='DIARIAS'
-        """, (prog,))
-
-        now_s = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        cur.execute("""
-            INSERT INTO despesas (codigo_programacao, descricao, valor, categoria, observacao, data_registro)
-            VALUES (?, ?, ?, 'DIARIAS', ?, ?)
-        """, (prog, "DIARIAS MOTORISTA", total_mot, obs_motorista, now_s))
-        cur.execute("""
-            INSERT INTO despesas (codigo_programacao, descricao, valor, categoria, observacao, data_registro)
-            VALUES (?, ?, ?, 'DIARIAS', ?, ?)
-        """, (prog, "DIARIAS AJUDANTES", total_ajud, obs_ajudantes, now_s))
+        _call_api(
+            "POST",
+            f"desktop/rotas/{urllib.parse.quote(upper(prog))}/diarias/sync",
+            payload={
+                "qtd_diarias": float(qtd),
+                "qtd_ajudantes": int(qtd_ajudantes),
+                "total_motorista": float(total_mot),
+                "total_ajudantes": float(total_ajud),
+                "observacao_motorista": obs_motorista,
+                "observacao_ajudantes": obs_ajudantes,
+            },
+            extra_headers={"X-Desktop-Secret": desktop_secret},
+        )
 
         return {
             "qtd_diarias": qtd,
@@ -12013,8 +12940,9 @@ class RecebimentosPage(PageBase):
             "total_ajudantes": total_ajud,
             "total_geral": total_geral,
         }
+    
 
-    # -------------------------
+# -------------------------
     # Carregar clientes + recebimentos (resumo)
     # -------------------------
     def carregar_clientes_e_recebimentos(self):
@@ -12024,70 +12952,154 @@ class RecebimentosPage(PageBase):
 
         filtro_forma = ""
         filtro_valor_min = 0.0
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        api_enabled = bool(desktop_secret and is_desktop_api_sync_enabled())
+        api_loaded = False
 
-        with get_db() as conn:
-            cur = conn.cursor()
-
-            cur.execute("""
-                SELECT DISTINCT cod_cliente, nome_cliente
-                FROM programacao_itens
-                WHERE codigo_programacao=?
-                ORDER BY nome_cliente ASC
-            """, (prog,))
-            clientes = cur.fetchall() or []
-
-            # dados sincronizados do app (controle)
-            ctrl_map = {}
+        if api_enabled:
             try:
-                cur.execute("PRAGMA table_info(programacao_itens_controle)")
-                cols_ctrl = {str(r[1]).lower() for r in (cur.fetchall() or [])}
-                col_valor = "valor_recebido" if "valor_recebido" in cols_ctrl else ("recebido_valor" if "recebido_valor" in cols_ctrl else "0")
-                col_forma = "forma_recebimento" if "forma_recebimento" in cols_ctrl else ("recebido_forma" if "recebido_forma" in cols_ctrl else "''")
-                col_obs = "obs_recebimento" if "obs_recebimento" in cols_ctrl else ("recebido_obs" if "recebido_obs" in cols_ctrl else "''")
-                col_data = "alterado_em" if "alterado_em" in cols_ctrl else ("updated_at" if "updated_at" in cols_ctrl else "''")
-                cur.execute("""
-                    SELECT cod_cliente,
-                           COALESCE({col_valor}, 0),
-                           COALESCE({col_forma}, ''),
-                           COALESCE({col_obs}, ''),
-                           COALESCE({col_data}, '')
-                    FROM programacao_itens_controle
-                    WHERE codigo_programacao=?
-                """.format(
-                    col_valor=col_valor,
-                    col_forma=col_forma,
-                    col_obs=col_obs,
-                    col_data=col_data,
-                ), (prog,))
-                for cod, vrec, forma, obs, alterado_em in (cur.fetchall() or []):
-                    cod_u = upper(self._clean_cod_cliente(cod))
-                    ctrl_map[cod_u] = {
-                        "valor": safe_float(vrec, 0.0),
-                        "forma": upper(forma),
-                        "obs": obs or "",
-                        "data": alterado_em or ""
-                    }
+                rota_resp = _call_api(
+                    "GET",
+                    f"desktop/rotas/{urllib.parse.quote(upper(prog))}",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                rec_resp = _call_api(
+                    "GET",
+                    f"desktop/rotas/{urllib.parse.quote(upper(prog))}/recebimentos",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                rota = rota_resp.get("rota") if isinstance(rota_resp, dict) else None
+                clientes_api = rota_resp.get("clientes") if isinstance(rota_resp, dict) else []
+                rec_items = rec_resp.get("recebimentos") if isinstance(rec_resp, dict) else []
+                if isinstance(rota, dict):
+                    clientes = [
+                        (
+                            str((r or {}).get("cod_cliente") or ""),
+                            str((r or {}).get("nome_cliente") or ""),
+                        )
+                        for r in (clientes_api or [])
+                        if isinstance(r, dict)
+                    ]
+                    ctrl_map = {}
+                    for r in (clientes_api or []):
+                        if not isinstance(r, dict):
+                            continue
+                        cod_u = upper(self._clean_cod_cliente((r or {}).get("cod_cliente")))
+                        vrec = safe_float((r or {}).get("valor_recebido"), safe_float((r or {}).get("recebido_valor"), 0.0))
+                        if not cod_u or vrec <= 0:
+                            continue
+                        ctrl_map[cod_u] = {
+                            "valor": vrec,
+                            "forma": upper((r or {}).get("forma_recebimento") or (r or {}).get("recebido_forma") or ""),
+                            "obs": str((r or {}).get("obs_recebimento") or (r or {}).get("recebido_obs") or ""),
+                            "data": str((r or {}).get("alterado_em") or (r or {}).get("updated_at") or ""),
+                        }
+
+                    recs = []
+                    for r in (rec_items or []):
+                        if not isinstance(r, dict):
+                            continue
+                        cod = str((r or {}).get("cod_cliente") or "").strip()
+                        nome = str((r or {}).get("nome_cliente") or "").strip()
+                        valor = safe_float((r or {}).get("valor"), 0.0)
+                        forma = str((r or {}).get("forma_pagamento") or "").strip()
+                        obs = str((r or {}).get("observacao") or "").strip()
+                        data_registro = str((r or {}).get("data_registro") or "").strip()
+                        if filtro_forma and filtro_forma != "TODAS" and upper(forma) != upper(filtro_forma):
+                            continue
+                        if filtro_valor_min > 0 and valor < filtro_valor_min:
+                            continue
+                        recs.append((cod, nome, valor, forma, obs, data_registro))
+                    api_loaded = True
             except Exception:
+                logging.debug("Falha ao carregar clientes/recebimentos via API; usando fallback local.", exc_info=True)
+
+        if not api_loaded:
+            with get_db() as conn:
+                cur = conn.cursor()
+
+                cur.execute("""
+                    SELECT DISTINCT cod_cliente, nome_cliente
+                    FROM programacao_itens
+                    WHERE codigo_programacao=?
+                    ORDER BY nome_cliente ASC
+                """, (prog,))
+                clientes = cur.fetchall() or []
+
+                # dados sincronizados do app (controle)
                 ctrl_map = {}
+                try:
+                    cur.execute("PRAGMA table_info(programacao_itens_controle)")
+                    cols_ctrl = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+                    col_valor = "valor_recebido" if "valor_recebido" in cols_ctrl else ("recebido_valor" if "recebido_valor" in cols_ctrl else "0")
+                    col_forma = "forma_recebimento" if "forma_recebimento" in cols_ctrl else ("recebido_forma" if "recebido_forma" in cols_ctrl else "''")
+                    col_obs = "obs_recebimento" if "obs_recebimento" in cols_ctrl else ("recebido_obs" if "recebido_obs" in cols_ctrl else "''")
+                    col_data = "alterado_em" if "alterado_em" in cols_ctrl else ("updated_at" if "updated_at" in cols_ctrl else "''")
+                    cur.execute("""
+                        SELECT cod_cliente,
+                               COALESCE({col_valor}, 0),
+                               COALESCE({col_forma}, ''),
+                               COALESCE({col_obs}, ''),
+                               COALESCE({col_data}, '')
+                        FROM programacao_itens_controle
+                        WHERE codigo_programacao=?
+                    """.format(
+                        col_valor=col_valor,
+                        col_forma=col_forma,
+                        col_obs=col_obs,
+                        col_data=col_data,
+                    ), (prog,))
+                    for cod, vrec, forma, obs, alterado_em in (cur.fetchall() or []):
+                        cod_u = upper(self._clean_cod_cliente(cod))
+                        ctrl_map[cod_u] = {
+                            "valor": safe_float(vrec, 0.0),
+                            "forma": upper(forma),
+                            "obs": obs or "",
+                            "data": alterado_em or ""
+                        }
+                except Exception:
+                    ctrl_map = {}
 
-            query = """
-                SELECT cod_cliente, nome_cliente, valor, forma_pagamento, observacao, data_registro
-                FROM recebimentos
-                WHERE codigo_programacao=?
-            """
-            params = [prog]
+                recs = []
+                if api_enabled:
+                    # Se API estava habilitada e houve falha técnica, usa o local como contingência.
+                    query = """
+                        SELECT cod_cliente, nome_cliente, valor, forma_pagamento, observacao, data_registro
+                        FROM recebimentos
+                        WHERE codigo_programacao=?
+                    """
+                    params = [prog]
 
-            if filtro_forma and filtro_forma != "TODAS":
-                query += " AND forma_pagamento = ?"
-                params.append(filtro_forma)
+                    if filtro_forma and filtro_forma != "TODAS":
+                        query += " AND forma_pagamento = ?"
+                        params.append(filtro_forma)
 
-            if filtro_valor_min > 0:
-                query += " AND valor >= ?"
-                params.append(filtro_valor_min)
+                    if filtro_valor_min > 0:
+                        query += " AND valor >= ?"
+                        params.append(filtro_valor_min)
 
-            query += " ORDER BY id DESC"
-            cur.execute(query, params)
-            recs = cur.fetchall() or []
+                    query += " ORDER BY id DESC"
+                    cur.execute(query, params)
+                    recs = cur.fetchall() or []
+                else:
+                    query = """
+                        SELECT cod_cliente, nome_cliente, valor, forma_pagamento, observacao, data_registro
+                        FROM recebimentos
+                        WHERE codigo_programacao=?
+                    """
+                    params = [prog]
+
+                    if filtro_forma and filtro_forma != "TODAS":
+                        query += " AND forma_pagamento = ?"
+                        params.append(filtro_forma)
+
+                    if filtro_valor_min > 0:
+                        query += " AND valor >= ?"
+                        params.append(filtro_valor_min)
+
+                    query += " ORDER BY id DESC"
+                    cur.execute(query, params)
+                    recs = cur.fetchall() or []
 
         mapa = {}
         for cod, nome, valor, forma, obs, data_registro in recs:
@@ -12150,7 +13162,7 @@ class RecebimentosPage(PageBase):
         self.lbl_total.config(text=f"TOTAL RECEBIDO: {fmt_money(total)}")
 
     # -------------------------
-    # SeleÃ§Ã£o / formulÃ¡rio
+    # Seleção / formulário
     # -------------------------
     def _on_select_row(self, event=None):
         sel = self.tree.selection()
@@ -12236,7 +13248,7 @@ class RecebimentosPage(PageBase):
 
             valor = safe_money(novo_valor_txt, 0.0)
             if valor <= 0:
-                messagebox.showwarning("ATENÃ‡ÃƒO", "Informe um valor vÃ¡lido (maior que zero).")
+                messagebox.showwarning("ATENÇÃO", "Informe um valor válido (maior que zero).")
                 return
 
             forma = upper(forma_atual or self.cb_forma.get() or "DINHEIRO")
@@ -12245,7 +13257,7 @@ class RecebimentosPage(PageBase):
             self.carregar_clientes_e_recebimentos()
             self.set_status(f"STATUS: Recebimento de {fmt_money(valor)} salvo para {nome}.")
         except Exception as e:
-            messagebox.showerror("ERRO", f"Erro ao lanÃ§ar recebimento na tabela: {str(e)}")
+            messagebox.showerror("ERRO", f"Erro ao lançar recebimento na tabela: {str(e)}")
 
     def _clear_form_recebimento(self):
         self._safe_set_entry(self.ent_cod, "", readonly_back=True)
@@ -12257,36 +13269,37 @@ class RecebimentosPage(PageBase):
     def _salvar_recebimento_item(self, cod: str, nome: str, valor: float, forma: str, obs: str):
         prog = self._current_prog
         if not prog:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Carregue uma programaÃ§Ã£o primeiro.")
+            messagebox.showwarning("ATENÇÃO", "Carregue uma programação primeiro.")
+            return
+        if not ensure_system_api_binding(context=f"Salvar recebimento ({prog})", parent=self):
             return
         if self._warn_if_fechada():
             return
         if not cod or not nome:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Selecione um cliente na tabela ou insira manualmente.")
+            messagebox.showwarning("ATENÇÃO", "Selecione um cliente na tabela ou insira manualmente.")
             return
         if safe_float(valor, 0.0) <= 0:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Informe um valor vÃ¡lido (maior que zero).")
+            messagebox.showwarning("ATENÇÃO", "Informe um valor válido (maior que zero).")
             return
         if not forma:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Informe a forma de pagamento.")
+            messagebox.showwarning("ATENÇÃO", "Informe a forma de pagamento.")
             return
 
-        with get_db() as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO recebimentos
-                    (codigo_programacao, cod_cliente, nome_cliente, valor, forma_pagamento, observacao, num_nf, data_registro)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                prog,
-                upper(cod),
-                upper(nome),
-                float(valor),
-                upper(forma),
-                upper(obs),
-                upper(self._nf_current),
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            ))
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        payload = {
+            "cod_cliente": upper(cod),
+            "nome_cliente": upper(nome),
+            "valor": float(valor),
+            "forma_pagamento": upper(forma),
+            "observacao": upper(obs),
+            "num_nf": upper(self._nf_current),
+        }
+        _call_api(
+            "POST",
+            f"desktop/rotas/{urllib.parse.quote(upper(prog))}/recebimentos",
+            payload=payload,
+            extra_headers={"X-Desktop-Secret": desktop_secret},
+        )
 
     # -------------------------
     # Salvar recebimento (com bloqueio se FECHADA)
@@ -12294,7 +13307,7 @@ class RecebimentosPage(PageBase):
     def salvar_recebimento(self):
         prog = self._current_prog
         if not prog:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Carregue uma programaÃ§Ã£o primeiro.")
+            messagebox.showwarning("ATENÇÃO", "Carregue uma programação primeiro.")
             return
         if self._warn_if_fechada():
             return
@@ -12306,13 +13319,13 @@ class RecebimentosPage(PageBase):
         obs = upper(self.ent_obs.get())
 
         if not cod or not nome:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Selecione um cliente na tabela ou insira manualmente.")
+            messagebox.showwarning("ATENÇÃO", "Selecione um cliente na tabela ou insira manualmente.")
             return
         if valor <= 0:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Informe um valor vÃ¡lido (maior que zero).")
+            messagebox.showwarning("ATENÇÃO", "Informe um valor válido (maior que zero).")
             return
         if not forma:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Informe a forma de pagamento.")
+            messagebox.showwarning("ATENÇÃO", "Informe a forma de pagamento.")
             return
 
         try:
@@ -12326,24 +13339,28 @@ class RecebimentosPage(PageBase):
     def zerar_recebimento(self):
         prog = self._current_prog
         if not prog:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Carregue uma programaÃ§Ã£o primeiro.")
+            messagebox.showwarning("ATENÇÃO", "Carregue uma programação primeiro.")
+            return
+        if not ensure_system_api_binding(context=f"Zerar recebimentos ({prog})", parent=self):
             return
         if self._warn_if_fechada():
             return
 
         cod = upper(self.ent_cod.get().strip())
         if not cod:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Selecione um cliente na tabela.")
+            messagebox.showwarning("ATENÇÃO", "Selecione um cliente na tabela.")
             return
 
-        if not messagebox.askyesno("Confirmar", f"Zerar recebimentos do cliente {cod} nessa programaÃ§Ã£o?"):
+        if not messagebox.askyesno("Confirmar", f"Zerar recebimentos do cliente {cod} nessa programação?"):
             return
 
         try:
-            with get_db() as conn:
-                cur = conn.cursor()
-                cur.execute("DELETE FROM recebimentos WHERE codigo_programacao=? AND cod_cliente=?", (prog, cod))
-
+            desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+            _call_api(
+                "DELETE",
+                f"desktop/rotas/{urllib.parse.quote(upper(prog))}/recebimentos/{urllib.parse.quote(upper(cod))}",
+                extra_headers={"X-Desktop-Secret": desktop_secret},
+            )
             self._clear_form_recebimento()
             self.carregar_clientes_e_recebimentos()
             self.set_status(f"STATUS: Recebimentos zerados para cliente {cod}.")
@@ -12353,13 +13370,15 @@ class RecebimentosPage(PageBase):
     def inserir_cliente_manual(self):
         prog = self._current_prog
         if not prog:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Carregue uma programaÃ§Ã£o primeiro.")
+            messagebox.showwarning("ATENCAO", "Carregue uma programacao primeiro.")
+            return
+        if not ensure_system_api_binding(context=f"Inserir cliente manual ({prog})", parent=self):
             return
         if self._warn_if_fechada():
             return
 
         cod = upper(simple_input(
-            "Cliente Manual", "Digite o CÃ“DIGO do cliente:",
+            "Cliente Manual", "Digite o C?DIGO do cliente:",
             master=self.app if hasattr(self, "app") else None,
             allow_empty=False
         ))
@@ -12375,35 +13394,22 @@ class RecebimentosPage(PageBase):
             return
 
         try:
-            with get_db() as conn:
-                cur = conn.cursor()
-                cur.execute("""
-                    SELECT COUNT(1)
-                    FROM programacao_itens
-                    WHERE codigo_programacao=?
-                      AND cod_cliente=?
-                """, (prog, cod))
-                exists = int((cur.fetchone() or [0])[0] or 0)
-
-                if not exists:
-                    cur.execute("""
-                        INSERT INTO programacao_itens
-                            (codigo_programacao, cod_cliente, nome_cliente, qnt_caixas, kg, preco, endereco, vendedor, pedido)
-                        VALUES (?, ?, ?, 0, 0, 0, '', '', 'MANUAL')
-                    """, (prog, cod, nome))
-                else:
-                    cur.execute("""
-                        UPDATE programacao_itens
-                           SET nome_cliente=?
-                         WHERE codigo_programacao=?
-                           AND cod_cliente=?
-                    """, (nome, prog, cod))
+            desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+            _call_api(
+                "POST",
+                f"desktop/rotas/{urllib.parse.quote(upper(prog))}/clientes/manual",
+                payload={
+                    "cod_cliente": cod,
+                    "nome_cliente": nome,
+                },
+                extra_headers={"X-Desktop-Secret": desktop_secret},
+            )
 
             self._safe_set_entry(self.ent_cod, cod, readonly_back=True)
             self._safe_set_entry(self.ent_nome, nome, readonly_back=True)
             self._selected_cliente = {"cod_cliente": cod, "nome_cliente": nome}
 
-            messagebox.showinfo("OK", "Cliente inserido/atualizado na programaÃ§Ã£o (manual). Agora pode lanÃ§ar o recebimento.")
+            messagebox.showinfo("OK", "Cliente inserido/atualizado na programacao (manual). Agora pode lancar o recebimento.")
             self.carregar_clientes_e_recebimentos()
 
             try:
@@ -12414,9 +13420,10 @@ class RecebimentosPage(PageBase):
 
         except Exception as e:
             messagebox.showerror("ERRO", f"Erro ao inserir cliente: {str(e)}")
+    
 
-    # =========================
-    # ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ IMPRESSÃƒÆ’Ã†â€™O PDF (A4) ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬ alinhado e com assinaturas
+# =========================
+    # âÅâââ€š¬Åâ€œââââ‚¬Å¡¬¦ IMPRESSÃÆââ‚¬â„¢Æâââ€š¬ââ€ž¢O PDF (A4) âââââ€š¬Å¡¬ââââ‚¬Å¡¬ alinhado e com assinaturas
     # =========================
     def _get_dados_para_impressao(self, prog: str):
         """
@@ -12437,6 +13444,77 @@ class RecebimentosPage(PageBase):
             "data_chegada": "",
             "hora_chegada": "",
         }
+
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                rota_resp = _call_api(
+                    "GET",
+                    f"desktop/rotas/{urllib.parse.quote(upper(prog))}",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                rec_resp = _call_api(
+                    "GET",
+                    f"desktop/rotas/{urllib.parse.quote(upper(prog))}/recebimentos",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                rota = rota_resp.get("rota") if isinstance(rota_resp, dict) else None
+                recebimentos = rec_resp.get("recebimentos") if isinstance(rec_resp, dict) else []
+                if isinstance(rota, dict):
+                    motorista_raw = str(rota.get("motorista") or "")
+                    equipe_raw = str(rota.get("equipe") or "")
+                    header["motorista_nome"] = self._resolve_motorista_nome(motorista_raw)
+                    header["equipe_nomes"] = self._resolve_equipe_integrantes(equipe_raw)
+                    header["veiculo"] = upper(str(rota.get("veiculo") or ""))
+                    header["nf"] = upper(str(rota.get("num_nf") or rota.get("nf_numero") or ""))
+                    dsa_n, hsa_n = normalize_date_time_components(
+                        str(rota.get("data_saida") or ""),
+                        str(rota.get("hora_saida") or ""),
+                    )
+                    dch_n, hch_n = normalize_date_time_components(
+                        str(rota.get("data_chegada") or ""),
+                        str(rota.get("hora_chegada") or ""),
+                    )
+                    header["data_saida"] = dsa_n
+                    header["hora_saida"] = hsa_n
+                    header["data_chegada"] = dch_n
+                    header["hora_chegada"] = hch_n
+
+                agg = {}
+                for rr in (recebimentos or []):
+                    if not isinstance(rr, dict):
+                        continue
+                    cod = upper(str(rr.get("cod_cliente") or "").strip())
+                    nome = upper(str(rr.get("nome_cliente") or "").strip())
+                    if not cod and not nome:
+                        continue
+                    key = cod or nome
+                    item = agg.setdefault(
+                        key,
+                        {"cod": cod, "nome": nome, "total": 0.0, "forma": ""},
+                    )
+                    item["total"] += safe_float(rr.get("valor"), 0.0)
+                    if not item["forma"]:
+                        item["forma"] = upper(str(rr.get("forma_pagamento") or ""))
+
+                parsed_rows = []
+                total_geral = 0.0
+                for item in sorted(agg.values(), key=lambda it: upper(it.get("nome") or "")):
+                    v = safe_float(item.get("total"), 0.0)
+                    if v <= 0:
+                        continue
+                    total_geral += v
+                    parsed_rows.append(
+                        (
+                            upper(item.get("cod") or ""),
+                            upper(item.get("nome") or ""),
+                            float(v),
+                            upper(item.get("forma") or ""),
+                        )
+                    )
+                return header, parsed_rows, float(total_geral)
+            except Exception:
+                logging.debug("Falha ao montar dados de impressao via API; usando fallback local.", exc_info=True)
 
         with get_db() as conn:
             cur = conn.cursor()
@@ -12461,8 +13539,6 @@ class RecebimentosPage(PageBase):
                 header["data_chegada"] = dch_n
                 header["hora_chegada"] = hch_n
 
-            # total por cliente + forma mais recente (pega a do Ãºltimo registro)
-            # OBS: aqui prioriza â€œforma do registro mais recente, e soma valores.
             cur.execute("""
                 SELECT cod_cliente, nome_cliente, SUM(valor) AS total_valor,
                        (SELECT forma_pagamento
@@ -12488,15 +13564,16 @@ class RecebimentosPage(PageBase):
 
         return header, parsed_rows, float(total_geral)
 
+
     def imprimir_pdf(self):
         prog = self._current_prog
         if not prog:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Carregue uma programaÃ§Ã£o primeiro.")
+            messagebox.showwarning("ATENÇÃO", "Carregue uma programação primeiro.")
             return
 
         header, rows, total_geral = self._get_dados_para_impressao(prog)
         if not rows:
-            messagebox.showwarning("ImpressÃ£o", "NÃ£o hÃ¡ clientes pagantes (valor > 0) para imprimir.")
+            messagebox.showwarning("Impressão", "Não há clientes pagantes (valor > 0) para imprimir.")
             return
 
         path = filedialog.asksaveasfilename(
@@ -12509,7 +13586,7 @@ class RecebimentosPage(PageBase):
             return
 
         try:
-            # ReportLab (jÃ¡ instalado no seu ambiente)
+            # ReportLab (já instalado no seu ambiente)
             from reportlab.pdfgen import canvas
             from reportlab.lib.pagesizes import A4
             from reportlab.lib.units import mm
@@ -12527,7 +13604,7 @@ class RecebimentosPage(PageBase):
 
             # ===== TTULO =====
             c.setFont("Helvetica-Bold", 14)
-            c.drawString(left, y, f"RECIBO / RELATÃ“RIO DE RECEBIMENTOS - PROGRAMAÃ‡ÃƒO {header['prog']}")
+            c.drawString(left, y, f"RECIBO / RELATÓRIO DE RECEBIMENTOS - PROGRAMAÇÃO {header['prog']}")
             y -= 10 * mm
 
             # ===== DADOS DO MOTORISTA / ROTA (BLOCO ALINHADO) =====
@@ -12550,14 +13627,14 @@ class RecebimentosPage(PageBase):
                 c.drawString(x + 28 * mm, y0, v or "")
 
             draw_kv(col1_x, y, "Motorista", header["motorista_nome"])
-            draw_kv(col2_x, y, "VeÃ­culo", header["veiculo"])
+            draw_kv(col2_x, y, "VeÃÂÂculo", header["veiculo"])
             y -= line_h
 
             draw_kv(col1_x, y, "Equipe", header["equipe_nomes"])
             draw_kv(col2_x, y, "NF", header["nf"])
             y -= line_h
 
-            draw_kv(col1_x, y, "SaÃ­da", f"{header['data_saida']} {header['hora_saida']}".strip())
+            draw_kv(col1_x, y, "SaÃÂÂda", f"{header['data_saida']} {header['hora_saida']}".strip())
             draw_kv(col2_x, y, "Chegada", f"{header['data_chegada']} {header['hora_chegada']}".strip())
             y -= 8 * mm
 
@@ -12571,7 +13648,7 @@ class RecebimentosPage(PageBase):
             c.drawString(left, y, "RECEBIMENTOS (APENAS CLIENTES PAGANTES)")
             y -= 6 * mm
 
-            # CabeÃ§alho da tabela
+            # Cabeçalho da tabela
             table_x = left
             table_w = width - left - right
 
@@ -12588,15 +13665,15 @@ class RecebimentosPage(PageBase):
 
             row_h = 6.2 * mm
 
-            # funÃ§Ã£o segura p/ quebrar texto
+            # função segura p/ quebrar texto
             def clip_text(s, max_chars):
                 s = (s or "")
-                return s if len(s) <= max_chars else s[:max_chars - 1] + "â€¦"
+                return s if len(s) <= max_chars else s[:max_chars - 1] + "âââ€š¬¦"
 
             # desenha header
             c.setFont("Helvetica-Bold", 9)
             c.rect(table_x, y - row_h + 1, table_w, row_h, stroke=1, fill=0)
-            c.drawString(x_cod + 2, y - row_h + 3, "CÃ“D CLIENTE")
+            c.drawString(x_cod + 2, y - row_h + 3, "CÓD CLIENTE")
             c.drawString(x_nome + 2, y - row_h + 3, "NOME CLIENTE")
             c.drawString(x_forma + 2, y - row_h + 3, "FORMA PGTO")
             c.drawRightString(x_valor + col_valor - 2, y - row_h + 3, "VALOR (R$)")
@@ -12606,22 +13683,22 @@ class RecebimentosPage(PageBase):
 
             # desenha linhas
             for cod, nome, valor, forma in rows:
-                # quebra de pÃ¡gina se necessÃ¡rio
+                # quebra de página se necessário
                 if y < bottom + 55 * mm:
                     c.showPage()
                     width, height = A4
                     y = height - top
                     c.setFont("Helvetica-Bold", 14)
-                    c.drawString(left, y, f"RECIBO / RELATÃ“RIO DE RECEBIMENTOS - PROGRAMAÃ‡ÃƒO {header['prog']}")
+                    c.drawString(left, y, f"RECIBO / RELATÓRIO DE RECEBIMENTOS - PROGRAMAÇÃO {header['prog']}")
                     y -= 10 * mm
 
                     c.setFont("Helvetica-Bold", 10)
-                    c.drawString(left, y, "RECEBIMENTOS (CONTINUAÃ‡ÃƒO)")
+                    c.drawString(left, y, "RECEBIMENTOS (CONTINUAÇÃO)")
                     y -= 6 * mm
 
                     c.setFont("Helvetica-Bold", 9)
                     c.rect(table_x, y - row_h + 1, table_w, row_h, stroke=1, fill=0)
-                    c.drawString(x_cod + 2, y - row_h + 3, "CÃ“D CLIENTE")
+                    c.drawString(x_cod + 2, y - row_h + 3, "CÓD CLIENTE")
                     c.drawString(x_nome + 2, y - row_h + 3, "NOME CLIENTE")
                     c.drawString(x_forma + 2, y - row_h + 3, "FORMA PGTO")
                     c.drawRightString(x_valor + col_valor - 2, y - row_h + 3, "VALOR (R$)")
@@ -12648,7 +13725,7 @@ class RecebimentosPage(PageBase):
 
             # ===== REA DE ASSINATURAS =====
             c.setFont("Helvetica-Bold", 10)
-            c.drawString(left, y, "ASSINATURAS / CONFERÃŠNCIA")
+            c.drawString(left, y, "ASSINATURAS / CONFERÊNCIA")
             y -= 10 * mm
 
             # 2 colunas x 2 linhas (4 setores)
@@ -12678,9 +13755,9 @@ class RecebimentosPage(PageBase):
 
             # linha 2
             assinatura_block(x1, y, "SETOR DE CAIXA")
-            assinatura_block(x2, y, "SETOR DE CONFERÃŠNCIA")
+            assinatura_block(x2, y, "SETOR DE CONFERÊNCIA")
 
-            # rodapÃ©
+            # rodapé
             c.setFont("Helvetica", 8)
             c.drawRightString(width - right, bottom - 2 * mm, f"Gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')}")
 
@@ -12702,12 +13779,12 @@ class RecebimentosPage(PageBase):
 # ==========================
 
 # =========================================================
-# 7.0 CONFIGURAÃ‡ÃƒO DE LOGGING (DespesasPage) - mais seguro
+# 7.0 CONFIGURAÇÃO DE LOGGING (DespesasPage) - mais seguro
 # =========================================================
 def setup_despesas_logger():
     """
-    Logger com rotaÃ§Ã£o de arquivo para nÃ£o crescer infinito.
-    NÃ£o altera regra do sistema, sÃ³ evita travar com log grande.
+    Logger com rotação de arquivo para não crescer infinito.
+    Não altera regra do sistema, só evita travar com log grande.
     """
     logger = logging.getLogger(__name__ + ".DespesasPage")
     if not logger.handlers:
@@ -12741,7 +13818,7 @@ def setup_despesas_logger():
 
 
 # =========================================================
-# 7.1 DESPESAS PAGE (PARTE 1/3) âœ… layout mais robusto + scroll seguro
+# 7.1 DESPESAS PAGE (PARTE 1/3) âÅâ€œââ‚¬¦ layout mais robusto + scroll seguro
 # =========================================================
 class DespesasPage(PageBase):
     def __init__(self, parent, app):
@@ -12752,7 +13829,7 @@ class DespesasPage(PageBase):
         self._current_programacao = None
 
         # =========================================================
-        # âœ… Remove cinza / body branco (sem mexer no PageBase)
+        # âÅâ€œââ‚¬¦ Remove cinza / body branco (sem mexer no PageBase)
         # =========================================================
         try:
             self.body.configure(padding=0)
@@ -12782,7 +13859,7 @@ class DespesasPage(PageBase):
 
         ttk.Button(
             actions_frame,
-            text="🔄 ATUALIZAR",
+            text="ðŸ”„ ATUALIZAR",
             style="Ghost.TButton",
             command=self._refresh_all,
             width=14
@@ -12927,7 +14004,7 @@ class DespesasPage(PageBase):
         calc_frame.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 10))
         ttk.Button(
             calc_frame,
-            text="Calcular Saldo AutomÃ¡tico",
+            text="Calcular Saldo Automático",
             style="Ghost.TButton",
             width=24,
             command=self._calcular_saldo_auto
@@ -12946,7 +14023,7 @@ class DespesasPage(PageBase):
         nf_base.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 6))
 
         row_nf = 0
-        self.ent_nf_numero = self._create_field(nf_base, "NÂº NOTA FISCAL:", row_nf, 14); row_nf += 1
+        self.ent_nf_numero = self._create_field(nf_base, "Nº NOTA FISCAL:", row_nf, 14); row_nf += 1
         self.ent_nf_kg = self._create_field(nf_base, "KG NOTA FISCAL:", row_nf, 14); row_nf += 1
         self.ent_nf_preco = self._create_field(nf_base, "PRECO NF (R$/KG):", row_nf, 14); row_nf += 1
         self.ent_nf_caixas = self._create_field(nf_base, "CAIXAS:", row_nf, 14)
@@ -13041,7 +14118,7 @@ class DespesasPage(PageBase):
         calc_km_frame.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
         ttk.Button(
             calc_km_frame,
-            text="Calcular KM/MÃ©dia",
+            text="Calcular KM/Média",
             style="Ghost.TButton",
             width=20,
             command=self._calcular_km_media
@@ -13052,7 +14129,7 @@ class DespesasPage(PageBase):
         self.ent_km_final = self._create_field(km_form, "KM FINAL:", row_km, 12); row_km += 1
         self.ent_litros = self._create_field(km_form, "LITROS:", row_km, 12); row_km += 1
         self.ent_km_rodado = self._create_field(km_form, "KM RODADO:", row_km, 12); row_km += 1
-        self.ent_media = self._create_field(km_form, "MÃ‰DIA (KM/L):", row_km, 12); row_km += 1
+        self.ent_media = self._create_field(km_form, "MÉDIA (KM/L):", row_km, 12); row_km += 1
         self.ent_custo_km = self._create_field(km_form, "CUSTO P/KM:", row_km, 12); row_km += 1
         try:
             self.ent_km_rodado.configure(state="readonly")
@@ -13070,7 +14147,7 @@ class DespesasPage(PageBase):
         self.lbl_km_anterior.grid(row=row_km, column=0, columnspan=2, sticky="w", pady=(4, 2))
         row_km += 1
 
-        ttk.Label(km_form, text="OBSERVAÃ‡ÃƒO:", style="CardLabel.TLabel").grid(row=row_km, column=0, sticky="nw", pady=(8, 2))
+        ttk.Label(km_form, text="OBSERVAÇÃO:", style="CardLabel.TLabel").grid(row=row_km, column=0, sticky="nw", pady=(8, 2))
         self.txt_rota_obs = tk.Text(km_form, height=4, width=28, font=("Segoe UI", 9))
         self.txt_rota_obs.grid(row=row_km, column=1, sticky="w", pady=(8, 2), padx=(10, 0))
 
@@ -13079,7 +14156,7 @@ class DespesasPage(PageBase):
         km_side.grid_columnconfigure(0, weight=1)
         km_side.grid_rowconfigure(1, weight=1)
 
-        ttk.Label(km_side, text="MELHORES ÃšLTIMAS MÃ‰DIAS", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(km_side, text="MELHORES ÚLTIMAS MÉDIAS", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
 
         chart_wrap = ttk.Frame(km_side, style="Card.TFrame")
         chart_wrap.grid(row=1, column=0, sticky="nsew", pady=(6, 10))
@@ -13088,20 +14165,20 @@ class DespesasPage(PageBase):
         self.canvas_km_pie = tk.Canvas(chart_wrap, width=300, height=180, bg="white", highlightthickness=1, highlightbackground="#E5E7EB")
         self.canvas_km_pie.grid(row=0, column=0, sticky="w")
 
-        ttk.Label(km_side, text="ÃšLTIMOS KM POR VEÃCULO", style="CardTitle.TLabel").grid(row=2, column=0, sticky="w", pady=(4, 4))
+        ttk.Label(km_side, text="ÚLTIMOS KM POR VEÃÂÂCULO", style="CardTitle.TLabel").grid(row=2, column=0, sticky="w", pady=(4, 4))
         self.tree_km_veiculos = ttk.Treeview(
             km_side,
-            columns=["VEICULO", "KM", "MÃ‰DIA", "DATA"],
+            columns=["VEICULO", "KM", "MÉDIA", "DATA"],
             show="headings",
             height=6
         )
-        for col, w in [("VEICULO", 130), ("KM", 80), ("MÃ‰DIA", 80), ("DATA", 110)]:
+        for col, w in [("VEICULO", 130), ("KM", 80), ("MÉDIA", 80), ("DATA", 110)]:
             self.tree_km_veiculos.heading(col, text=col)
             self.tree_km_veiculos.column(col, width=w, anchor="center" if col != "VEICULO" else "w")
         self.tree_km_veiculos.grid(row=3, column=0, sticky="ew")
 
         # =========================================================
-        # ---- ABA 3: CONTAGEM DE CÃ‰DULAS
+        # ---- ABA 3: CONTAGEM DE CÉDULAS
         # =========================================================
 
         contagem_wrap = ttk.LabelFrame(tab_cedulas, text="CONTAGEM DE CEDULAS", padding=6)
@@ -13120,7 +14197,7 @@ class DespesasPage(PageBase):
         self._bind_focus_scroll(self.ent_total_dinheiro)
         ttk.Button(
             calc_ced_frame,
-            text="🧮 Distribuir",
+            text="ðÅ¸§® Distribuir",
             style="Ghost.TButton",
             command=self._distribuir_cedulas,
             width=11,
@@ -13181,7 +14258,7 @@ class DespesasPage(PageBase):
         self.lbl_valor_dinheiro.grid(row=10, column=2, sticky="w", pady=2, padx=4)
         ttk.Separator(contagem_wrap, orient="horizontal").grid(row=11, column=0, columnspan=3, sticky="ew", pady=(4, 6))
 
-        # forÃ§a atualizar scroll no primeiro render
+        # força atualizar scroll no primeiro render
         # =========================================================
         # ? RESUMO + BOT?ES (como voc? j? tinha)
         # =========================================================
@@ -13218,12 +14295,12 @@ class DespesasPage(PageBase):
         self.lbl_kpi_desp_total = ttk.Label(kpi_desp, text="R$ 0,00", font=("Segoe UI", 11, "bold"), foreground="#C62828")
         self.lbl_kpi_desp_total.grid(row=0, column=0, sticky="w")
 
-        kpi_ced = ttk.LabelFrame(kpi_row, text=" CÃ‰DULAS ", padding=5)
+        kpi_ced = ttk.LabelFrame(kpi_row, text=" CÉDULAS ", padding=5)
         kpi_ced.grid(row=0, column=2, sticky="ew", padx=(0, 4))
         self.lbl_kpi_cedulas_total = ttk.Label(kpi_ced, text="R$ 0,00", font=("Segoe UI", 11, "bold"), foreground="#7C3AED")
         self.lbl_kpi_cedulas_total.grid(row=0, column=0, sticky="w")
 
-        kpi_res = ttk.LabelFrame(kpi_row, text=" RESULTADO LÃQUIDO ", padding=5)
+        kpi_res = ttk.LabelFrame(kpi_row, text=" RESULTADO LÃÂÂQUIDO ", padding=5)
         kpi_res.grid(row=0, column=3, sticky="ew")
         self.lbl_kpi_resultado_liquido = ttk.Label(kpi_res, text="R$ 0,00", font=("Segoe UI", 11, "bold"), foreground="#2E7D32")
         self.lbl_kpi_resultado_liquido.grid(row=0, column=0, sticky="w")
@@ -13253,7 +14330,7 @@ class DespesasPage(PageBase):
         self.lbl_total_entradas = ttk.Label(entrada_frame, text="R$ 0,00", font=("Segoe UI", 10, "bold"), foreground="#2E7D32")
         self.lbl_total_entradas.grid(row=2, column=1, sticky="e", pady=(4, 1))
 
-        saida_frame = ttk.LabelFrame(details_wrap, text=" SAÃDAS ", padding=5)
+        saida_frame = ttk.LabelFrame(details_wrap, text=" SAÃÂÂDAS ", padding=5)
         saida_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 4), pady=(3, 0))
         saida_frame.grid_columnconfigure(1, weight=1)
 
@@ -13292,12 +14369,12 @@ class DespesasPage(PageBase):
             botoes_frame.grid_columnconfigure(i, weight=1)
 
         botoes = [
-            ("⬅ VOLTAR", "Ghost.TButton", self._voltar_recebimentos),
-            ("➕ ADICIONAR DESPESA", "Warn.TButton", self._open_registrar_rapido),
-            ("🖨 IMPRIMIR PDF", "Ghost.TButton", self.imprimir_resumo),
-            ("💾 SALVAR", "Primary.TButton", self.salvar_tudo),
-            ("✏️ EDITAR", "Warn.TButton", self._editar_linha_selecionada),
-            ("🏁 FINALIZAR", "Danger.TButton", self.finalizar_prestacao_despesas),
+            ("â¬â€¦ VOLTAR", "Ghost.TButton", self._voltar_recebimentos),
+            ("âÅ¾â€¢ ADICIONAR DESPESA", "Warn.TButton", self._open_registrar_rapido),
+            ("ðÅ¸â€“¨ IMPRIMIR PDF", "Ghost.TButton", self.imprimir_resumo),
+            ("ðÅ¸â€™¾ SALVAR", "Primary.TButton", self.salvar_tudo),
+            ("âÅ“Âï¸Â EDITAR", "Warn.TButton", self._editar_linha_selecionada),
+            ("ðÅ¸ÂÂ FINALIZAR", "Danger.TButton", self.finalizar_prestacao_despesas),
         ]
 
         for i, (texto, estilo, comando) in enumerate(botoes):
@@ -13369,9 +14446,9 @@ class DespesasPage(PageBase):
             bind_entry_smart(ent, "date")
         elif "VALOR" in lbl or "R$" in lbl:
             bind_entry_smart(ent, "money")
-        elif "CAIXA" in lbl or "QTD" in lbl or "NÂº" in lbl or "NOTA FISCAL" in lbl:
+        elif "CAIXA" in lbl or "QTD" in lbl or "Nº" in lbl or "NOTA FISCAL" in lbl:
             bind_entry_smart(ent, "int")
-        elif "KM" in lbl or "KG" in lbl or "LITRO" in lbl or "MÃ‰DIA" in lbl or "MEDIA" in lbl or "CUSTO" in lbl:
+        elif "KM" in lbl or "KG" in lbl or "LITRO" in lbl or "MÉDIA" in lbl or "MEDIA" in lbl or "CUSTO" in lbl:
             bind_entry_smart(ent, "decimal", precision=2)
         else:
             bind_entry_smart(ent, "text")
@@ -13429,7 +14506,7 @@ class DespesasPage(PageBase):
         total = (val_mot + (val_ajud * 2)) * qtd
         self.lbl_total_pagto.config(text=f"Total Pagamento (Motorista + 2 Ajudantes): {self._fmt_money(total)}")
 
-    # ---- helpers seguros (nÃ£o mudam regra, sÃ³ evitam bug)
+    # ---- helpers seguros (não mudam regra, só evitam bug)
     def _parse_money(self, v):
         return safe_money(v, 0.0)
 
@@ -13447,13 +14524,13 @@ class DespesasPage(PageBase):
         canvas.delete("all")
 
         if not items:
-            canvas.create_text(150, 90, text="Sem dados de mÃ©dia para exibir", fill="#6B7280", font=("Segoe UI", 9, "bold"))
+            canvas.create_text(150, 90, text="Sem dados de média para exibir", fill="#6B7280", font=("Segoe UI", 9, "bold"))
             return
 
         colors = ["#1D4ED8", "#16A34A", "#EA580C", "#7C3AED", "#0891B2", "#BE123C"]
         total = sum(max(0.0, safe_float(v, 0.0)) for _, v in items)
         if total <= 0:
-            canvas.create_text(150, 90, text="Sem dados de mÃ©dia para exibir", fill="#6B7280", font=("Segoe UI", 9, "bold"))
+            canvas.create_text(150, 90, text="Sem dados de média para exibir", fill="#6B7280", font=("Segoe UI", 9, "bold"))
             return
 
         x0, y0, x1, y1 = 10, 10, 170, 170
@@ -13480,38 +14557,67 @@ class DespesasPage(PageBase):
             self.tree_km_veiculos.delete(iid)
 
         medias_top = []
-        try:
-            with get_db() as conn:
-                cur = conn.cursor()
-                cur.execute("""
-                    SELECT COALESCE(veiculo, '-'), COALESCE(media_km_l, 0)
-                    FROM programacoes
-                    WHERE COALESCE(media_km_l, 0) > 0
-                    ORDER BY media_km_l DESC, id DESC
-                    LIMIT 5
-                """)
-                medias_top = [(str(r[0] or "-"), safe_float(r[1], 0.0)) for r in (cur.fetchall() or [])]
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        loaded_api = False
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                resp = _call_api(
+                    "GET",
+                    "desktop/relatorios/km-veiculos",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                rows_api = (resp.get("rows") if isinstance(resp, dict) else []) or []
+                parsed = [
+                    (
+                        str((r or {}).get("veiculo") or "-"),
+                        safe_int((r or {}).get("viagens"), 0),
+                        safe_float((r or {}).get("km_rodado"), 0.0),
+                        safe_float((r or {}).get("media_km_l"), 0.0),
+                    )
+                    for r in rows_api
+                    if isinstance(r, dict)
+                ]
+                medias_top = sorted(parsed, key=lambda t: (-t[3], t[0]))[:5]
+                medias_top = [(p[0], p[3]) for p in medias_top if safe_float(p[3], 0.0) > 0]
+                for veic, _viagens, km, med in sorted(parsed, key=lambda t: upper(t[0]))[:20]:
+                    tree_insert_aligned(self.tree_km_veiculos, "", "end", (veic, f"{km:.1f}", f"{med:.1f}", "-"))
+                loaded_api = True
+            except Exception:
+                logging.debug("Falha ao carregar insights KM via API; usando fallback local.", exc_info=True)
 
-                cur.execute("""
-                    SELECT p.veiculo, p.km_rodado, p.media_km_l, p.data_criacao
-                    FROM programacoes p
-                    INNER JOIN (
-                        SELECT veiculo, MAX(id) AS max_id
+        if not loaded_api:
+            try:
+                with get_db() as conn:
+                    cur = conn.cursor()
+                    cur.execute("""
+                        SELECT COALESCE(veiculo, '-'), COALESCE(media_km_l, 0)
                         FROM programacoes
-                        WHERE COALESCE(veiculo, '') <> ''
-                        GROUP BY veiculo
-                    ) u ON u.max_id = p.id
-                    ORDER BY p.veiculo ASC
-                    LIMIT 20
-                """)
-                for row in cur.fetchall() or []:
-                    veic = str(row[0] or "-")
-                    km = safe_float(row[1], 0.0)
-                    med = safe_float(row[2], 0.0)
-                    data = str(row[3] or "")[:10]
-                    tree_insert_aligned(self.tree_km_veiculos, "", "end", (veic, f"{km:.1f}", f"{med:.1f}", data))
-        except Exception:
-            logging.debug("Falha ignorada")
+                        WHERE COALESCE(media_km_l, 0) > 0
+                        ORDER BY media_km_l DESC, id DESC
+                        LIMIT 5
+                    """)
+                    medias_top = [(str(r[0] or "-"), safe_float(r[1], 0.0)) for r in (cur.fetchall() or [])]
+
+                    cur.execute("""
+                        SELECT p.veiculo, p.km_rodado, p.media_km_l, p.data_criacao
+                        FROM programacoes p
+                        INNER JOIN (
+                            SELECT veiculo, MAX(id) AS max_id
+                            FROM programacoes
+                            WHERE COALESCE(veiculo, '') <> ''
+                            GROUP BY veiculo
+                        ) u ON u.max_id = p.id
+                        ORDER BY p.veiculo ASC
+                        LIMIT 20
+                    """)
+                    for row in cur.fetchall() or []:
+                        veic = str(row[0] or "-")
+                        km = safe_float(row[1], 0.0)
+                        med = safe_float(row[2], 0.0)
+                        data = str(row[3] or "")[:10]
+                        tree_insert_aligned(self.tree_km_veiculos, "", "end", (veic, f"{km:.1f}", f"{med:.1f}", data))
+            except Exception:
+                logging.debug("Falha ignorada")
 
         self._draw_km_pie(medias_top)
 
@@ -13528,36 +14634,65 @@ class DespesasPage(PageBase):
         }
         order_sql = order_sql_map.get(ordem, "data_registro DESC")
 
-        sql = """
-            SELECT id, descricao, valor, data_registro,
-                   COALESCE(categoria, 'OUTROS') as categoria,
-                   COALESCE(observacao, '') as observacao
-            FROM despesas
-            WHERE codigo_programacao=?
-        """
-        params = [prog]
+        rows = []
+        self._despesas_cache = {}
+        try:
+            desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+            resp = _call_api(
+                "GET",
+                f"desktop/rotas/{urllib.parse.quote(upper(prog))}/despesas",
+                extra_headers={"X-Desktop-Secret": desktop_secret},
+            )
+            itens = (resp.get("despesas") if isinstance(resp, dict) else []) or []
+            for r in itens:
+                rid = safe_int((r or {}).get("id"), 0)
+                desc = str((r or {}).get("descricao") or "")
+                val = safe_float((r or {}).get("valor"), 0.0)
+                data_reg = str((r or {}).get("data_registro") or "")
+                cat_row = upper(str((r or {}).get("categoria") or "OUTROS"))
+                observacao = str((r or {}).get("observacao") or "")
 
-        if busca:
-            sql += """
-              AND (
-                    UPPER(COALESCE(descricao,'')) LIKE ?
-                 OR UPPER(COALESCE(categoria,'')) LIKE ?
-                 OR UPPER(COALESCE(observacao,'')) LIKE ?
-              )
+                if busca:
+                    like_txt = f"{upper(desc)} {upper(cat_row)} {upper(observacao)}"
+                    if upper(busca) not in like_txt:
+                        continue
+                if categoria and categoria != "TODAS" and upper(cat_row) != upper(categoria):
+                    continue
+                rows.append((rid, desc, val, data_reg, cat_row, observacao))
+                self._despesas_cache[str(rid)] = (rid, upper(prog), desc, val, cat_row, observacao, data_reg)
+        except Exception:
+            sql = """
+                SELECT id, descricao, valor, data_registro,
+                       COALESCE(categoria, 'OUTROS') as categoria,
+                       COALESCE(observacao, '') as observacao
+                FROM despesas
+                WHERE codigo_programacao=?
             """
-            like = f"%{busca}%"
-            params.extend([like, like, like])
+            params = [prog]
 
-        if categoria and categoria != "TODAS":
-            sql += " AND UPPER(COALESCE(categoria,'OUTROS')) = ? "
-            params.append(categoria)
+            if busca:
+                sql += """
+                  AND (
+                        UPPER(COALESCE(descricao,'')) LIKE ?
+                     OR UPPER(COALESCE(categoria,'')) LIKE ?
+                     OR UPPER(COALESCE(observacao,'')) LIKE ?
+                  )
+                """
+                like = f"%{busca}%"
+                params.extend([like, like, like])
 
-        sql += f" ORDER BY {order_sql}"
+            if categoria and categoria != "TODAS":
+                sql += " AND UPPER(COALESCE(categoria,'OUTROS')) = ? "
+                params.append(categoria)
 
-        with get_db() as conn:
-            cur = conn.cursor()
-            cur.execute(sql, tuple(params))
-            rows = cur.fetchall()
+            sql += f" ORDER BY {order_sql}"
+
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute(sql, tuple(params))
+                rows = cur.fetchall()
+            for rid, desc, val, data_reg, cat_row, observacao in rows:
+                self._despesas_cache[str(rid)] = (rid, upper(prog), desc, val, cat_row, observacao, data_reg)
 
         for i in self.tree_desp.get_children():
             self.tree_desp.delete(i)
@@ -13602,9 +14737,9 @@ class DespesasPage(PageBase):
                 self.tree_desp.column(col, width=95, minwidth=80)
             elif col == "CATEGORIA":
                 self.tree_desp.column(col, width=140, minwidth=110)
-            elif col in {"OBSERVA??O", "OBSERVACAO"}:
+            elif col in {"OBSERVACAO"}:
                 self.tree_desp.column(col, width=240, minwidth=160)
-            elif col in {"DESCRI??O", "DESCRICAO"}:
+            elif col in {"DESCRICAO"}:
                 self.tree_desp.column(col, width=320, minwidth=200)
 
     def _filtrar_despesas(self):
@@ -13718,7 +14853,7 @@ class DespesasPage(PageBase):
             except Exception:
                 logging.debug("Falha ignorada")
 
-        # CÃ©dulas
+        # Cédulas
         for ced in self.ced_entries.values():
             ced.delete(0, "end")
             ced.insert(0, "0")
@@ -13755,6 +14890,121 @@ class DespesasPage(PageBase):
         has_mort_aves = False
         has_mort_kg = False
         has_obs_transbordo = False
+
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                resp = _call_api(
+                    "GET",
+                    f"desktop/rotas/{urllib.parse.quote(upper(prog))}",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                rota_api = resp.get("rota") if isinstance(resp, dict) else None
+                if isinstance(rota_api, dict):
+                    motorista = str(rota_api.get("motorista") or "")
+                    veiculo = str(rota_api.get("veiculo") or "")
+                    equipe = str(rota_api.get("equipe") or "")
+                    nf_numero = str(rota_api.get("num_nf") or rota_api.get("nf_numero") or "")
+                    nf_kg = safe_float(rota_api.get("nf_kg"), 0.0)
+                    nf_caixas = safe_int(rota_api.get("nf_caixas"), 0)
+                    nf_kg_carregado = safe_float(rota_api.get("nf_kg_carregado"), 0.0)
+                    nf_kg_vendido = safe_float(rota_api.get("nf_kg_vendido"), 0.0)
+                    nf_saldo = safe_float(rota_api.get("nf_saldo"), 0.0)
+                    km_inicial = safe_float(rota_api.get("km_inicial"), 0.0)
+                    km_final = safe_float(rota_api.get("km_final"), 0.0)
+                    litros = safe_float(rota_api.get("litros"), 0.0)
+                    km_rodado = safe_float(rota_api.get("km_rodado"), 0.0)
+                    media_km_l = safe_float(rota_api.get("media_km_l"), 0.0)
+                    custo_km = safe_float(rota_api.get("custo_km"), 0.0)
+                    nf_preco = safe_float(rota_api.get("nf_preco"), 0.0)
+                    adiant_val = safe_float(rota_api.get("adiantamento"), safe_float(rota_api.get("adiantamento_rota"), 0.0))
+                    self._data_saida = str(rota_api.get("data_saida") or "")
+                    self._hora_saida = str(rota_api.get("hora_saida") or "")
+                    self._data_chegada = str(rota_api.get("data_chegada") or "")
+                    self._hora_chegada = str(rota_api.get("hora_chegada") or "")
+                    media_carregada = self._normalize_media_kg_ave(
+                        safe_float(rota_api.get("media"), safe_float(rota_api.get("media_carregada"), 0.0))
+                    )
+                    caixa_final = safe_int(
+                        rota_api.get("aves_caixa_final"),
+                        safe_int(rota_api.get("qnt_aves_caixa_final"), 0),
+                    )
+                    rota_obs = str(rota_api.get("rota_observacao") or "")
+                    mort_aves_transb = safe_int(rota_api.get("mortalidade_transbordo_aves"), 0)
+                    mort_kg_transb = safe_float(rota_api.get("mortalidade_transbordo_kg"), 0.0)
+                    obs_transb = str(rota_api.get("obs_transbordo") or "")
+
+                    self._nf_mort_aves = mort_aves_transb
+                    self._nf_mort_kg = mort_kg_transb
+                    self._nf_obs_transbordo = obs_transb
+
+                    self._data_saida, self._hora_saida = normalize_date_time_components(self._data_saida, self._hora_saida)
+                    self._data_chegada, self._hora_chegada = normalize_date_time_components(self._data_chegada, self._hora_chegada)
+
+                    equipe_nomes = resolve_equipe_nomes(equipe)
+                    self.lbl_motorista.config(
+                        text=fix_mojibake_text(
+                            f"Motorista: {motorista or '-'} | Veiculo: {veiculo or '-'} | Equipe: {equipe_nomes or '-'}"
+                        )
+                    )
+
+                    self.ent_adiantamento.delete(0, "end")
+                    self.ent_adiantamento.insert(0, f"{safe_float(adiant_val, 0.0):.2f}".replace(".", ","))
+
+                    self._set_ent(self.ent_nf_numero, nf_numero)
+                    self._set_ent(self.ent_nf_kg, nf_kg)
+                    if hasattr(self, "ent_nf_preco"):
+                        self._set_ent(self.ent_nf_preco, nf_preco)
+                    self._set_ent(self.ent_nf_caixas, nf_caixas)
+                    self._set_ent(self.ent_nf_kg_carregado, nf_kg_carregado)
+                    self._set_ent(self.ent_nf_kg_vendido, nf_kg_vendido)
+                    self._set_ent(self.ent_nf_saldo, nf_saldo)
+                    if hasattr(self, "ent_nf_media_carregada"):
+                        self._set_ent(self.ent_nf_media_carregada, f"{self._normalize_media_kg_ave(media_carregada):.3f}")
+                    if hasattr(self, "ent_nf_caixa_final"):
+                        self._set_ent(self.ent_nf_caixa_final, safe_int(caixa_final, 0))
+
+                    km_anterior = self._buscar_ultimo_km_final_veiculo(veiculo, prog)
+                    if hasattr(self, "lbl_km_anterior"):
+                        if km_anterior > 0:
+                            self.lbl_km_anterior.config(text=f"Ultimo KM do veiculo: {km_anterior:.1f}")
+                        else:
+                            self.lbl_km_anterior.config(text="Ultimo KM do veiculo: sem historico")
+
+                    km_inicial_eff = safe_float(km_inicial, 0.0)
+                    if km_inicial_eff <= 0 and km_anterior > 0:
+                        km_inicial_eff = km_anterior
+                        self.set_status(
+                            f"STATUS: KM inicial sugerido pelo ultimo KM final do veiculo {veiculo}: {km_anterior:.1f}"
+                        )
+
+                    self._set_ent(self.ent_km_inicial, f"{km_inicial_eff:.1f}" if km_inicial_eff > 0 else "")
+                    self._set_ent(self.ent_km_final, km_final)
+                    self._set_ent(self.ent_litros, litros)
+                    self._set_ent(self.ent_km_rodado, km_rodado)
+                    self._set_ent(self.ent_media, media_km_l)
+                    self._set_ent(self.ent_custo_km, custo_km)
+
+                    if hasattr(self, "txt_rota_obs") and self.txt_rota_obs:
+                        try:
+                            self.txt_rota_obs.delete("1.0", "end")
+                            self.txt_rota_obs.insert("1.0", str(rota_obs or ""))
+                        except Exception:
+                            logging.debug("Falha ignorada")
+
+                    try:
+                        self._calcular_km_media()
+                    except Exception:
+                        logging.debug("Falha ignorada")
+                    try:
+                        self._calcular_saldo_auto()
+                    except Exception:
+                        logging.debug("Falha ignorada")
+
+                    self._refresh_km_insights()
+                    return
+            except Exception:
+                logging.debug("Falha ao carregar extras via API; usando fallback local.", exc_info=True)
 
         with get_db() as conn:
             cur = conn.cursor()
@@ -14010,6 +15260,18 @@ class DespesasPage(PageBase):
         v = upper(veiculo or "").strip()
         if not v:
             return 0.0
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                resp = _call_api(
+                    "GET",
+                    f"desktop/veiculos/{urllib.parse.quote(v)}/ultimo-km-final?exclude_programacao={urllib.parse.quote(upper(prog_atual or ''))}",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                if isinstance(resp, dict):
+                    return safe_float(resp.get("km_final"), 0.0)
+            except Exception:
+                logging.debug("Falha ao buscar ultimo km via API; usando fallback local.", exc_info=True)
         try:
             with get_db() as conn:
                 cur = conn.cursor()
@@ -14051,20 +15313,51 @@ class DespesasPage(PageBase):
             self._reset_resumo()
             return
 
-        with get_db() as conn:
-            cur = conn.cursor()
-
-            cur.execute("SELECT SUM(valor) FROM despesas WHERE codigo_programacao=?", (prog,))
-            row = cur.fetchone()
-            total_desp = float(row[0]) if row and row[0] else 0.0
-
-            total_receb = 0.0
+        total_desp = 0.0
+        total_receb = 0.0
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        loaded_api = False
+        if desktop_secret and is_desktop_api_sync_enabled():
             try:
-                cur.execute("SELECT SUM(valor) FROM recebimentos WHERE codigo_programacao=?", (prog,))
-                row = cur.fetchone()
-                total_receb = float(row[0]) if row and row[0] else 0.0
+                rec_resp = _call_api(
+                    "GET",
+                    f"desktop/rotas/{urllib.parse.quote(upper(prog))}/recebimentos",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                desp_resp = _call_api(
+                    "GET",
+                    f"desktop/rotas/{urllib.parse.quote(upper(prog))}/despesas",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                rec_rows = (rec_resp.get("recebimentos") if isinstance(rec_resp, dict) else []) or []
+                desp_rows = (desp_resp.get("despesas") if isinstance(desp_resp, dict) else []) or []
+                total_receb = sum(
+                    safe_float((r or {}).get("valor"), 0.0)
+                    for r in rec_rows
+                    if isinstance(r, dict)
+                )
+                total_desp = sum(
+                    safe_float((r or {}).get("valor"), 0.0)
+                    for r in desp_rows
+                    if isinstance(r, dict)
+                )
+                loaded_api = True
             except Exception:
-                total_receb = 0.0
+                logging.debug("Falha ao calcular resumo financeiro via API; usando fallback local.", exc_info=True)
+
+        if not loaded_api:
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT SUM(valor) FROM despesas WHERE codigo_programacao=?", (prog,))
+                row = cur.fetchone()
+                total_desp = float(row[0]) if row and row[0] else 0.0
+
+                try:
+                    cur.execute("SELECT SUM(valor) FROM recebimentos WHERE codigo_programacao=?", (prog,))
+                    row = cur.fetchone()
+                    total_receb = float(row[0]) if row and row[0] else 0.0
+                except Exception:
+                    total_receb = 0.0
 
         ced_total = 0.0
         for ced, ent in self.ced_entries.items():
@@ -14125,7 +15418,7 @@ class DespesasPage(PageBase):
             self.lbl_kpi_resultado_liquido.config(text="R$ 0,00", foreground="#2E7D32")
 
     # =========================================================
-    # 7.3 EVENTOS / FILTROS / ORDENAÃ‡ÃƒO
+    # 7.3 EVENTOS / FILTROS / ORDENAÇÃO
     # =========================================================
     def _on_select_despesa(self, event=None):
         sel = self.tree_desp.selection()
@@ -14139,7 +15432,7 @@ class DespesasPage(PageBase):
         return
 
     def _sort_despesas_by_column(self, col):
-        # estado simples (mantÃ©m comportamento previsÃ­vel)
+        # estado simples (mantém comportamento previsÃÂÂvel)
         if not hasattr(self, "_sort_state"):
             self._sort_state = {"col": None, "reverse": False}
 
@@ -14163,16 +15456,16 @@ class DespesasPage(PageBase):
         for idx, (_, child) in enumerate(data):
             self.tree_desp.move(child, "", idx)
 
-        # seta setinha no cabeÃ§alho (igual seu padrÃ£o em outras telas)
-        arrow = " Ã¢â€ â€œ" if reverse else " Ã¢â€ â€˜"
+        # seta setinha no cabeçalho (igual seu padrão em outras telas)
+        arrow = " ââââ€š¬ âââ€š¬Åâ€œ" if reverse else " ââââ€š¬ âââ€š¬ËÅ“"
         for c in self.tree_desp["columns"]:
             txt = self.tree_desp.heading(c)["text"]
-            if txt.endswith(" Ã¢â€ â€˜") or txt.endswith(" Ã¢â€ â€œ"):
+            if txt.endswith(" ââââ€š¬ âââ€š¬ËÅ“") or txt.endswith(" ââââ€š¬ âââ€š¬Åâ€œ"):
                 txt = txt[:-2]
             self.tree_desp.heading(c, text=txt)
 
         txt = self.tree_desp.heading(col)["text"]
-        if txt.endswith(" Ã¢â€ â€˜") or txt.endswith(" Ã¢â€ â€œ"):
+        if txt.endswith(" ââââ€š¬ âââ€š¬ËÅ“") or txt.endswith(" ââââ€š¬ âââ€š¬Åâ€œ"):
             txt = txt[:-2]
         self.tree_desp.heading(col, text=txt + arrow)
 
@@ -14189,7 +15482,7 @@ class DespesasPage(PageBase):
         self.set_status("STATUS: Busca limpa")
 
     # =========================================================
-    # 7.4 CÃƒÆ’Ã‚LCULOS AUTOMÃƒÆ’Ã‚TICOS / SINCRONIZAÃƒÆ’Ã¢â‚¬Â¡ÃƒÆ’Ã†â€™O SIMULADA
+    # 7.4 CÃÆââ‚¬â„¢ÂLCULOS AUTOMÃÆââ‚¬â„¢ÂTICOS / SINCRONIZAÃÆââ‚¬â„¢ââââ‚¬Å¡¬¡ÃÆââ‚¬â„¢Æâââ€š¬ââ€ž¢O SIMULADA
     # =========================================================
     def _calcular_saldo_auto(self):
         try:
@@ -14228,96 +15521,149 @@ class DespesasPage(PageBase):
 
             aves_por_caixa = 6
             kg_vendido = safe_float(self.ent_nf_kg_vendido.get(), 0.0)
-
-            with get_db() as conn:
-                cur = conn.cursor()
-                cols_set = _prog_cols(cur)
-
-                if caixas <= 0:
-                    caixas = safe_int(
-                        _fetch_prog_first_numeric(
-                            cur,
-                            cols_set,
-                            ["nf_caixas", "caixas_carregadas", "qnt_cx_carregada", "total_caixas"],
-                            0.0,
-                        ),
-                        0,
-                    )
-                if media <= 0:
-                    media = self._normalize_media_kg_ave(
-                        _fetch_prog_first_numeric(cur, cols_set, ["media", "media_carregada", "media_base"], 0.0)
-                    )
-                if caixa_final <= 0:
-                    caixa_final = safe_int(
-                        _fetch_prog_first_numeric(cur, cols_set, ["aves_caixa_final", "qnt_aves_caixa_final"], 0.0),
-                        0,
-                    )
-                aves_por_caixa = safe_int(
-                    _fetch_prog_first_numeric(cur, cols_set, ["qnt_aves_por_cx", "aves_por_caixa", "qnt_aves_por_caixa"], 6.0),
-                    6,
-                )
-                if aves_por_caixa <= 0:
-                    aves_por_caixa = 6
-
-                # KG vendido = soma dos pedidos ENTREGUE (peso_previsto quando existir)
+            used_api = False
+            desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+            if desktop_secret and is_desktop_api_sync_enabled():
                 try:
-                    cur.execute("PRAGMA table_info(programacao_itens_controle)")
-                    ctrl_cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
-                except Exception:
-                    ctrl_cols = set()
-                try:
-                    cur.execute("PRAGMA table_info(programacao_itens)")
-                    itens_cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
-                except Exception:
-                    itens_cols = set()
-
-                if "codigo_programacao" in ctrl_cols and "status_pedido" in ctrl_cols:
-                    peso_expr = "COALESCE(peso_previsto,0)" if "peso_previsto" in ctrl_cols else "0"
-                    caixas_expr = "COALESCE(caixas_atual,0)" if "caixas_atual" in ctrl_cols else "0"
-                    cur.execute(
-                        f"""
-                        SELECT COALESCE(SUM(
-                            CASE
-                                WHEN UPPER(COALESCE(status_pedido,''))='ENTREGUE' THEN
-                                    CASE
-                                        WHEN {peso_expr} > 0 THEN {peso_expr}
-                                        WHEN {caixas_expr} > 0 THEN ({caixas_expr} * ? * ?)
-                                        ELSE 0
-                                    END
-                                ELSE 0
-                            END
-                        ),0)
-                        FROM programacao_itens_controle
-                        WHERE codigo_programacao=?
-                        """,
-                        (aves_por_caixa, media, prog),
+                    resp = _call_api(
+                        "GET",
+                        f"desktop/rotas/{urllib.parse.quote(upper(prog))}",
+                        extra_headers={"X-Desktop-Secret": desktop_secret},
                     )
-                    row = cur.fetchone()
-                    kg_vendido = safe_float((row[0] if row else 0), 0.0)
+                    rota = resp.get("rota") if isinstance(resp, dict) else None
+                    clientes = resp.get("clientes") if isinstance(resp, dict) else []
+                    if isinstance(rota, dict):
+                        if caixas <= 0:
+                            caixas = safe_int(
+                                rota.get("nf_caixas"),
+                                safe_int(rota.get("caixas_carregadas"), safe_int(rota.get("qnt_cx_carregada"), safe_int(rota.get("total_caixas"), 0))),
+                            )
+                        if media <= 0:
+                            media = self._normalize_media_kg_ave(
+                                safe_float(rota.get("media"), safe_float(rota.get("media_carregada"), safe_float(rota.get("media_base"), 0.0)))
+                            )
+                        if caixa_final <= 0:
+                            caixa_final = safe_int(
+                                rota.get("aves_caixa_final"),
+                                safe_int(rota.get("qnt_aves_caixa_final"), 0),
+                            )
+                        aves_por_caixa = safe_int(
+                            rota.get("qnt_aves_por_cx"),
+                            safe_int(rota.get("aves_por_caixa"), safe_int(rota.get("qnt_aves_por_caixa"), 6)),
+                        )
+                        if aves_por_caixa <= 0:
+                            aves_por_caixa = 6
 
-                # fallback: sem controle de peso, estima por itens entregues da programação
-                if kg_vendido <= 0 and "codigo_programacao" in itens_cols:
-                    col_status = "status_pedido" if "status_pedido" in itens_cols else None
-                    col_cx = None
-                    for c in ("qnt_caixas", "qtd_caixas", "caixas", "cx"):
-                        if c in itens_cols:
-                            col_cx = c
-                            break
-                    if col_status and col_cx:
+                        kg_vendido_calc = 0.0
+                        for it in (clientes or []):
+                            if not isinstance(it, dict):
+                                continue
+                            st = upper(str(it.get("status_pedido") or ""))
+                            if st != "ENTREGUE":
+                                continue
+                            peso = safe_float(it.get("peso_previsto"), 0.0)
+                            if peso > 0:
+                                kg_vendido_calc += peso
+                                continue
+                            cx = safe_float(it.get("caixas_atual"), safe_float(it.get("qnt_caixas"), 0.0))
+                            if cx > 0:
+                                kg_vendido_calc += cx * aves_por_caixa * media
+                        if kg_vendido_calc > 0:
+                            kg_vendido = kg_vendido_calc
+                        used_api = True
+                except Exception:
+                    logging.debug("Falha ao calcular saldo via API; usando fallback local.", exc_info=True)
+
+            if not used_api:
+                with get_db() as conn:
+                    cur = conn.cursor()
+                    cols_set = _prog_cols(cur)
+
+                    if caixas <= 0:
+                        caixas = safe_int(
+                            _fetch_prog_first_numeric(
+                                cur,
+                                cols_set,
+                                ["nf_caixas", "caixas_carregadas", "qnt_cx_carregada", "total_caixas"],
+                                0.0,
+                            ),
+                            0,
+                        )
+                    if media <= 0:
+                        media = self._normalize_media_kg_ave(
+                            _fetch_prog_first_numeric(cur, cols_set, ["media", "media_carregada", "media_base"], 0.0)
+                        )
+                    if caixa_final <= 0:
+                        caixa_final = safe_int(
+                            _fetch_prog_first_numeric(cur, cols_set, ["aves_caixa_final", "qnt_aves_caixa_final"], 0.0),
+                            0,
+                        )
+                    aves_por_caixa = safe_int(
+                        _fetch_prog_first_numeric(cur, cols_set, ["qnt_aves_por_cx", "aves_por_caixa", "qnt_aves_por_caixa"], 6.0),
+                        6,
+                    )
+                    if aves_por_caixa <= 0:
+                        aves_por_caixa = 6
+
+                    # KG vendido = soma dos pedidos ENTREGUE (peso_previsto quando existir)
+                    try:
+                        cur.execute("PRAGMA table_info(programacao_itens_controle)")
+                        ctrl_cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+                    except Exception:
+                        ctrl_cols = set()
+                    try:
+                        cur.execute("PRAGMA table_info(programacao_itens)")
+                        itens_cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+                    except Exception:
+                        itens_cols = set()
+
+                    if "codigo_programacao" in ctrl_cols and "status_pedido" in ctrl_cols:
+                        peso_expr = "COALESCE(peso_previsto,0)" if "peso_previsto" in ctrl_cols else "0"
+                        caixas_expr = "COALESCE(caixas_atual,0)" if "caixas_atual" in ctrl_cols else "0"
                         cur.execute(
                             f"""
                             SELECT COALESCE(SUM(
-                                CASE WHEN UPPER(COALESCE({col_status},''))='ENTREGUE'
-                                     THEN COALESCE({col_cx},0) ELSE 0 END
+                                CASE
+                                    WHEN UPPER(COALESCE(status_pedido,''))='ENTREGUE' THEN
+                                        CASE
+                                            WHEN {peso_expr} > 0 THEN {peso_expr}
+                                            WHEN {caixas_expr} > 0 THEN ({caixas_expr} * ? * ?)
+                                            ELSE 0
+                                        END
+                                    ELSE 0
+                                END
                             ),0)
-                            FROM programacao_itens
+                            FROM programacao_itens_controle
                             WHERE codigo_programacao=?
                             """,
-                            (prog,),
+                            (aves_por_caixa, media, prog),
                         )
                         row = cur.fetchone()
-                        cx_entregues = safe_float((row[0] if row else 0), 0.0)
-                        kg_vendido = cx_entregues * aves_por_caixa * media
+                        kg_vendido = safe_float((row[0] if row else 0), 0.0)
+
+                    # fallback: sem controle de peso, estima por itens entregues da programação
+                    if kg_vendido <= 0 and "codigo_programacao" in itens_cols:
+                        col_status = "status_pedido" if "status_pedido" in itens_cols else None
+                        col_cx = None
+                        for c in ("qnt_caixas", "qtd_caixas", "caixas", "cx"):
+                            if c in itens_cols:
+                                col_cx = c
+                                break
+                        if col_status and col_cx:
+                            cur.execute(
+                                f"""
+                                SELECT COALESCE(SUM(
+                                    CASE WHEN UPPER(COALESCE({col_status},''))='ENTREGUE'
+                                         THEN COALESCE({col_cx},0) ELSE 0 END
+                                ),0)
+                                FROM programacao_itens
+                                WHERE codigo_programacao=?
+                                """,
+                                (prog,),
+                            )
+                            row = cur.fetchone()
+                            cx_entregues = safe_float((row[0] if row else 0), 0.0)
+                            kg_vendido = cx_entregues * aves_por_caixa * media
 
             # KG carregado = caixas/aves/media (considera caixa final)
             total_aves = 0
@@ -14379,6 +15725,26 @@ class DespesasPage(PageBase):
     def _calc_preco_medio_venda(self, prog: str) -> float:
         if not prog:
             return 0.0
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                resp = _call_api(
+                    "GET",
+                    f"desktop/rotas/{urllib.parse.quote(upper(prog))}",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                clientes = resp.get("clientes") if isinstance(resp, dict) else []
+                precos = []
+                for r in (clientes or []):
+                    if not isinstance(r, dict):
+                        continue
+                    p = safe_float((r or {}).get("preco_atual"), safe_float((r or {}).get("preco"), 0.0))
+                    if p > 0:
+                        precos.append(p)
+                if precos:
+                    return sum(precos) / float(len(precos))
+            except Exception:
+                logging.debug("Falha ao calcular preco medio via API; usando fallback local.", exc_info=True)
         try:
             with get_db() as conn:
                 cur = conn.cursor()
@@ -14438,14 +15804,33 @@ class DespesasPage(PageBase):
         try:
             prog = self._current_programacao or ""
             if prog:
-                with get_db() as conn:
-                    cur = conn.cursor()
-                    cur.execute(
-                        "SELECT COALESCE(SUM(valor), 0) FROM despesas WHERE codigo_programacao=?",
-                        (prog,),
-                    )
-                    row = cur.fetchone()
-                    despesas_rota = safe_float((row[0] if row else 0.0), 0.0)
+                desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+                loaded_api = False
+                if desktop_secret and is_desktop_api_sync_enabled():
+                    try:
+                        resp = _call_api(
+                            "GET",
+                            f"desktop/rotas/{urllib.parse.quote(upper(prog))}/despesas",
+                            extra_headers={"X-Desktop-Secret": desktop_secret},
+                        )
+                        arr = (resp.get("despesas") if isinstance(resp, dict) else []) or []
+                        despesas_rota = sum(
+                            safe_float((r or {}).get("valor"), 0.0)
+                            for r in arr
+                            if isinstance(r, dict)
+                        )
+                        loaded_api = True
+                    except Exception:
+                        logging.debug("Falha ao calcular despesas da rota via API; usando fallback local.", exc_info=True)
+                if not loaded_api:
+                    with get_db() as conn:
+                        cur = conn.cursor()
+                        cur.execute(
+                            "SELECT COALESCE(SUM(valor), 0) FROM despesas WHERE codigo_programacao=?",
+                            (prog,),
+                        )
+                        row = cur.fetchone()
+                        despesas_rota = safe_float((row[0] if row else 0.0), 0.0)
         except Exception:
             logging.debug("Falha ignorada")
 
@@ -14519,14 +15904,33 @@ class DespesasPage(PageBase):
             total_despesas = 0.0
             try:
                 if self._current_programacao:
-                    with get_db() as conn:
-                        cur = conn.cursor()
-                        cur.execute(
-                            "SELECT COALESCE(SUM(valor), 0) FROM despesas WHERE codigo_programacao=?",
-                            (self._current_programacao,),
-                        )
-                        row = cur.fetchone()
-                        total_despesas = safe_float((row[0] if row else 0), 0.0)
+                    desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+                    loaded_api = False
+                    if desktop_secret and is_desktop_api_sync_enabled():
+                        try:
+                            resp = _call_api(
+                                "GET",
+                                f"desktop/rotas/{urllib.parse.quote(upper(self._current_programacao))}/despesas",
+                                extra_headers={"X-Desktop-Secret": desktop_secret},
+                            )
+                            arr = (resp.get("despesas") if isinstance(resp, dict) else []) or []
+                            total_despesas = sum(
+                                safe_float((r or {}).get("valor"), 0.0)
+                                for r in arr
+                                if isinstance(r, dict)
+                            )
+                            loaded_api = True
+                        except Exception:
+                            logging.debug("Falha ao calcular total despesas via API; usando fallback local.", exc_info=True)
+                    if not loaded_api:
+                        with get_db() as conn:
+                            cur = conn.cursor()
+                            cur.execute(
+                                "SELECT COALESCE(SUM(valor), 0) FROM despesas WHERE codigo_programacao=?",
+                                (self._current_programacao,),
+                            )
+                            row = cur.fetchone()
+                            total_despesas = safe_float((row[0] if row else 0), 0.0)
             except Exception:
                 logging.debug("Falha ignorada")
 
@@ -14538,18 +15942,18 @@ class DespesasPage(PageBase):
             self._safe_set_entry(self.ent_custo_km, f"{custo_km:.2f}")
 
             self.set_status(
-                f"STATUS: KM rodado: {km_rodado:.1f} km | MÃ©dia: {media:.1f} km/l | "
+                f"STATUS: KM rodado: {km_rodado:.1f} km | Média: {media:.1f} km/l | "
                 f"Custo/km: {custo_km:.2f}"
             )
             self._refresh_km_insights()
         except Exception as e:
-            messagebox.showerror("Erro", f"Erro ao calcular KM/mÃ©dia: {str(e)}")
+            messagebox.showerror("Erro", f"Erro ao calcular KM/média: {str(e)}")
 
     def _distribuir_cedulas(self):
         try:
             valor_total = self._parse_money(self.ent_total_dinheiro.get())
             if valor_total <= 0:
-                messagebox.showwarning("AtenÃ§Ã£o", "Digite um valor total vÃ¡lido.")
+                messagebox.showwarning("Atenção", "Digite um valor total válido.")
                 return
 
             cedulas = [200, 100, 50, 20, 10, 5, 2]
@@ -14566,20 +15970,20 @@ class DespesasPage(PageBase):
                     self.ced_entries[ced].insert(0, str(quantidade))
                     restante -= quantidade * ced
 
-            # arredondamento: se sobrar qualquer centavo, ajusta na menor cÃ©dula
+            # arredondamento: se sobrar qualquer centavo, ajusta na menor cédula
             if restante > 0:
                 atual = safe_int(self.ced_entries[2].get(), 0)
                 self.ced_entries[2].delete(0, "end")
                 self.ced_entries[2].insert(0, str(atual + 1))
 
             self._calc_valor_dinheiro()
-            self.set_status(f"STATUS: Valor {self._fmt_money(valor_total)} distribuÃ­do automaticamente")
+            self.set_status(f"STATUS: Valor {self._fmt_money(valor_total)} distribuÃÂÂdo automaticamente")
         except Exception as e:
-            messagebox.showerror("Erro", f"Erro ao distribuir cÃ©dulas: {str(e)}")
+            messagebox.showerror("Erro", f"Erro ao distribuir cédulas: {str(e)}")
 
     def _sincronizar_com_app(self):
         if not self._current_programacao:
-            messagebox.showwarning("SincronizaÃ§Ã£o", "Selecione a programaÃ§Ã£o primeiro.")
+            messagebox.showwarning("Sincronização", "Selecione a programação primeiro.")
             return
 
         prog = self._current_programacao
@@ -14594,7 +15998,7 @@ class DespesasPage(PageBase):
             resposta = _call_api("GET", f"rotas/{prog}", token=token)
             rota = resposta.get("rota")
             if not rota:
-                raise SyncError("A API nÃ£o retornou os dados da rota.")
+                raise SyncError("A API não retornou os dados da rota.")
             clientes = resposta.get("clientes") or []
 
             with get_db() as conn:
@@ -14608,20 +16012,20 @@ class DespesasPage(PageBase):
             self._calcular_km_media()
             self._calcular_saldo_auto()
 
-            self.logger.info("SincronizaÃ§Ã£o com App Mobile concluÃ­da para %s", prog)
-            messagebox.showinfo("SincronizaÃ§Ã£o", "Dados sincronizados com sucesso.")
+            self.logger.info("Sincronização com App Mobile concluÃÂÂda para %s", prog)
+            messagebox.showinfo("Sincronização", "Dados sincronizados com sucesso.")
         except SyncError as exc:
             self.logger.error("Falha ao sincronizar com o App: %s", exc)
-            messagebox.showerror("SincronizaÃ§Ã£o", f"Falha ao sincronizar: {exc}")
+            messagebox.showerror("Sincronização", f"Falha ao sincronizar: {exc}")
         except Exception as exc:
-            logging.exception("Erro inesperado na sincronizaÃ§Ã£o", exc_info=exc)
-            messagebox.showerror("SincronizaÃ§Ã£o", f"Erro inesperado: {exc}")
+            logging.exception("Erro inesperado na sincronização", exc_info=exc)
+            messagebox.showerror("Sincronização", f"Erro inesperado: {exc}")
 
     def _prompt_sync_credentials(self, default_code: str):
-        title = "SincronizaÃ§Ã£o App Mobile"
+        title = "Sincronização App Mobile"
         codigo = simpledialog.askstring(
             title,
-            "CÃ³digo do motorista utilizado no App Mobile:",
+            "Código do motorista utilizado no App Mobile:",
             initialvalue=(default_code or ""),
             parent=self,
         )
@@ -14629,7 +16033,7 @@ class DespesasPage(PageBase):
             return None
         codigo = codigo.strip()
         if not codigo:
-            messagebox.showwarning("SincronizaÃ§Ã£o", "CÃ³digo do motorista Ã© obrigatÃ³rio.")
+            messagebox.showwarning("Sincronização", "Código do motorista é obrigatório.")
             return None
 
         senha = simpledialog.askstring(
@@ -14642,7 +16046,7 @@ class DespesasPage(PageBase):
             return None
         senha = senha.strip()
         if not senha:
-            messagebox.showwarning("SincronizaÃ§Ã£o", "Senha do motorista Ã© obrigatÃ³ria.")
+            messagebox.showwarning("Sincronização", "Senha do motorista é obrigatória.")
             return None
 
         return codigo, senha
@@ -14688,6 +16092,22 @@ class DespesasPage(PageBase):
             return False
 
     def _fetch_motorista_codigo_hint(self, prog: str) -> str:
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                resp = _call_api(
+                    "GET",
+                    f"desktop/rotas/{urllib.parse.quote(upper(prog or '').strip())}",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                rota = resp.get("rota") if isinstance(resp, dict) else None
+                if isinstance(rota, dict):
+                    cod = str(rota.get("motorista_codigo") or rota.get("codigo_motorista") or "").strip()
+                    if cod:
+                        return cod
+                    return str(rota.get("motorista") or "").strip()
+            except Exception:
+                logging.debug("Falha ao obter hint de motorista via API; usando fallback local.", exc_info=True)
         try:
             with get_db() as conn:
                 cur = conn.cursor()
@@ -14710,11 +16130,11 @@ class DespesasPage(PageBase):
 
     def _api_login(self, codigo: str, senha: str) -> str:
         if not API_BASE_URL:
-            raise SyncError("ROTA_SERVER_URL nÃ£o configurada.")
+            raise SyncError("ROTA_SERVER_URL não configurada.")
         resposta = _call_api("POST", "auth/motorista/login", payload={"codigo": codigo, "senha": senha})
         token = resposta.get("token")
         if not token:
-            raise SyncError("NÃ£o foi possÃ­vel obter token da API de sincronizaÃ§Ã£o.")
+            raise SyncError("Não foi possÃÂÂvel obter token da API de sincronização.")
         return token
 
     def _apply_api_programacao(self, cur, prog: str, rota: dict):
@@ -14868,7 +16288,7 @@ class DespesasPage(PageBase):
                 "alterado_por": cliente.get("alterado_por"),
             }
 
-            # UPSERT robusto no controle (compatível com bancos antigos e novos)
+            # UPSERT robusto no controle (compatÃÂvel com bancos antigos e novos)
             if cols_ctrl:
                 key_cols = [("codigo_programacao", prog), ("cod_cliente", cod_cliente)]
                 if "pedido" in cols_ctrl and pedido_norm:
@@ -14935,7 +16355,7 @@ class DespesasPage(PageBase):
                         obs = (f"[PED {pedido_norm}] " + obs).strip()
                     now_s = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-                    # Mantém 1 registro vigente por cliente (compatível com esquema atual do desktop).
+                    # Mantém 1 registro vigente por cliente (compatÃÂvel com esquema atual do desktop).
                     cur.execute(
                         "DELETE FROM recebimentos WHERE codigo_programacao=? AND cod_cliente=?",
                         (prog, cod_cliente),
@@ -15000,6 +16420,31 @@ class DespesasPage(PageBase):
     # 7.5 PageBase (refresh / on_show / status)
     # =========================================================
     def refresh_comboboxes(self):
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                resp = _call_api(
+                    "GET",
+                    "desktop/programacoes?modo=finalizadas_prestacao&limit=300",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                arr = resp.get("programacoes") if isinstance(resp, dict) else []
+                programas = []
+                for r in (arr or []):
+                    if not isinstance(r, dict):
+                        continue
+                    codigo = upper((r or {}).get("codigo_programacao") or "")
+                    data = str((r or {}).get("data_criacao") or "")[:10] or "Sem data"
+                    if codigo:
+                        programas.append(f"{codigo} ({data})")
+                self.cb_prog["values"] = programas
+                atual = str(self.cb_prog.get() or "").strip()
+                if atual and atual not in set(programas):
+                    self.cb_prog.set("")
+                return
+            except Exception:
+                logging.debug("Falha ao carregar combobox Despesas via API", exc_info=True)
+
         with get_db() as conn:
             cur = conn.cursor()
             try:
@@ -15053,7 +16498,7 @@ class DespesasPage(PageBase):
         self.refresh_comboboxes()
         self._refresh_all()
         self.set_status("STATUS: Despesas da rota e controle completo (NF / KM / Dinheiro).")
-        self.logger.info("PÃ¡gina Despesas carregada")
+        self.logger.info("Página Despesas carregada")
 
     def set_status(self, text):
         try:
@@ -15076,8 +16521,21 @@ class DespesasPage(PageBase):
     # 7.6 CRUD DESPESAS (REGISTRAR / EDITAR / EXCLUIR)
     # =========================================================
 
-    # --------- REGRAS DE SEGURANÃ‡A (nÃ£o altera sistema; sÃ³ bloqueia quando necessÃ¡rio)
+    # --------- REGRAS DE SEGURANÇA (não altera sistema; só bloqueia quando necessário)
     def _get_prestacao_status(self, prog: str) -> str:
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                resp = _call_api(
+                    "GET",
+                    f"desktop/rotas/{urllib.parse.quote(upper(prog))}",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                rota = resp.get("rota") if isinstance(resp, dict) else None
+                if isinstance(rota, dict):
+                    return upper(str(rota.get("prestacao_status") or ""))
+            except Exception:
+                logging.debug("Falha ao consultar status da prestacao via API; usando fallback local.", exc_info=True)
         try:
             with get_db() as conn:
                 cur = conn.cursor()
@@ -15090,15 +16548,17 @@ class DespesasPage(PageBase):
     def _can_edit_current_prog(self) -> bool:
         prog = self._current_programacao
         if not prog:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Selecione a ProgramaÃ§Ã£o primeiro.")
+            messagebox.showwarning("ATENÇÃO", "Selecione a Programação primeiro.")
+            return False
+        if not ensure_system_api_binding(context=f"Editar despesas ({prog})", parent=self):
             return False
 
         status = self._get_prestacao_status(prog)
         if status == "FECHADA":
             messagebox.showwarning(
                 "BLOQUEADO",
-                f"Esta programaÃ§Ã£o ({prog}) estÃ¡ com a prestaÃ§Ã£o FECHADA.\n\n"
-                "Por seguranÃ§a, nÃ£o Ã© permitido registrar/editar/excluir despesas."
+                f"Esta programação ({prog}) está com a prestação FECHADA.\n\n"
+                "Por segurança, não é permitido registrar/editar/excluir despesas."
             )
             return False
         return True
@@ -15123,6 +16583,32 @@ class DespesasPage(PageBase):
         prog = upper(str(prog or "").strip())
         if not prog:
             return out
+
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                resp = _call_api(
+                    "GET",
+                    f"desktop/rotas/{urllib.parse.quote(prog)}/logistica",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                info = resp.get("logistica") if isinstance(resp, dict) else None
+                if isinstance(info, dict):
+                    out.update({
+                        "pend_substituicao": safe_int(info.get("pend_substituicao"), 0),
+                        "pend_transferencia": safe_int(info.get("pend_transferencia"), 0),
+                        "transf_out": safe_int(info.get("transf_out"), 0),
+                        "transf_in": safe_int(info.get("transf_in"), 0),
+                        "base_cx": safe_int(info.get("base_cx"), 0),
+                        "atual_cx": safe_int(info.get("atual_cx"), 0),
+                        "esperado_cx": safe_int(info.get("esperado_cx"), 0),
+                        "delta_cx": safe_int(info.get("delta_cx"), 0),
+                        "itens_ok": bool(info.get("itens_ok", True)),
+                        "resumo": list(info.get("resumo") or []),
+                    })
+                    return out
+            except Exception:
+                logging.debug("Falha ao consolidar rastreabilidade via API; usando fallback local.", exc_info=True)
 
         try:
             with get_db() as conn:
@@ -15230,7 +16716,7 @@ class DespesasPage(PageBase):
                     f"Delta caixas: {out['delta_cx']} cx",
                 ]
         except Exception:
-            logging.debug("Falha ao consolidar rastreabilidade logística", exc_info=True)
+            logging.debug("Falha ao consolidar rastreabilidade logÃÂstica", exc_info=True)
         return out
 
     def _validar_fechamento_logistico(self, prog: str) -> tuple[bool, str]:
@@ -15238,13 +16724,13 @@ class DespesasPage(PageBase):
         if safe_int(info.get("pend_substituicao"), 0) > 0:
             return (
                 False,
-                "Não é possível finalizar a prestação:\n"
+                "Não é possÃÂvel finalizar a prestação:\n"
                 "existe substituição de rota pendente de aceite/recusa.",
             )
         if safe_int(info.get("pend_transferencia"), 0) > 0:
             return (
                 False,
-                "Não é possível finalizar a prestação:\n"
+                "Não é possÃÂvel finalizar a prestação:\n"
                 "existem transferências de caixas pendentes.",
             )
         if not bool(info.get("itens_ok", True)):
@@ -15258,12 +16744,14 @@ class DespesasPage(PageBase):
     def finalizar_prestacao_despesas(self):
         prog = self._current_programacao
         if not prog:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Selecione a ProgramaÃ§Ã£o primeiro.")
+            messagebox.showwarning("ATENCAO", "Selecione a programacao primeiro.")
+            return
+        if not ensure_system_api_binding(context=f"Finalizar prestacao ({prog})", parent=self):
             return
 
         status = self._get_prestacao_status(prog)
         if status == "FECHADA":
-            messagebox.showinfo("PrestaÃ§Ã£o", "Esta prestaÃ§Ã£o jÃ¡ estÃ¡ FECHADA.")
+            messagebox.showinfo("Prestacao", "Esta prestacao ja esta FECHADA.")
             return
 
         ok_log, msg_log = self._validar_fechamento_logistico(prog)
@@ -15273,42 +16761,36 @@ class DespesasPage(PageBase):
 
         if not messagebox.askyesno(
             "Confirmar",
-            f"Finalizar prestaÃ§Ã£o de contas da rota {prog}?\n\n"
-            "A programaÃ§Ã£o serÃ¡ finalizada."
+            f"Finalizar prestacao de contas da rota {prog}?\n\n"
+            "A programacao sera finalizada."
         ):
             return
 
         try:
-            with get_db() as conn:
-                cur = conn.cursor()
-                cur.execute("PRAGMA table_info(programacoes)")
-                cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
-                sets = ["prestacao_status='FECHADA'", "status='FINALIZADA'"]
-                if "status_operacional" in cols_prog:
-                    sets.append("status_operacional='FINALIZADA'")
-                if "finalizada_no_app" in cols_prog:
-                    sets.append("finalizada_no_app=1")
-                cur.execute(
-                    f"""
-                    UPDATE programacoes
-                    SET {', '.join(sets)}
-                    WHERE codigo_programacao=?
-                    """,
-                    (prog,),
-                )
+            desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+            _call_api(
+                "PUT",
+                f"desktop/rotas/{urllib.parse.quote(upper(prog))}/status",
+                payload={
+                    "prestacao_status": "FECHADA",
+                    "status": "FINALIZADA",
+                    "status_operacional": "FINALIZADA",
+                    "finalizada_no_app": 1,
+                },
+                extra_headers={"X-Desktop-Secret": desktop_secret},
+            )
 
-            messagebox.showinfo("OK", f"PrestaÃ§Ã£o finalizada: {prog}")
+            messagebox.showinfo("OK", f"Prestacao finalizada: {prog}")
             try:
                 if messagebox.askyesno(
-                    "Imprimir prestação",
-                    f"Deseja imprimir agora a prestação de contas da rota {prog}?\n\n"
-                    "Será gerada a folha completa com recebimentos e despesas."
+                    "Imprimir prestacao",
+                    f"Deseja imprimir agora a prestacao da rota {prog}?\n\n"
+                    "Sera gerada a folha completa com recebimentos e despesas."
                 ):
-                    # Garante contexto da programação ao abrir a impressão.
                     self._current_programacao = prog
                     self.imprimir_resumo()
             except Exception:
-                logging.exception("Falha ao imprimir prestação após finalizar")
+                logging.exception("Falha ao imprimir prestacao apos finalizar")
             self.refresh_comboboxes()
             if hasattr(self.app, "refresh_programacao_comboboxes"):
                 try:
@@ -15329,7 +16811,6 @@ class DespesasPage(PageBase):
                         home_page.on_show()
             except Exception:
                 logging.debug("Falha ignorada")
-            # Ap?s finalizar, limpa a tela para iniciar nova programa??o.
             self._current_programacao = None
             try:
                 self.cb_prog.set("")
@@ -15341,9 +16822,10 @@ class DespesasPage(PageBase):
             except Exception:
                 logging.debug("Falha ignorada")
             self._load_by_programacao()
-            self.set_status("STATUS: Presta??o finalizada. Selecione uma nova programa??o para continuar.")
+            self.set_status("STATUS: Prestacao finalizada. Selecione uma nova programacao para continuar.")
         except Exception as e:
-            messagebox.showerror("ERRO", f"Erro ao finalizar prestaÃ§Ã£o: {str(e)}")
+            messagebox.showerror("ERRO", f"Erro ao finalizar prestacao: {str(e)}")
+    
 
     def _parse_money_local(self, s):
         # garante parse de 'R$ 1.234,56' / '1234,56' / '1234.56'
@@ -15413,6 +16895,31 @@ class DespesasPage(PageBase):
     def _get_despesa_info(self, did):
         # retorna (id, codigo_programacao, descricao, valor, categoria)
         try:
+            cached = (getattr(self, "_despesas_cache", {}) or {}).get(str(did))
+            if cached:
+                return (cached[0], cached[1], cached[2], cached[3], cached[4])
+        except Exception:
+            logging.debug("Falha ignorada")
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                resp = _call_api(
+                    "GET",
+                    f"desktop/despesas/{safe_int(did, 0)}",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                desp = resp.get("despesa") if isinstance(resp, dict) else None
+                if isinstance(desp, dict):
+                    return (
+                        safe_int(desp.get("id"), 0),
+                        upper(str(desp.get("codigo_programacao") or "")),
+                        str(desp.get("descricao") or ""),
+                        safe_float(desp.get("valor"), 0.0),
+                        upper(str(desp.get("categoria") or "OUTROS")),
+                    )
+            except Exception:
+                logging.debug("Falha ao obter despesa via API; usando fallback local.", exc_info=True)
+        try:
             with get_db() as conn:
                 cur = conn.cursor()
                 cur.execute("""
@@ -15432,7 +16939,7 @@ class DespesasPage(PageBase):
         prog = self._current_programacao
 
         win = tk.Toplevel(self)
-        win.title("Registrar Despesa (RÃ¡pido)")
+        win.title("Registrar Despesa (Rápido)")
         win.geometry("520x360")
         win.grab_set()
         win.resizable(False, False)
@@ -15444,7 +16951,7 @@ class DespesasPage(PageBase):
         ttk.Label(frm, text="NOVA DESPESA", font=("Segoe UI", 14, "bold"))\
             .grid(row=0, column=0, columnspan=2, pady=(0, 16), sticky="w")
 
-        ttk.Label(frm, text="DescriÃ§Ã£o:", font=("Segoe UI", 10, "bold"))\
+        ttk.Label(frm, text="Descrição:", font=("Segoe UI", 10, "bold"))\
             .grid(row=1, column=0, sticky="w", pady=5)
         ent_desc = ttk.Entry(frm, style="Field.TEntry")
         ent_desc.grid(row=1, column=1, sticky="ew", pady=5, padx=(10, 0))
@@ -15465,7 +16972,7 @@ class DespesasPage(PageBase):
         cb_categoria.set("OUTROS")
         cb_categoria.grid(row=3, column=1, sticky="w", pady=5, padx=(10, 0))
 
-        ttk.Label(frm, text="ObservaÃ§Ã£o:", font=("Segoe UI", 10, "bold"))\
+        ttk.Label(frm, text="Observação:", font=("Segoe UI", 10, "bold"))\
             .grid(row=4, column=0, sticky="w", pady=5)
         ent_obs = tk.Text(frm, height=4, width=30, font=("Segoe UI", 9))
         ent_obs.grid(row=4, column=1, sticky="ew", pady=5, padx=(10, 0))
@@ -15483,21 +16990,27 @@ class DespesasPage(PageBase):
             obs = upper(ent_obs.get("1.0", "end-1c").strip())
 
             if not desc:
-                messagebox.showwarning("ATENÃ‡ÃƒO", "Informe a descriÃ§Ã£o.")
+                messagebox.showwarning("ATENÇÃO", "Informe a descrição.")
                 return
             if val <= 0:
-                messagebox.showwarning("ATENÃ‡ÃƒO", "O valor deve ser maior que zero.")
+                messagebox.showwarning("ATENÇÃO", "O valor deve ser maior que zero.")
                 return
             if not categoria:
                 categoria = "OUTROS"
 
             try:
-                with get_db() as conn:
-                    cur = conn.cursor()
-                    cur.execute("""
-                        INSERT INTO despesas (codigo_programacao, descricao, valor, categoria, observacao, data_registro)
-                        VALUES (?, ?, ?, ?, ?, datetime('now'))
-                    """, (prog, desc, float(val), categoria, obs))
+                desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+                _call_api(
+                    "POST",
+                    f"desktop/rotas/{urllib.parse.quote(upper(prog))}/despesas",
+                    payload={
+                        "descricao": desc,
+                        "valor": float(val),
+                        "categoria": categoria,
+                        "observacao": obs,
+                    },
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
 
                 self.logger.info(f"Despesa registrada: {prog} - {desc} - R${val:.2f} - {categoria}")
                 win.destroy()
@@ -15512,9 +17025,9 @@ class DespesasPage(PageBase):
         btn_frame.grid_columnconfigure(0, weight=1)
         btn_frame.grid_columnconfigure(1, weight=1)
 
-        ttk.Button(btn_frame, text="💾 SALVAR", style="Primary.TButton", command=salvar)\
+        ttk.Button(btn_frame, text="ðÅ¸â€™¾ SALVAR", style="Primary.TButton", command=salvar)\
             .grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        ttk.Button(btn_frame, text="✖ CANCELAR", style="Ghost.TButton", command=win.destroy)\
+        ttk.Button(btn_frame, text="âÅ“â€“ CANCELAR", style="Ghost.TButton", command=win.destroy)\
             .grid(row=0, column=1, sticky="ew", padx=(6, 0))
 
         win.bind("<Return>", lambda e: salvar())
@@ -15527,7 +17040,7 @@ class DespesasPage(PageBase):
         prog = self._current_programacao
 
         if not self.selected_despesa_id:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Selecione uma linha na tabela.")
+            messagebox.showwarning("ATENÇÃO", "Selecione uma linha na tabela.")
             return
 
         sel = self.tree_desp.selection()
@@ -15541,16 +17054,16 @@ class DespesasPage(PageBase):
 
         did, desc, val_str, data_reg, categoria, observacao = vals
 
-        # âœ… valida que essa despesa pertence Ã  programaÃ§Ã£o atual
+        # âÅâ€œââ‚¬¦ valida que essa despesa pertence à programação atual
         info = self._get_despesa_info(did)
         if not info:
-            messagebox.showerror("ERRO", "NÃ£o encontrei essa despesa no banco.")
+            messagebox.showerror("ERRO", "Não encontrei essa despesa no banco.")
             return
         _, codigo_prog_db, _, _, _ = info
         if upper(codigo_prog_db) != upper(prog):
             messagebox.showwarning(
-                "ATENÃ‡ÃƒO",
-                "Por seguranÃ§a, nÃ£o Ã© permitido editar uma despesa que nÃ£o pertence Ã  programaÃ§Ã£o atual."
+                "ATENÇÃO",
+                "Por segurança, não é permitido editar uma despesa que não pertence à programação atual."
             )
             return
 
@@ -15569,7 +17082,7 @@ class DespesasPage(PageBase):
 
         row = 1
 
-        ttk.Label(frm, text="DescriÃ§Ã£o:", font=("Segoe UI", 10, "bold"))\
+        ttk.Label(frm, text="Descrição:", font=("Segoe UI", 10, "bold"))\
             .grid(row=row, column=0, sticky="w", pady=5)
         ent_desc = ttk.Entry(frm, style="Field.TEntry")
         ent_desc.grid(row=row, column=1, sticky="ew", pady=5, padx=(10, 0))
@@ -15594,7 +17107,7 @@ class DespesasPage(PageBase):
         cb_categoria.grid(row=row, column=1, sticky="w", pady=5, padx=(10, 0))
         row += 1
 
-        ttk.Label(frm, text="ObservaÃ§Ã£o:", font=("Segoe UI", 10, "bold"))\
+        ttk.Label(frm, text="Observação:", font=("Segoe UI", 10, "bold"))\
             .grid(row=row, column=0, sticky="w", pady=5)
         ent_obs = tk.Text(frm, height=4, width=30, font=("Segoe UI", 9))
         ent_obs.grid(row=row, column=1, sticky="ew", pady=5, padx=(10, 0))
@@ -15619,28 +17132,33 @@ class DespesasPage(PageBase):
             nobs = upper(ent_obs.get("1.0", "end-1c").strip())
 
             if not ndesc:
-                messagebox.showwarning("ATENÃ‡ÃƒO", "Informe a descriÃ§Ã£o.")
+                messagebox.showwarning("ATENÇÃO", "Informe a descrição.")
                 return
             if nval <= 0:
-                messagebox.showwarning("ATENÃ‡ÃƒO", "O valor deve ser maior que zero.")
+                messagebox.showwarning("ATENÇÃO", "O valor deve ser maior que zero.")
                 return
             if not ncategoria:
                 ncategoria = "OUTROS"
 
-            # âœ… valida novamente (seguranÃ§a)
+            # âÅâ€œââ‚¬¦ valida novamente (segurança)
             info2 = self._get_despesa_info(did)
             if not info2 or upper(info2[1]) != upper(prog):
-                messagebox.showwarning("ATENÃ‡ÃƒO", "Despesa nÃ£o pertence Ã  programaÃ§Ã£o atual (bloqueado).")
+                messagebox.showwarning("ATENÇÃO", "Despesa não pertence à programação atual (bloqueado).")
                 return
 
             try:
-                with get_db() as conn:
-                    cur = conn.cursor()
-                    cur.execute("""
-                        UPDATE despesas
-                        SET descricao=?, valor=?, categoria=?, observacao=?
-                        WHERE id=?
-                    """, (ndesc, float(nval), ncategoria, nobs, did))
+                desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+                _call_api(
+                    "PUT",
+                    f"desktop/despesas/{did}",
+                    payload={
+                        "descricao": ndesc,
+                        "valor": float(nval),
+                        "categoria": ncategoria,
+                        "observacao": nobs,
+                    },
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
 
                 self.logger.info(f"Despesa atualizada: ID {did} - {ndesc} - R${nval:.2f}")
                 win.destroy()
@@ -15655,9 +17173,9 @@ class DespesasPage(PageBase):
         btn_frame.grid_columnconfigure(0, weight=1)
         btn_frame.grid_columnconfigure(1, weight=1)
 
-        ttk.Button(btn_frame, text="💾 SALVAR", style="Primary.TButton", command=salvar)\
+        ttk.Button(btn_frame, text="ðÅ¸â€™¾ SALVAR", style="Primary.TButton", command=salvar)\
             .grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        ttk.Button(btn_frame, text="✖ CANCELAR", style="Ghost.TButton", command=win.destroy)\
+        ttk.Button(btn_frame, text="âÅ“â€“ CANCELAR", style="Ghost.TButton", command=win.destroy)\
             .grid(row=0, column=1, sticky="ew", padx=(6, 0))
 
         win.bind("<Return>", lambda e: salvar())
@@ -15669,54 +17187,57 @@ class DespesasPage(PageBase):
 
         prog = self._current_programacao
         if not self.selected_despesa_id:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Selecione uma linha na tabela.")
+            messagebox.showwarning("ATENÇÃO", "Selecione uma linha na tabela.")
             return
 
         did = self.selected_despesa_id
 
-        # âœ… pega dados reais do banco para confirmar e validar pertencimento
+        # âÅâ€œââ‚¬¦ pega dados reais do banco para confirmar e validar pertencimento
         info = self._get_despesa_info(did)
         if not info:
-            messagebox.showerror("ERRO", "NÃ£o encontrei essa despesa no banco.")
+            messagebox.showerror("ERRO", "Não encontrei essa despesa no banco.")
             return
 
         _, codigo_prog_db, desc_db, val_db, cat_db = info
         if upper(codigo_prog_db) != upper(prog):
             messagebox.showwarning(
-                "ATENÃ‡ÃƒO",
-                "Por seguranÃ§a, nÃ£o Ã© permitido excluir uma despesa que nÃ£o pertence Ã  programaÃ§Ã£o atual."
+                "ATENÇÃO",
+                "Por segurança, não é permitido excluir uma despesa que não pertence à programação atual."
             )
             return
 
         val_fmt = self._fmt_money(val_db) if hasattr(self, "_fmt_money") else f"R$ {float(val_db or 0):.2f}"
         resposta = messagebox.askyesno(
-            "CONFIRMAR EXCLUSÃƒO",
+            "CONFIRMAR EXCLUSÃO",
             "Deseja realmente excluir esta despesa?\n\n"
             f"ID: {did}\n"
-            f"DescriÃ§Ã£o: {desc_db}\n"
+            f"Descrição: {desc_db}\n"
             f"Valor: {val_fmt}\n"
             f"Categoria: {cat_db}\n\n"
-            "Esta aÃ§Ã£o nÃ£o pode ser desfeita."
+            "Esta ação não pode ser desfeita."
         )
         if not resposta:
             return
 
         try:
-            with get_db() as conn:
-                cur = conn.cursor()
-                cur.execute("DELETE FROM despesas WHERE id=? AND codigo_programacao=?", (did, prog))
+            desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+            _call_api(
+                "DELETE",
+                f"desktop/despesas/{did}?codigo_programacao={urllib.parse.quote(upper(prog))}",
+                extra_headers={"X-Desktop-Secret": desktop_secret},
+            )
 
-            self.logger.warning(f"Despesa excluÃ­da: {prog} - ID {did} - {desc_db} - {val_fmt}")
+            self.logger.warning(f"Despesa excluÃÂÂda: {prog} - ID {did} - {desc_db} - {val_fmt}")
             self.selected_despesa_id = None
             self._refresh_all()
-            self.set_status(f"STATUS: Despesa ID {did} excluÃ­da com sucesso")
+            self.set_status(f"STATUS: Despesa ID {did} excluÃÂÂda com sucesso")
 
         except Exception as e:
             self.logger.error(f"Erro ao excluir despesa: {str(e)}")
             messagebox.showerror("ERRO", f"Erro ao excluir despesa: {str(e)}")
 
     # =========================================================
-    # 7.7 RELATÃ“RIO EM TELA + IMPRESSÃƒO SIMULADA
+    # 7.7 RELATÓRIO EM TELA + IMPRESSÃO SIMULADA
     # =========================================================
     def imprimir_resumo(self):
         try:
@@ -15753,9 +17274,119 @@ class DespesasPage(PageBase):
             adiantamento = 0.0
             recebimentos = []
             despesas = []
+            total_receb = 0.0
+            total_desp = 0.0
 
-            with get_db() as conn:
-                cur = conn.cursor()
+            used_api = False
+            desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+            if prog and desktop_secret and is_desktop_api_sync_enabled():
+                try:
+                    rota_resp = _call_api(
+                        "GET",
+                        f"desktop/rotas/{urllib.parse.quote(upper(prog))}",
+                        extra_headers={"X-Desktop-Secret": desktop_secret},
+                    )
+                    rec_resp = _call_api(
+                        "GET",
+                        f"desktop/rotas/{urllib.parse.quote(upper(prog))}/recebimentos",
+                        extra_headers={"X-Desktop-Secret": desktop_secret},
+                    )
+                    desp_resp = _call_api(
+                        "GET",
+                        f"desktop/rotas/{urllib.parse.quote(upper(prog))}/despesas",
+                        extra_headers={"X-Desktop-Secret": desktop_secret},
+                    )
+
+                    rota = rota_resp.get("rota") if isinstance(rota_resp, dict) else None
+                    recebimentos_api = rec_resp.get("recebimentos") if isinstance(rec_resp, dict) else []
+                    despesas_api = desp_resp.get("despesas") if isinstance(desp_resp, dict) else []
+
+                    if isinstance(rota, dict):
+                        motorista = str(rota.get("motorista") or "")
+                        veiculo = str(rota.get("veiculo") or "")
+                        equipe = str(rota.get("equipe") or "")
+                        equipe_txt = resolve_equipe_nomes(equipe)
+
+                        nf = str(rota.get("num_nf") or rota.get("nf_numero") or "")
+                        local_rota = str(rota.get("local_rota") or rota.get("tipo_rota") or "")
+                        local_carreg = str(rota.get("local_carregamento") or rota.get("granja_carregada") or "")
+
+                        data_saida, hora_saida = normalize_date_time_components(
+                            rota.get("data_saida"), rota.get("hora_saida")
+                        )
+                        data_chegada, hora_chegada = normalize_date_time_components(
+                            rota.get("data_chegada"), rota.get("hora_chegada")
+                        )
+
+                        nf_kg = safe_float(rota.get("nf_kg"), 0.0)
+                        nf_caixas = safe_int(rota.get("nf_caixas"), 0)
+                        nf_kg_carregado = safe_float(rota.get("nf_kg_carregado"), 0.0)
+                        nf_kg_vendido = safe_float(rota.get("nf_kg_vendido"), 0.0)
+                        nf_saldo = safe_float(rota.get("nf_saldo"), 0.0)
+                        nf_preco = safe_float(rota.get("nf_preco") or rota.get("preco_nf"), 0.0)
+                        nf_media_carregada = safe_float(rota.get("media") or rota.get("media_carregada"), 0.0)
+                        nf_caixa_final = safe_int(
+                            rota.get("aves_caixa_final")
+                            if rota.get("aves_caixa_final") not in (None, "")
+                            else rota.get("qnt_aves_caixa_final"),
+                            0,
+                        )
+
+                        km_inicial = safe_float(rota.get("km_inicial"), 0.0)
+                        km_final = safe_float(rota.get("km_final"), 0.0)
+                        litros = safe_float(rota.get("litros"), 0.0)
+                        km_rodado = safe_float(rota.get("km_rodado"), 0.0)
+                        media_km_l = safe_float(rota.get("media_km_l"), 0.0)
+                        custo_km = safe_float(rota.get("custo_km"), 0.0)
+
+                        ced_qtd[200] = safe_int(rota.get("ced_200_qtd"), 0)
+                        ced_qtd[100] = safe_int(rota.get("ced_100_qtd"), 0)
+                        ced_qtd[50] = safe_int(rota.get("ced_50_qtd"), 0)
+                        ced_qtd[20] = safe_int(rota.get("ced_20_qtd"), 0)
+                        ced_qtd[10] = safe_int(rota.get("ced_10_qtd"), 0)
+                        ced_qtd[5] = safe_int(rota.get("ced_5_qtd"), 0)
+                        ced_qtd[2] = safe_int(rota.get("ced_2_qtd"), 0)
+                        valor_dinheiro = safe_float(rota.get("valor_dinheiro"), 0.0)
+                        adiantamento = safe_float(
+                            rota.get("adiantamento")
+                            if rota.get("adiantamento") not in (None, "")
+                            else rota.get("adiantamento_rota"),
+                            0.0,
+                        )
+
+                        recebimentos = [
+                            (
+                                r.get("cod_cliente"),
+                                r.get("nome_cliente"),
+                                safe_float(r.get("valor"), 0.0),
+                                r.get("forma_pagamento"),
+                                r.get("observacao"),
+                                r.get("data_registro"),
+                            )
+                            for r in (recebimentos_api or [])
+                            if isinstance(r, dict)
+                        ]
+                        despesas = [
+                            (
+                                d.get("descricao"),
+                                safe_float(d.get("valor"), 0.0),
+                                d.get("categoria"),
+                                d.get("observacao"),
+                                d.get("data_registro"),
+                            )
+                            for d in (despesas_api or [])
+                            if isinstance(d, dict)
+                        ]
+
+                        total_receb = sum(safe_float(r[2], 0.0) for r in recebimentos)
+                        total_desp = sum(safe_float(d[1], 0.0) for d in despesas)
+                        used_api = True
+                except Exception:
+                    logging.debug("Falha ao carregar resumo via API; usando fallback local.", exc_info=True)
+
+            if not used_api:
+                with get_db() as conn:
+                    cur = conn.cursor()
 
                 def has_col(col):
                     try:
@@ -16240,20 +17871,20 @@ class DespesasPage(PageBase):
 
     def _imprimir_tela(self, window):
         messagebox.showinfo(
-            "IMPRESSÃƒO",
-            "FunÃ§Ã£o de impressÃ£o serÃ¡ implementada na prÃ³xima versÃ£o.\n\n"
-            "Por enquanto, vocÃª pode:\n"
+            "IMPRESSÃO",
+            "Função de impressão será implementada na próxima versão.\n\n"
+            "Por enquanto, você pode:\n"
             "1. Tirar um print screen desta tela\n"
-            "2. Usar o botÃ£o 'Exportar Excel' para gerar arquivo\n"
+            "2. Usar o botão 'Exportar Excel' para gerar arquivo\n"
             "3. Salvar como PDF usando Ctrl+P"
         )
         try:
-            self.logger.info("Solicitada impressÃ£o de relatÃ³rio (DespesasPage)")
+            self.logger.info("Solicitada impressão de relatório (DespesasPage)")
         except Exception:
             logging.debug("Falha ignorada")
 
     # =========================================================
-    # 7.8 SALVAR TUDO (NF / KM / CÃ‰DULAS / ADIANTAMENTO)
+    # 7.8 SALVAR TUDO (NF / KM / CÉDULAS / ADIANTAMENTO)
     # =========================================================
     def salvar_tudo(self):
         if not self._can_edit_current_prog():
@@ -16281,14 +17912,33 @@ class DespesasPage(PageBase):
         total_despesas_prog = 0.0
         try:
             if prog:
-                with get_db() as conn_tmp:
-                    cur_tmp = conn_tmp.cursor()
-                    cur_tmp.execute(
-                        "SELECT COALESCE(SUM(valor), 0) FROM despesas WHERE codigo_programacao=?",
-                        (prog,),
-                    )
-                    row_tmp = cur_tmp.fetchone()
-                    total_despesas_prog = safe_float((row_tmp[0] if row_tmp else 0), 0.0)
+                used_api = False
+                desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+                if desktop_secret and is_desktop_api_sync_enabled():
+                    try:
+                        desp_resp = _call_api(
+                            "GET",
+                            f"desktop/rotas/{urllib.parse.quote(upper(prog))}/despesas",
+                            extra_headers={"X-Desktop-Secret": desktop_secret},
+                        )
+                        despesas_api = desp_resp.get("despesas") if isinstance(desp_resp, dict) else []
+                        total_despesas_prog = sum(
+                            safe_float((d.get("valor") if isinstance(d, dict) else 0), 0.0)
+                            for d in (despesas_api or [])
+                        )
+                        used_api = True
+                    except Exception:
+                        logging.debug("Falha ao calcular total de despesas via API; usando fallback local.", exc_info=True)
+
+                if not used_api:
+                    with get_db() as conn_tmp:
+                        cur_tmp = conn_tmp.cursor()
+                        cur_tmp.execute(
+                            "SELECT COALESCE(SUM(valor), 0) FROM despesas WHERE codigo_programacao=?",
+                            (prog,),
+                        )
+                        row_tmp = cur_tmp.fetchone()
+                        total_despesas_prog = safe_float((row_tmp[0] if row_tmp else 0), 0.0)
         except Exception:
             logging.debug("Falha ignorada")
         custo_km = (total_despesas_prog / km_rodado) if km_rodado > 0 else 0.0
@@ -16312,8 +17962,52 @@ class DespesasPage(PageBase):
         for ced, ent in self.ced_entries.items():
             valor_dinheiro += safe_int(ent.get(), 0) * float(ced)
 
-        # âœ… aceita "10,00" ou "R$ 10,00"
+        # âÅâ€œââ‚¬¦ aceita "10,00" ou "R$ 10,00"
         adiantamento_val = self._parse_money_local(self.ent_adiantamento.get())
+
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                _call_api(
+                    "PUT",
+                    f"desktop/rotas/{urllib.parse.quote(upper(prog))}/financeiro",
+                    payload={
+                        "nf_numero": nf_numero,
+                        "nf_kg": nf_kg,
+                        "nf_caixas": nf_caixas,
+                        "nf_kg_carregado": nf_kg_carregado,
+                        "nf_kg_vendido": nf_kg_vendido,
+                        "nf_saldo": nf_saldo,
+                        "nf_preco": nf_preco,
+                        "media": nf_media_carregada,
+                        "nf_caixa_final": nf_caixa_final,
+                        "km_inicial": km_inicial,
+                        "km_final": km_final,
+                        "litros": litros,
+                        "km_rodado": km_rodado,
+                        "media_km_l": media_km_l,
+                        "custo_km": custo_km,
+                        "ced_200_qtd": cedulas_data.get("ced_200_qtd", 0),
+                        "ced_100_qtd": cedulas_data.get("ced_100_qtd", 0),
+                        "ced_50_qtd": cedulas_data.get("ced_50_qtd", 0),
+                        "ced_20_qtd": cedulas_data.get("ced_20_qtd", 0),
+                        "ced_10_qtd": cedulas_data.get("ced_10_qtd", 0),
+                        "ced_5_qtd": cedulas_data.get("ced_5_qtd", 0),
+                        "ced_2_qtd": cedulas_data.get("ced_2_qtd", 0),
+                        "valor_dinheiro": valor_dinheiro,
+                        "adiantamento": adiantamento_val,
+                        "rota_observacao": rota_observacao,
+                    },
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                self.logger.info(f"Dados salvos via API para programação {prog}")
+                messagebox.showinfo("SUCESSO", "Todos os dados foram salvos com sucesso!")
+                self.set_status(f"STATUS: Dados salvos para {prog}")
+                self._refresh_km_insights()
+                self._refresh_nf_trade_summary()
+                return
+            except Exception:
+                logging.debug("Falha ao salvar dados financeiros via API; usando fallback local.", exc_info=True)
 
         try:
             with get_db() as conn:
@@ -16407,7 +18101,7 @@ class DespesasPage(PageBase):
                         (nf_caixa_final, prog),
                     )
 
-            self.logger.info(f"Dados salvos para programaÃ§Ã£o {prog}")
+            self.logger.info(f"Dados salvos para programação {prog}")
             messagebox.showinfo("SUCESSO", "Todos os dados foram salvos com sucesso!")
             self.set_status(f"STATUS: Dados salvos para {prog}")
             self._refresh_km_insights()
@@ -16418,19 +18112,19 @@ class DespesasPage(PageBase):
             messagebox.showerror("ERRO", f"Erro ao salvar dados: {str(e)}")
 
     # =========================================================
-    # 7.9 EXPORTAR EXCEL (RELATÃ“RIO COMPLETO)
+    # 7.9 EXPORTAR EXCEL (RELATÓRIO COMPLETO)
     # =========================================================
     def exportar_excel(self):
-        # exportar pode ser permitido mesmo com FECHADA (Ã© leitura). EntÃ£o NÃƒO bloqueio.
+        # exportar pode ser permitido mesmo com FECHADA (é leitura). Então NÃO bloqueio.
         prog = self._current_programacao
         if not (require_pandas() and require_openpyxl()):
             return
         if not prog:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Selecione a ProgramaÃ§Ã£o primeiro.")
+            messagebox.showwarning("ATENÇÃO", "Selecione a Programação primeiro.")
             return
 
         path = filedialog.asksaveasfilename(
-            title="Exportar RelatÃ³rio Excel",
+            title="Exportar Relatório Excel",
             defaultextension=".xlsx",
             filetypes=[("Excel", "*.xlsx")],
             initialfile=f"RELATORIO_DESPESAS_{prog}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
@@ -16440,63 +18134,140 @@ class DespesasPage(PageBase):
 
 
         try:
-            with get_db() as conn:
+            used_api = False
+            desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+            if desktop_secret and is_desktop_api_sync_enabled():
                 try:
-                    df_prog = pd.read_sql_query("""
-                        SELECT codigo_programacao, motorista, veiculo, data_criacao,
-                               nf_numero, nf_kg, nf_caixas, nf_kg_carregado, nf_kg_vendido, nf_saldo,
-                               km_inicial, km_final, litros, km_rodado, media_km_l, custo_km,
-                               valor_dinheiro,
-                               adiantamento
-                        FROM programacoes
-                        WHERE codigo_programacao=?
-                    """, conn, params=(prog,))
+                    rota_resp = _call_api(
+                        "GET",
+                        f"desktop/rotas/{urllib.parse.quote(upper(prog))}",
+                        extra_headers={"X-Desktop-Secret": desktop_secret},
+                    )
+                    rec_resp = _call_api(
+                        "GET",
+                        f"desktop/rotas/{urllib.parse.quote(upper(prog))}/recebimentos",
+                        extra_headers={"X-Desktop-Secret": desktop_secret},
+                    )
+                    desp_resp = _call_api(
+                        "GET",
+                        f"desktop/rotas/{urllib.parse.quote(upper(prog))}/despesas",
+                        extra_headers={"X-Desktop-Secret": desktop_secret},
+                    )
+                    rota = rota_resp.get("rota") if isinstance(rota_resp, dict) else None
+                    recebimentos = rec_resp.get("recebimentos") if isinstance(rec_resp, dict) else []
+                    despesas = desp_resp.get("despesas") if isinstance(desp_resp, dict) else []
+                    if isinstance(rota, dict):
+                        df_prog = pd.DataFrame([{
+                            "codigo_programacao": upper(prog),
+                            "motorista": rota.get("motorista"),
+                            "veiculo": rota.get("veiculo"),
+                            "data_criacao": rota.get("data_criacao") or rota.get("data"),
+                            "nf_numero": rota.get("num_nf") or rota.get("nf_numero"),
+                            "nf_kg": rota.get("nf_kg"),
+                            "nf_caixas": rota.get("nf_caixas"),
+                            "nf_kg_carregado": rota.get("nf_kg_carregado"),
+                            "nf_kg_vendido": rota.get("nf_kg_vendido"),
+                            "nf_saldo": rota.get("nf_saldo"),
+                            "km_inicial": rota.get("km_inicial"),
+                            "km_final": rota.get("km_final"),
+                            "litros": rota.get("litros"),
+                            "km_rodado": rota.get("km_rodado"),
+                            "media_km_l": rota.get("media_km_l"),
+                            "custo_km": rota.get("custo_km"),
+                            "valor_dinheiro": rota.get("valor_dinheiro"),
+                            "adiantamento": rota.get("adiantamento"),
+                        }])
+                        df_despesas = pd.DataFrame(
+                            [
+                                {
+                                    "id": d.get("id"),
+                                    "descricao": d.get("descricao"),
+                                    "valor": d.get("valor"),
+                                    "categoria": d.get("categoria"),
+                                    "observacao": d.get("observacao"),
+                                    "data_registro": d.get("data_registro"),
+                                }
+                                for d in (despesas or [])
+                                if isinstance(d, dict)
+                            ]
+                        )
+                        df_receb = pd.DataFrame(
+                            [
+                                {
+                                    "cod_cliente": r.get("cod_cliente"),
+                                    "nome_cliente": r.get("nome_cliente"),
+                                    "valor": r.get("valor"),
+                                    "forma_pagamento": r.get("forma_pagamento"),
+                                    "observacao": r.get("observacao"),
+                                    "num_nf": r.get("num_nf"),
+                                    "data_registro": r.get("data_registro"),
+                                }
+                                for r in (recebimentos or [])
+                                if isinstance(r, dict)
+                            ]
+                        )
+                        used_api = True
                 except Exception:
-                    df_prog = pd.read_sql_query("""
-                        SELECT codigo_programacao, motorista, veiculo, data_criacao,
-                               nf_numero, nf_kg, nf_caixas, nf_kg_carregado, nf_kg_vendido, nf_saldo,
-                               km_inicial, km_final, litros, km_rodado, media_km_l, custo_km,
-                               valor_dinheiro,
-                               adiantamento_rota
-                        FROM programacoes
-                        WHERE codigo_programacao=?
-                    """, conn, params=(prog,))
+                    logging.debug("Falha ao carregar dados para exportacao via API; usando fallback local.", exc_info=True)
 
-                if df_prog.empty:
-                    df_prog = pd.read_sql_query("""
-                        SELECT codigo_programacao, motorista, veiculo, data_criacao,
-                               nf_numero, nf_kg, nf_caixas, nf_kg_carregado, nf_kg_vendido, nf_saldo,
-                               km_inicial, km_final, litros, km_rodado, media_km_l, custo_km,
-                               valor_dinheiro
-                        FROM programacoes
-                        WHERE codigo_programacao=?
-                    """, conn, params=(prog,))
+            if not used_api:
+                with get_db() as conn:
+                    try:
+                        df_prog = pd.read_sql_query("""
+                            SELECT codigo_programacao, motorista, veiculo, data_criacao,
+                                   nf_numero, nf_kg, nf_caixas, nf_kg_carregado, nf_kg_vendido, nf_saldo,
+                                   km_inicial, km_final, litros, km_rodado, media_km_l, custo_km,
+                                   valor_dinheiro,
+                                   adiantamento
+                            FROM programacoes
+                            WHERE codigo_programacao=?
+                        """, conn, params=(prog,))
+                    except Exception:
+                        df_prog = pd.read_sql_query("""
+                            SELECT codigo_programacao, motorista, veiculo, data_criacao,
+                                   nf_numero, nf_kg, nf_caixas, nf_kg_carregado, nf_kg_vendido, nf_saldo,
+                                   km_inicial, km_final, litros, km_rodado, media_km_l, custo_km,
+                                   valor_dinheiro,
+                                   adiantamento_rota
+                            FROM programacoes
+                            WHERE codigo_programacao=?
+                        """, conn, params=(prog,))
 
-                if "data_criacao" in df_prog.columns:
-                    df_prog["data_criacao"] = normalize_datetime_column(df_prog["data_criacao"])
+                    if df_prog.empty:
+                        df_prog = pd.read_sql_query("""
+                            SELECT codigo_programacao, motorista, veiculo, data_criacao,
+                                   nf_numero, nf_kg, nf_caixas, nf_kg_carregado, nf_kg_vendido, nf_saldo,
+                                   km_inicial, km_final, litros, km_rodado, media_km_l, custo_km,
+                                   valor_dinheiro
+                            FROM programacoes
+                            WHERE codigo_programacao=?
+                        """, conn, params=(prog,))
 
-                df_despesas = pd.read_sql_query("""
-                    SELECT id, descricao, valor, categoria, observacao, data_registro
-                    FROM despesas
-                    WHERE codigo_programacao=?
-                    ORDER BY data_registro DESC
-                """, conn, params=(prog,))
-                if "data_registro" in df_despesas.columns:
-                    df_despesas["data_registro"] = normalize_datetime_column(df_despesas["data_registro"])
-
-                try:
-                    df_receb = pd.read_sql_query("""
-                        SELECT cod_cliente, nome_cliente, valor, forma_pagamento, observacao, num_nf, data_registro
-                        FROM recebimentos
+                    df_despesas = pd.read_sql_query("""
+                        SELECT id, descricao, valor, categoria, observacao, data_registro
+                        FROM despesas
                         WHERE codigo_programacao=?
                         ORDER BY data_registro DESC
                     """, conn, params=(prog,))
-                except Exception:
-                    df_receb = pd.DataFrame(columns=[
-                        "cod_cliente", "nome_cliente", "valor", "forma_pagamento", "observacao", "num_nf", "data_registro"
-                    ])
-                if "data_registro" in df_receb.columns:
-                    df_receb["data_registro"] = normalize_datetime_column(df_receb["data_registro"])
+
+                    try:
+                        df_receb = pd.read_sql_query("""
+                            SELECT cod_cliente, nome_cliente, valor, forma_pagamento, observacao, num_nf, data_registro
+                            FROM recebimentos
+                            WHERE codigo_programacao=?
+                            ORDER BY data_registro DESC
+                        """, conn, params=(prog,))
+                    except Exception:
+                        df_receb = pd.DataFrame(columns=[
+                            "cod_cliente", "nome_cliente", "valor", "forma_pagamento", "observacao", "num_nf", "data_registro"
+                        ])
+
+            if "data_criacao" in df_prog.columns:
+                df_prog["data_criacao"] = normalize_datetime_column(df_prog["data_criacao"])
+            if "data_registro" in df_despesas.columns:
+                df_despesas["data_registro"] = normalize_datetime_column(df_despesas["data_registro"])
+            if "data_registro" in df_receb.columns:
+                df_receb["data_registro"] = normalize_datetime_column(df_receb["data_registro"])
 
             cedulas_data = []
             for ced in [200, 100, 50, 20, 10, 5, 2]:
@@ -16514,20 +18285,20 @@ class DespesasPage(PageBase):
             resultado_liquido = total_entradas - total_saidas
 
             df_resumo = pd.DataFrame([
-                ["PROGRAMAÃ‡ÃƒO", prog],
+                ["PROGRAMAÇÃO", prog],
                 ["TOTAL RECEBIMENTOS", total_receb],
                 ["TOTAL ADIANTAMENTO", adiant],
                 ["TOTAL ENTRADAS", total_entradas],
                 ["TOTAL DESPESAS", total_desp],
-                ["TOTAL CÃ‰DULAS", total_ced],
+                ["TOTAL CÉDULAS", total_ced],
                 ["TOTAL SADAS", total_saidas],
                 ["RESULTADO LQUIDO", resultado_liquido],
-                ["DATA EXPORTAÃ‡ÃƒO", datetime.now().strftime("%d/%m/%Y %H:%M")]
+                ["DATA EXPORTAÇÃO", datetime.now().strftime("%d/%m/%Y %H:%M")]
             ], columns=["ITEM", "VALOR"])
 
             with pd.ExcelWriter(path, engine="openpyxl") as writer:
                 df_resumo.to_excel(writer, sheet_name="RESUMO", index=False)
-                df_prog.to_excel(writer, sheet_name="PROGRAMAÃ‡ÃƒO", index=False)
+                df_prog.to_excel(writer, sheet_name="PROGRAMAÇÃO", index=False)
 
                 if not df_despesas.empty:
                     df_despesas.to_excel(writer, sheet_name="DESPESAS", index=False)
@@ -16542,17 +18313,17 @@ class DespesasPage(PageBase):
                 df_cedulas.to_excel(writer, sheet_name="CEDULAS", index=False)
 
             try:
-                self.logger.info(f"ExportaÃ§Ã£o Excel concluÃ­da: {path}")
+                self.logger.info(f"Exportação Excel concluÃÂÂda: {path}")
             except Exception:
                 logging.debug("Falha ignorada")
 
             messagebox.showinfo(
                 "OK",
-                "ExportaÃ§Ã£o concluÃ­da!\n\n"
+                "Exportação concluÃÂÂda!\n\n"
                 f"Arquivo: {os.path.basename(path)}\n"
                 f"Despesas: {len(df_despesas)}\n"
                 f"Recebimentos: {len(df_receb)}\n"
-                f"Resultado LÃ­quido: {self._fmt_money(resultado_liquido) if hasattr(self, '_fmt_money') else resultado_liquido}"
+                f"Resultado LÃÂÂquido: {self._fmt_money(resultado_liquido) if hasattr(self, '_fmt_money') else resultado_liquido}"
             )
 
         except Exception as e:
@@ -16609,7 +18380,7 @@ class EscalaPage(PageBase):
         )
         self.cb_status.grid(row=1, column=1, sticky="w", padx=(0, 10))
 
-        ttk.Button(filtros, text="🔄 ATUALIZAR", style="Ghost.TButton", command=self.refresh_data).grid(
+        ttk.Button(filtros, text="ðŸ”„ ATUALIZAR", style="Ghost.TButton", command=self.refresh_data).grid(
             row=1, column=2, sticky="w"
         )
 
@@ -16623,7 +18394,7 @@ class EscalaPage(PageBase):
         for c in range(4):
             kpi_row.grid_columnconfigure(c, weight=1)
 
-        kpi_1 = ttk.LabelFrame(kpi_row, text=" Rotas no Período ", padding=8)
+        kpi_1 = ttk.LabelFrame(kpi_row, text=" Rotas no PerÃÂodo ", padding=8)
         kpi_1.grid(row=0, column=0, sticky="ew", padx=(0, 6))
         self.lbl_esc_kpi_rotas = ttk.Label(kpi_1, text="0", font=("Segoe UI", 13, "bold"), foreground="#1D4ED8")
         self.lbl_esc_kpi_rotas.grid(row=0, column=0, sticky="w")
@@ -16817,7 +18588,7 @@ class EscalaPage(PageBase):
         cv.delete("all")
         data = list(getattr(self, "_esc_chart_data", []) or [])
         if not data:
-            cv.create_text(12, 12, anchor="nw", text="Sem dados para o período selecionado.", fill="#6B7280", font=("Segoe UI", 9))
+            cv.create_text(12, 12, anchor="nw", text="Sem dados para o perÃÂodo selecionado.", fill="#6B7280", font=("Segoe UI", 9))
             return
 
         w = max(cv.winfo_width(), 360)
@@ -17125,7 +18896,7 @@ class EscalaPage(PageBase):
 
         if not recs:
             return "Recomendações: distribuição está equilibrada no filtro atual."
-        return f"Recomendações (local-alvo: {local_alvo}):\n• " + "\n• ".join(recs)
+        return f"Recomendações (local-alvo: {local_alvo}):\nââ‚¬¢ " + "\nââ‚¬¢ ".join(recs)
 
     def _listar_programacoes_filtradas(self):
         status_filtro = self._status_normalizado(self.var_status.get())
@@ -17137,49 +18908,64 @@ class EscalaPage(PageBase):
             except Exception:
                 cutoff = None
 
-        with get_db() as conn:
-            cur = conn.cursor()
-            cur.execute("PRAGMA table_info(programacoes)")
-            cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
-            if "local_rota" in cols:
-                local_expr = "COALESCE(local_rota,'')"
-            elif "local" in cols:
-                local_expr = "COALESCE(local,'')"
-            else:
-                local_expr = "''"
-            km_rodado_expr = "COALESCE(km_rodado,0)" if "km_rodado" in cols else "0"
-            status_op_expr = "COALESCE(status_operacional,'')" if "status_operacional" in cols else "''"
-            finalizada_app_expr = "COALESCE(finalizada_no_app,0)" if "finalizada_no_app" in cols else "0"
-            data_saida_expr = "COALESCE(data_saida,'')" if "data_saida" in cols else "''"
-            hora_saida_expr = "COALESCE(hora_saida,'')" if "hora_saida" in cols else "''"
-            data_chegada_expr = "COALESCE(data_chegada,'')" if "data_chegada" in cols else "''"
-            hora_chegada_expr = "COALESCE(hora_chegada,'')" if "hora_chegada" in cols else "''"
-            data_ref_expr = (
-                "COALESCE(data_saida,data_criacao,data,'')"
-                if "data_saida" in cols or "data_criacao" in cols or "data" in cols
-                else "''"
-            )
-            cur.execute(
-                f"""
-                SELECT codigo_programacao,
-                       {data_ref_expr} AS data_ref,
-                       motorista,
-                       equipe,
-                       COALESCE(status,'') AS status,
-                       {status_op_expr} AS status_operacional,
-                       {finalizada_app_expr} AS finalizada_no_app,
-                       kg_estimado,
-                       {data_saida_expr} AS data_saida,
-                       {hora_saida_expr} AS hora_saida,
-                       {data_chegada_expr} AS data_chegada,
-                       {hora_chegada_expr} AS hora_chegada,
-                       {local_expr} AS local_rota,
-                       {km_rodado_expr} AS km_rodado
-                  FROM programacoes
-                 ORDER BY id DESC
-                """
-            )
-            rows = cur.fetchall() or []
+        rows = []
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                resp = _call_api(
+                    "GET",
+                    "desktop/escala/rows?limit=5000",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                if isinstance(resp, dict):
+                    rows = [r for r in (resp.get("rows") or []) if isinstance(r, dict)]
+            except Exception:
+                logging.debug("Falha ao listar programacoes da escala via API; usando fallback local.", exc_info=True)
+
+        if not rows:
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute("PRAGMA table_info(programacoes)")
+                cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+                if "local_rota" in cols:
+                    local_expr = "COALESCE(local_rota,'')"
+                elif "local" in cols:
+                    local_expr = "COALESCE(local,'')"
+                else:
+                    local_expr = "''"
+                km_rodado_expr = "COALESCE(km_rodado,0)" if "km_rodado" in cols else "0"
+                status_op_expr = "COALESCE(status_operacional,'')" if "status_operacional" in cols else "''"
+                finalizada_app_expr = "COALESCE(finalizada_no_app,0)" if "finalizada_no_app" in cols else "0"
+                data_saida_expr = "COALESCE(data_saida,'')" if "data_saida" in cols else "''"
+                hora_saida_expr = "COALESCE(hora_saida,'')" if "hora_saida" in cols else "''"
+                data_chegada_expr = "COALESCE(data_chegada,'')" if "data_chegada" in cols else "''"
+                hora_chegada_expr = "COALESCE(hora_chegada,'')" if "hora_chegada" in cols else "''"
+                data_ref_expr = (
+                    "COALESCE(data_saida,data_criacao,data,'')"
+                    if "data_saida" in cols or "data_criacao" in cols or "data" in cols
+                    else "''"
+                )
+                cur.execute(
+                    f"""
+                    SELECT codigo_programacao,
+                           {data_ref_expr} AS data_ref,
+                           motorista,
+                           equipe,
+                           COALESCE(status,'') AS status,
+                           {status_op_expr} AS status_operacional,
+                           {finalizada_app_expr} AS finalizada_no_app,
+                           kg_estimado,
+                           {data_saida_expr} AS data_saida,
+                           {hora_saida_expr} AS hora_saida,
+                           {data_chegada_expr} AS data_chegada,
+                           {hora_chegada_expr} AS hora_chegada,
+                           {local_expr} AS local_rota,
+                           {km_rodado_expr} AS km_rodado
+                      FROM programacoes
+                     ORDER BY id DESC
+                    """
+                )
+                rows = cur.fetchall() or []
 
         out = []
         for r in rows:
@@ -17406,7 +19192,7 @@ class EscalaPage(PageBase):
                     nivel = "ALERTA"
                     cor_nivel = "#9A3412"
                 msg = (
-                    f"Nível da escala: {nivel} | Maior carga atual: {mais_sobrecarregado}\n"
+                    f"NÃÂvel da escala: {nivel} | Maior carga atual: {mais_sobrecarregado}\n"
                     f"Rotas no filtro: {qtd_rotas} | Motoristas: {qtd_motoristas} | Ajudantes: {qtd_ajudantes}\n"
                     f"Média por motorista: {media:.2f} | KM total: {total_km:.1f} | KM médio/motorista: {media_km:.1f}\n"
                     f"Horas totais: {total_horas:.2f} | Horas médias/motorista: {media_horas:.2f}\n"
@@ -17464,7 +19250,7 @@ class CentroCustosPage(PageBase):
         filtros.grid(row=0, column=0, sticky="ew")
         filtros.grid_columnconfigure(8, weight=1)
 
-        ttk.Label(filtros, text="Período (dias)", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(filtros, text="PerÃÂodo (dias)", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w")
         self.var_periodo = tk.StringVar(value="30")
         self.cb_periodo = ttk.Combobox(
             filtros, textvariable=self.var_periodo, state="readonly", width=10,
@@ -17472,14 +19258,14 @@ class CentroCustosPage(PageBase):
         )
         self.cb_periodo.grid(row=1, column=0, sticky="w", padx=(0, 10))
 
-        ttk.Label(filtros, text="Veículo", style="CardLabel.TLabel").grid(row=0, column=1, sticky="w")
+        ttk.Label(filtros, text="VeÃÂculo", style="CardLabel.TLabel").grid(row=0, column=1, sticky="w")
         self.var_veiculo = tk.StringVar(value="TODOS")
         self.cb_veiculo = ttk.Combobox(
             filtros, textvariable=self.var_veiculo, state="readonly", width=16, values=["TODOS"]
         )
         self.cb_veiculo.grid(row=1, column=1, sticky="w", padx=(0, 10))
 
-        ttk.Button(filtros, text="🔄 ATUALIZAR", style="Ghost.TButton", command=self.refresh_data).grid(
+        ttk.Button(filtros, text="ðŸ”„ ATUALIZAR", style="Ghost.TButton", command=self.refresh_data).grid(
             row=1, column=2, sticky="w", padx=(0, 6)
         )
 
@@ -17506,7 +19292,7 @@ class CentroCustosPage(PageBase):
         chart_wrap = ttk.Frame(self.body, style="Card.TFrame", padding=10)
         chart_wrap.grid(row=2, column=0, sticky="ew")
         chart_wrap.grid_columnconfigure(0, weight=1)
-        self.lbl_chart_title = ttk.Label(chart_wrap, text="Custo por Veículo (Custo/KM)", style="CardTitle.TLabel")
+        self.lbl_chart_title = ttk.Label(chart_wrap, text="Custo por VeÃÂculo (Custo/KM)", style="CardTitle.TLabel")
         self.lbl_chart_title.grid(row=0, column=0, sticky="w")
         self.cv_chart = tk.Canvas(chart_wrap, height=220, bg="white", highlightthickness=1, highlightbackground="#E5E7EB")
         self.cv_chart.grid(row=1, column=0, sticky="ew", pady=(6, 0))
@@ -17633,6 +19419,30 @@ class CentroCustosPage(PageBase):
             logging.debug("Falha ignorada")
 
     def refresh_comboboxes(self):
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                resp = _call_api(
+                    "GET",
+                    "desktop/programacoes?modo=todas&limit=1200",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                arr = resp.get("programacoes") if isinstance(resp, dict) else []
+                vals = sorted(
+                    {
+                        upper((r or {}).get("veiculo") or "")
+                        for r in (arr or [])
+                        if isinstance(r, dict) and str((r or {}).get("veiculo") or "").strip()
+                    }
+                )
+                values = ["TODOS"] + vals
+                self.cb_veiculo.configure(values=values)
+                if self.var_veiculo.get() not in values:
+                    self.var_veiculo.set("TODOS")
+                return
+            except Exception:
+                logging.debug("Falha ao carregar filtro de veiculos via API", exc_info=True)
+
         with get_db() as conn:
             cur = conn.cursor()
             try:
@@ -17660,33 +19470,59 @@ class CentroCustosPage(PageBase):
             except Exception:
                 cutoff = None
 
-        with get_db() as conn:
-            cur = conn.cursor()
-            cur.execute("PRAGMA table_info(programacoes)")
-            cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+        rows = []
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                resp = _call_api(
+                    "GET",
+                    "desktop/centro-custos/rows?limit=5000",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                arr = resp.get("rows") if isinstance(resp, dict) else []
+                rows = [
+                    (
+                        (r or {}).get("codigo_programacao", ""),
+                        (r or {}).get("veiculo", ""),
+                        (r or {}).get("data_ref", ""),
+                        (r or {}).get("km_rodado", 0),
+                        (r or {}).get("kg_carregado", 0),
+                        (r or {}).get("total_desp", 0),
+                    )
+                    for r in (arr or [])
+                    if isinstance(r, dict)
+                ]
+            except Exception:
+                logging.debug("Falha ao carregar centro de custos via API", exc_info=True)
 
-            data_expr = "COALESCE(data_saida,data_criacao,'')"
-            km_expr = "COALESCE(km_rodado,0)" if "km_rodado" in cols else "0"
-            kg_expr = "COALESCE(nf_kg_carregado, kg_carregado, 0)" if "nf_kg_carregado" in cols else ("COALESCE(kg_carregado,0)" if "kg_carregado" in cols else "0")
+        if not rows:
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute("PRAGMA table_info(programacoes)")
+                cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
 
-            cur.execute(
-                f"""
-                SELECT p.codigo_programacao,
-                       upper(trim(COALESCE(p.veiculo,''))) as veiculo,
-                       {data_expr} as data_ref,
-                       {km_expr} as km_rodado,
-                       {kg_expr} as kg_carregado,
-                       COALESCE(d.total_desp,0) as total_desp
-                  FROM programacoes p
-             LEFT JOIN (
-                    SELECT codigo_programacao, COALESCE(SUM(valor),0) as total_desp
-                      FROM despesas
-                     GROUP BY codigo_programacao
-                ) d ON d.codigo_programacao = p.codigo_programacao
-                 WHERE trim(COALESCE(p.veiculo,'')) <> ''
-                """
-            )
-            rows = cur.fetchall() or []
+                data_expr = "COALESCE(data_saida,data_criacao,'')"
+                km_expr = "COALESCE(km_rodado,0)" if "km_rodado" in cols else "0"
+                kg_expr = "COALESCE(nf_kg_carregado, kg_carregado, 0)" if "nf_kg_carregado" in cols else ("COALESCE(kg_carregado,0)" if "kg_carregado" in cols else "0")
+
+                cur.execute(
+                    f"""
+                    SELECT p.codigo_programacao,
+                           upper(trim(COALESCE(p.veiculo,''))) as veiculo,
+                           {data_expr} as data_ref,
+                           {km_expr} as km_rodado,
+                           {kg_expr} as kg_carregado,
+                           COALESCE(d.total_desp,0) as total_desp
+                      FROM programacoes p
+                 LEFT JOIN (
+                        SELECT codigo_programacao, COALESCE(SUM(valor),0) as total_desp
+                          FROM despesas
+                         GROUP BY codigo_programacao
+                    ) d ON d.codigo_programacao = p.codigo_programacao
+                     WHERE trim(COALESCE(p.veiculo,'')) <> ''
+                    """
+                )
+                rows = cur.fetchall() or []
 
         agg = {}
         for r in rows:
@@ -17759,13 +19595,13 @@ class CentroCustosPage(PageBase):
         metric = upper(self.var_chart_metric.get().strip())
         if metric == "CUSTO_KG":
             idx = 6
-            title = "Custo por Veículo (Custo/KG)"
+            title = "Custo por VeÃÂculo (Custo/KG)"
         elif metric == "DESPESA_TOTAL":
             idx = 4
-            title = "Custo por Veículo (Despesa Total)"
+            title = "Custo por VeÃÂculo (Despesa Total)"
         else:
             idx = 5
-            title = "Custo por Veículo (Custo/KM)"
+            title = "Custo por VeÃÂculo (Custo/KM)"
         self.lbl_chart_title.config(text=title)
         chart_rows = sorted(rows_out, key=lambda r: safe_float(r[idx], 0.0), reverse=True)
         self._chart_labels = [r[0] for r in chart_rows[:10]]
@@ -17774,13 +19610,13 @@ class CentroCustosPage(PageBase):
 
         self.lbl_resumo.config(
             text=(
-                f"Veículos: {len(rows_out)} | Rotas: {total_rotas} | "
+                f"VeÃÂculos: {len(rows_out)} | Rotas: {total_rotas} | "
                 f"KM: {total_km:.1f} | KG carregado: {total_kg:.2f} | "
                 f"Despesas: R$ {total_desp:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
                 + f" | Custo/KM global: {custo_km_global:.3f} | Custo/KG global: {custo_kg_global:.3f}"
             )
         )
-        self.set_status(f"STATUS: Centro de Custos atualizado ({self.var_periodo.get()} dias / veículo {self.var_veiculo.get()}).")
+        self.set_status(f"STATUS: Centro de Custos atualizado ({self.var_periodo.get()} dias / veÃÂculo {self.var_veiculo.get()}).")
 
 
 class RelatoriosPage(PageBase):
@@ -17823,10 +19659,10 @@ class RelatoriosPage(PageBase):
         self.ent_filtro_data.grid(row=1, column=3, sticky="ew", padx=6)
         self._bind_date_mask_relatorio(self.ent_filtro_data)
 
-        ttk.Button(card, text="🔎 BUSCAR", style="Primary.TButton", command=self._buscar_programacoes_relatorio).grid(
+        ttk.Button(card, text="ðŸ”Ž BUSCAR", style="Primary.TButton", command=self._buscar_programacoes_relatorio).grid(
             row=1, column=4, padx=6
         )
-        ttk.Button(card, text="🧹 LIMPAR", style="Ghost.TButton", command=self._limpar_filtros_relatorio).grid(
+        ttk.Button(card, text="ðÅ¸§¹ LIMPAR", style="Ghost.TButton", command=self._limpar_filtros_relatorio).grid(
             row=1, column=5, padx=6
         )
 
@@ -17834,26 +19670,26 @@ class RelatoriosPage(PageBase):
         self.cb_prog = ttk.Combobox(card, state="readonly")
         self.cb_prog.grid(row=3, column=0, sticky="ew", padx=6)
 
-        ttk.Button(card, text="🧾 GERAR RESUMO", style="Primary.TButton", command=self.gerar_resumo).grid(
+        ttk.Button(card, text="ðÅ¸§¾ GERAR RESUMO", style="Primary.TButton", command=self.gerar_resumo).grid(
             row=3, column=1, padx=6
         )
-        ttk.Button(card, text="📤 EXPORTAR EXCEL", style="Warn.TButton", command=self.exportar_excel).grid(
+        ttk.Button(card, text="ðÅ¸â€œ¤ EXPORTAR EXCEL", style="Warn.TButton", command=self.exportar_excel).grid(
             row=3, column=2, padx=6
         )
-        ttk.Button(card, text="📄 GERAR PDF", style="Primary.TButton", command=self.gerar_pdf).grid(
+        ttk.Button(card, text="ðÅ¸â€œâ€ž GERAR PDF", style="Primary.TButton", command=self.gerar_pdf).grid(
             row=3, column=3, padx=6
         )
-        ttk.Button(card, text="👁 PREVIEW", style="Ghost.TButton", command=self.abrir_previsualizacao_relatorio).grid(
+        ttk.Button(card, text="ðÅ¸â€˜Â PREVIEW", style="Ghost.TButton", command=self.abrir_previsualizacao_relatorio).grid(
             row=3, column=4, padx=6
         )
-        ttk.Button(card, text="🔄 ATUALIZAR", style="Ghost.TButton", command=self.refresh_comboboxes).grid(
+        ttk.Button(card, text="ðŸ”„ ATUALIZAR", style="Ghost.TButton", command=self.refresh_comboboxes).grid(
             row=3, column=5, padx=6
         )
 
-        ttk.Button(card, text="🏁 FINALIZAR ROTA", style="Danger.TButton", command=self.finalizar_rota).grid(
+        ttk.Button(card, text="ðÅ¸ÂÂ FINALIZAR ROTA", style="Danger.TButton", command=self.finalizar_rota).grid(
             row=3, column=6, padx=6
         )
-        ttk.Button(card, text="↩ REABRIR ROTA", style="Warn.TButton", command=self.reabrir_rota).grid(
+        ttk.Button(card, text="ââ€ © REABRIR ROTA", style="Warn.TButton", command=self.reabrir_rota).grid(
             row=3, column=7, padx=6
         )
 
@@ -17909,12 +19745,12 @@ class RelatoriosPage(PageBase):
         self.refresh_comboboxes()
 
     # ----------------------------
-    # Helpers de regra/seguranÃ§a
+    # Helpers de regra/segurança
     # ----------------------------
     def _get_prog_status_info(self, prog: str):
         """
         Retorna dict com status/prestacao_status quando existir.
-        CompatÃ­vel com bases antigas (sem coluna prestacao_status).
+        CompatÃÂÂvel com bases antigas (sem coluna prestacao_status).
         """
         info = {"status": "", "prestacao_status": ""}
         with get_db() as conn:
@@ -17980,6 +19816,43 @@ class RelatoriosPage(PageBase):
             data_patterns.append(filtro_data_raw)
             data_patterns = [p for p in dict.fromkeys(data_patterns) if p]
 
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                modo = "finalizadas_prestacao" if "PRESTACAO" in tipo_rel else "todas"
+                resp = _call_api(
+                    "GET",
+                    f"desktop/programacoes?modo={urllib.parse.quote(modo)}&limit=400",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                arr = resp.get("programacoes") if isinstance(resp, dict) else []
+                encontrados = []
+                for r in (arr or []):
+                    if not isinstance(r, dict):
+                        continue
+                    codigo = upper((r or {}).get("codigo_programacao") or "")
+                    motorista = upper((r or {}).get("motorista") or "")
+                    data_ref = str((r or {}).get("data_referencia") or (r or {}).get("data_criacao") or "")
+                    if filtro_cod and filtro_cod not in codigo:
+                        continue
+                    if filtro_mot and filtro_mot not in motorista:
+                        continue
+                    if data_patterns:
+                        txt = upper(data_ref)
+                        ok_data = any(upper(p) in txt for p in data_patterns)
+                        if not ok_data:
+                            continue
+                    if codigo:
+                        encontrados.append(codigo)
+                atual = upper(self.cb_prog.get().strip())
+                self.cb_prog["values"] = encontrados
+                if atual not in encontrados:
+                    self.cb_prog.set("")
+                self.set_status(f"STATUS: {len(encontrados)} programacoes encontradas para {self.cb_tipo_rel.get()}.")
+                return
+            except Exception:
+                logging.debug("Falha ao buscar programacoes de relatorio via API", exc_info=True)
+
         with get_db() as conn:
             cur = conn.cursor()
             try:
@@ -18039,6 +19912,51 @@ class RelatoriosPage(PageBase):
         except Exception:
             logging.debug("Falha ignorada")
 
+    def _api_bundle_relatorio(self, prog: str):
+        prog = upper(str(prog or "").strip())
+        self._last_bundle_api_state = "disabled"
+        if not prog:
+            self._last_bundle_api_state = "invalid"
+            return None
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if not desktop_secret or not is_desktop_api_sync_enabled():
+            self._last_bundle_api_state = "disabled"
+            return None
+        try:
+            rota_resp = _call_api(
+                "GET",
+                f"desktop/rotas/{urllib.parse.quote(prog)}",
+                extra_headers={"X-Desktop-Secret": desktop_secret},
+            )
+            rec_resp = _call_api(
+                "GET",
+                f"desktop/rotas/{urllib.parse.quote(prog)}/recebimentos",
+                extra_headers={"X-Desktop-Secret": desktop_secret},
+            )
+            desp_resp = _call_api(
+                "GET",
+                f"desktop/rotas/{urllib.parse.quote(prog)}/despesas",
+                extra_headers={"X-Desktop-Secret": desktop_secret},
+            )
+            rota = rota_resp.get("rota") if isinstance(rota_resp, dict) else None
+            clientes = rota_resp.get("clientes") if isinstance(rota_resp, dict) else []
+            receb = rec_resp.get("recebimentos") if isinstance(rec_resp, dict) else []
+            desp = desp_resp.get("despesas") if isinstance(desp_resp, dict) else []
+            if not isinstance(rota, dict):
+                self._last_bundle_api_state = "not_found"
+                return None
+            self._last_bundle_api_state = "ok"
+            return {
+                "rota": rota,
+                "clientes": clientes if isinstance(clientes, list) else [],
+                "recebimentos": receb if isinstance(receb, list) else [],
+                "despesas": desp if isinstance(desp, list) else [],
+            }
+        except Exception:
+            self._last_bundle_api_state = "failed"
+            logging.debug("Falha ao montar bundle de relatorio via API", exc_info=True)
+            return None
+
     def _fmt_rel_money(self, v):
         return f"R$ {safe_float(v, 0.0):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
@@ -18067,7 +19985,7 @@ class RelatoriosPage(PageBase):
                 "#58C6C4", "#5E9AC8", "#A78BFA", "#F472B6", "#22C55E"
             ]
 
-            # Área do gráfico
+            # ÃÂrea do gráfico
             left = 52
             right = 16
             top = 46
@@ -18252,7 +20170,7 @@ class RelatoriosPage(PageBase):
 
     def on_show(self):
         self.refresh_comboboxes()
-        self.set_status("STATUS: RelatÃ³rios e exportaÃ§Ã£o.")
+        self.set_status("STATUS: Relatórios e exportação.")
 
     def abrir_previsualizacao_relatorio(self):
         tipo_rel = upper(self.cb_tipo_rel.get().strip())
@@ -18283,14 +20201,33 @@ class RelatoriosPage(PageBase):
         t.configure(state="disabled")
 
         if "PRESTACAO" in tipo_rel and prog:
+            desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+            api_enabled = bool(desktop_secret and is_desktop_api_sync_enabled())
+            bundle = self._api_bundle_relatorio(prog)
+            api_state = str(getattr(self, "_last_bundle_api_state", ""))
             rec_lines = []
-            with get_db() as conn:
-                cur = conn.cursor()
-                cur.execute("""
-                    SELECT COALESCE(cod_cliente,''), COALESCE(nome_cliente,''), COALESCE(valor,0), COALESCE(forma_pagamento,''), COALESCE(observacao,'')
-                    FROM recebimentos WHERE codigo_programacao=? ORDER BY id DESC
-                """, (prog,))
-                rows = cur.fetchall() or []
+            if bundle:
+                rows = [
+                    (
+                        str((r or {}).get("cod_cliente") or ""),
+                        str((r or {}).get("nome_cliente") or ""),
+                        safe_float((r or {}).get("valor"), 0.0),
+                        str((r or {}).get("forma_pagamento") or ""),
+                        str((r or {}).get("observacao") or ""),
+                    )
+                    for r in (bundle.get("recebimentos") or [])
+                    if isinstance(r, dict)
+                ]
+            elif api_enabled and api_state == "not_found":
+                rows = []
+            else:
+                with get_db() as conn:
+                    cur = conn.cursor()
+                    cur.execute("""
+                        SELECT COALESCE(cod_cliente,''), COALESCE(nome_cliente,''), COALESCE(valor,0), COALESCE(forma_pagamento,''), COALESCE(observacao,'')
+                        FROM recebimentos WHERE codigo_programacao=? ORDER BY id DESC
+                    """, (prog,))
+                    rows = cur.fetchall() or []
             rec_lines.append(f"FOLHA DE RECEBIMENTOS - {prog}")
             rec_lines.append("=" * 90)
             rec_lines.append("")
@@ -18304,13 +20241,27 @@ class RelatoriosPage(PageBase):
             self._create_a4_preview_tab(nb, "Folha Recebimentos", "\n".join(rec_lines))
 
             desp_lines = []
-            with get_db() as conn:
-                cur = conn.cursor()
-                cur.execute("""
-                    SELECT COALESCE(categoria,'OUTROS'), COALESCE(descricao,''), COALESCE(valor,0), COALESCE(observacao,'')
-                    FROM despesas WHERE codigo_programacao=? ORDER BY id DESC
-                """, (prog,))
-                rows = cur.fetchall() or []
+            if bundle:
+                rows = [
+                    (
+                        str((r or {}).get("categoria") or "OUTROS"),
+                        str((r or {}).get("descricao") or ""),
+                        safe_float((r or {}).get("valor"), 0.0),
+                        str((r or {}).get("observacao") or ""),
+                    )
+                    for r in (bundle.get("despesas") or [])
+                    if isinstance(r, dict)
+                ]
+            elif api_enabled and api_state == "not_found":
+                rows = []
+            else:
+                with get_db() as conn:
+                    cur = conn.cursor()
+                    cur.execute("""
+                        SELECT COALESCE(categoria,'OUTROS'), COALESCE(descricao,''), COALESCE(valor,0), COALESCE(observacao,'')
+                        FROM despesas WHERE codigo_programacao=? ORDER BY id DESC
+                    """, (prog,))
+                    rows = cur.fetchall() or []
             desp_lines.append(f"FOLHA DE DESPESAS - {prog}")
             desp_lines.append("=" * 90)
             desp_lines.append("")
@@ -18385,6 +20336,97 @@ class RelatoriosPage(PageBase):
         _on_resize()
 
     def _build_preview_folha_programacao(self, prog: str) -> str:
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        api_enabled = bool(desktop_secret and is_desktop_api_sync_enabled())
+        bundle = self._api_bundle_relatorio(prog)
+        api_state = str(getattr(self, "_last_bundle_api_state", ""))
+        if bundle:
+            try:
+                rota = bundle.get("rota") or {}
+                clientes_api = [r for r in (bundle.get("clientes") or []) if isinstance(r, dict)]
+                data_criacao = str(rota.get("data_criacao") or rota.get("data") or "")
+                motorista = str(rota.get("motorista") or "")
+                veiculo = str(rota.get("veiculo") or "")
+                equipe = str(rota.get("equipe") or "")
+                kg_estimado = safe_float(rota.get("kg_estimado"), 0.0)
+                status = str(rota.get("status") or "")
+                local = str(rota.get("local_rota") or rota.get("local") or "")
+                tipo_estimativa = str(rota.get("tipo_estimativa") or "KG")
+                caixas_estimado = safe_int(rota.get("caixas_estimado"), 0)
+                usuario_criacao = str(
+                    rota.get("usuario_criacao")
+                    or rota.get("usuario")
+                    or rota.get("criado_por")
+                    or rota.get("created_by")
+                    or rota.get("autor")
+                    or ""
+                )
+                usuario_edicao = str(rota.get("usuario_ultima_edicao") or "")
+                itens = [
+                    (
+                        str((r or {}).get("cod_cliente") or ""),
+                        str((r or {}).get("nome_cliente") or ""),
+                        safe_float((r or {}).get("preco_atual"), safe_float((r or {}).get("preco"), 0.0)),
+                        str((r or {}).get("vendedor") or ""),
+                        str((r or {}).get("cidade") or ""),
+                        str((r or {}).get("pedido") or ""),
+                        safe_int((r or {}).get("caixas_atual"), safe_int((r or {}).get("qnt_caixas"), 0)),
+                    )
+                    for r in clientes_api
+                ]
+                itens.sort(key=lambda r: (upper(r[1] or ""), upper(r[0] or "")))
+                equipe_txt = resolve_equipe_nomes(equipe)
+                total_prev = sum(safe_float(r[2], 0.0) for r in itens)
+                tipo_estimativa = upper(tipo_estimativa or "KG")
+                if tipo_estimativa == "CX":
+                    estimativa_txt = f"CIF / CX ESTIMADO: {safe_int(caixas_estimado, 0)}"
+                else:
+                    estimativa_txt = f"FOB / KG ESTIMADO: {safe_float(kg_estimado, 0.0):.2f}"
+                lines = []
+                lines.append("=" * 118)
+                lines.append(f"{'FOLHA DE PROGRAMAÃ‡ÃƒO':^118}")
+                lines.append("=" * 118)
+                lines.append(f"CÃ“DIGO: {prog}   DATA: {data_criacao or '-'}   STATUS: {upper(status or '-')}")
+                lines.append(f"MOTORISTA: {upper(motorista or '-')}   VEÃƒÃ‚ÂCULO: {upper(veiculo or '-')}   LOCAL: {upper(local or '-')}")
+                lines.append(f"EQUIPE: {equipe_txt or '-'}")
+                lines.append(
+                    f"{estimativa_txt}   CLIENTES: {len(itens)}   TOTAL ESTIMADO: {self._fmt_rel_money(total_prev)}"
+                )
+                lines.append(
+                    f"CRIADO POR: {upper(usuario_criacao or '-')}" +
+                    f"   ÃšLTIMA EDIÃ‡ÃƒO: {upper(usuario_edicao or '-')}"
+                )
+                lines.append("-" * 118)
+                lines.append(f"{'COD':<6} {'CLIENTE / CIDADE':<48} {'CX':>4} {'PREÃ‡O':>12} {'VENDEDOR':<22} {'PEDIDO':>12}")
+                lines.append("-" * 118)
+                for cod, nome, preco, vendedor, cidade, pedido, caixas in itens:
+                    cli = f"{upper(nome or '-')}"
+                    if cidade:
+                        cli += f" - {upper(cidade)}"
+                    lines.append(
+                        f"{str(cod)[:6]:<6} {cli[:48]:<48} {safe_int(caixas,0):>4} {self._fmt_rel_money(preco):>12} "
+                        f"{upper(vendedor or '-')[:22]:<22} {str(pedido or '-')[:12]:>12}"
+                    )
+                lines.append("-" * 118)
+                lines.append("ObservaÃ§Ã£o: _______________________________________________________________________________________________")
+                lines.append("Assinatura responsÃ¡vel: _________________________________________")
+                return "\n".join(lines)
+            except Exception:
+                logging.debug("Falha ao montar folha de programacao via API bundle", exc_info=True)
+                if api_enabled:
+                    return (
+                        f"FOLHA DE PROGRAMACAO - {prog}\n"
+                        + "=" * 90
+                        + "\n\nFalha ao processar dados retornados pelo servidor."
+                    )
+
+        if api_enabled and api_state == "not_found":
+            return (
+                f"FOLHA DE PROGRAMACAO - {prog}\n"
+                + "=" * 90
+                + "\n\nProgramacao nao encontrada no servidor."
+            )
+
         try:
             with get_db() as conn:
                 cur = conn.cursor()
@@ -18445,7 +20487,7 @@ class RelatoriosPage(PageBase):
         lines.append(f"{'FOLHA DE PROGRAMAÇÃO':^118}")
         lines.append("=" * 118)
         lines.append(f"CÓDIGO: {prog}   DATA: {data_criacao or '-'}   STATUS: {upper(status or '-')}")
-        lines.append(f"MOTORISTA: {upper(motorista or '-')}   VEÍCULO: {upper(veiculo or '-')}   LOCAL: {upper(local or '-')}")
+        lines.append(f"MOTORISTA: {upper(motorista or '-')}   VEÃÂCULO: {upper(veiculo or '-')}   LOCAL: {upper(local or '-')}")
         lines.append(f"EQUIPE: {equipe_txt or '-'}")
         lines.append(
             f"{estimativa_txt}   CLIENTES: {len(itens)}   TOTAL ESTIMADO: {self._fmt_rel_money(total_prev)}"
@@ -18471,6 +20513,126 @@ class RelatoriosPage(PageBase):
         return "\n".join(lines)
 
     def _build_preview_folha_prestacao(self, prog: str) -> str:
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        api_enabled = bool(desktop_secret and is_desktop_api_sync_enabled())
+        bundle = self._api_bundle_relatorio(prog)
+        api_state = str(getattr(self, "_last_bundle_api_state", ""))
+        if bundle:
+            try:
+                rota = bundle.get("rota") or {}
+                receb_api = [r for r in (bundle.get("recebimentos") or []) if isinstance(r, dict)]
+                desp_api = [r for r in (bundle.get("despesas") or []) if isinstance(r, dict)]
+
+                data_criacao = str(rota.get("data_criacao") or rota.get("data") or "")
+                motorista = str(rota.get("motorista") or "")
+                veiculo = str(rota.get("veiculo") or "")
+                equipe = str(rota.get("equipe") or "")
+                status = str(rota.get("status") or "")
+                prest = str(rota.get("prestacao_status") or "PENDENTE")
+                km_rodado = safe_float(rota.get("km_rodado"), 0.0)
+                media_km_l = safe_float(rota.get("media_km_l"), 0.0)
+                custo_km = safe_float(rota.get("custo_km"), 0.0)
+                adiantamento = safe_float(rota.get("adiantamento"), 0.0)
+                mort_aves = safe_int(rota.get("mortalidade_transbordo_aves"), 0)
+                mort_kg = safe_float(rota.get("mortalidade_transbordo_kg"), 0.0)
+                obs_transb = str(rota.get("obs_transbordo") or "")
+                nf_kg_base = safe_float(rota.get("nf_kg"), 0.0)
+
+                total_receb = sum(safe_float(r.get("valor"), 0.0) for r in receb_api)
+                total_desp = sum(safe_float(r.get("valor"), 0.0) for r in desp_api)
+                receb = [
+                    (
+                        str(r.get("cod_cliente") or ""),
+                        str(r.get("nome_cliente") or ""),
+                        safe_float(r.get("valor"), 0.0),
+                        str(r.get("forma_pagamento") or ""),
+                    )
+                    for r in receb_api[:12]
+                ]
+                desp = [
+                    (
+                        str(r.get("categoria") or "OUTROS"),
+                        str(r.get("descricao") or ""),
+                        safe_float(r.get("valor"), 0.0),
+                    )
+                    for r in desp_api[:12]
+                ]
+
+                equipe_txt = resolve_equipe_nomes(equipe)
+                entradas = total_receb + safe_float(adiantamento, 0.0)
+                saidas = total_desp
+                resultado = entradas - saidas
+                log_info = self._collect_logistica_rastreio(prog)
+                kg_nf_util = max(nf_kg_base - safe_float(mort_kg, 0.0), 0.0)
+
+                lines = []
+                lines.append("=" * 118)
+                lines.append(f"{'FOLHA DE PRESTACAO DE CONTAS':^118}")
+                lines.append("=" * 118)
+                lines.append(f"CODIGO: {prog}   DATA: {data_criacao or '-'}   STATUS: {upper(status or '-')}   PRESTACAO: {upper(prest or '-')}")
+                lines.append(f"MOTORISTA: {upper(motorista or '-')}   VEICULO: {upper(veiculo or '-')}   EQUIPE: {equipe_txt or '-'}")
+                lines.append("-" * 118)
+                lines.append(
+                    f"ENTRADAS (RECEB+ADIANT.): {self._fmt_rel_money(entradas)}   "
+                    f"SAIDAS (DESPESAS): {self._fmt_rel_money(saidas)}   "
+                    f"RESULTADO: {self._fmt_rel_money(resultado)}"
+                )
+                lines.append(
+                    f"KM RODADO: {safe_float(km_rodado,0.0):.2f}   "
+                    f"MEDIA KM/L: {safe_float(media_km_l,0.0):.2f}   "
+                    f"CUSTO/KM: {safe_float(custo_km,0.0):.2f}"
+                )
+                lines.append("-" * 118)
+                lines.append("[RECEBIMENTOS - ULTIMOS LANCAMENTOS]")
+                lines.append(f"{'COD':<6} {'CLIENTE':<52} {'VALOR':>14} {'FORMA':<16}")
+                for cod, nome, valor, forma in receb:
+                    lines.append(f"{str(cod)[:6]:<6} {upper(nome or '-')[:52]:<52} {self._fmt_rel_money(valor):>14} {upper(forma or '-')[:16]:<16}")
+                if not receb:
+                    lines.append("Sem recebimentos.")
+                lines.append("-" * 118)
+                lines.append("[DESPESAS - ULTIMOS LANCAMENTOS]")
+                lines.append(f"{'CATEGORIA':<20} {'DESCRICAO':<72} {'VALOR':>14}")
+                for cat, desc, valor in desp:
+                    lines.append(f"{upper(cat or 'OUTROS')[:20]:<20} {upper(desc or '-')[:72]:<72} {self._fmt_rel_money(valor):>14}")
+                if not desp:
+                    lines.append("Sem despesas.")
+                lines.append("-" * 118)
+                lines.append("[RASTREABILIDADE LOGISTICA]")
+                for ln in (log_info.get("resumo") or []):
+                    lines.append(str(ln))
+                lines.append(
+                    "Conciliacao de caixas: "
+                    + ("OK" if bool(log_info.get("itens_ok", True)) else "DIVERGENTE")
+                )
+                lines.append("-" * 118)
+                lines.append("[OCORRENCIAS DE TRANSBORDO / MORTALIDADE]")
+                lines.append(f"Mortalidade (aves): {safe_int(mort_aves, 0)}")
+                lines.append(
+                    f"Mortalidade (KG): {safe_float(mort_kg, 0.0):.2f}".replace(".", ",")
+                )
+                lines.append(
+                    f"KG util NF (NF - mortalidade): {safe_float(kg_nf_util, 0.0):.2f}".replace(".", ",")
+                )
+                lines.append(f"Obs transbordo: {str(obs_transb or '-').strip() or '-'}")
+                lines.append("-" * 118)
+                lines.append("Conferido por: ____________________________________   Data: ____/____/________")
+                return "\n".join(lines)
+            except Exception:
+                logging.debug("Falha ao montar folha de prestacao via API bundle", exc_info=True)
+                if api_enabled:
+                    return (
+                        f"FOLHA DE PRESTACAO - {prog}\n"
+                        + "=" * 90
+                        + "\n\nFalha ao processar dados retornados pelo servidor."
+                    )
+
+        if api_enabled and api_state == "not_found":
+            return (
+                f"FOLHA DE PRESTACAO - {prog}\n"
+                + "=" * 90
+                + "\n\nProgramacao nao encontrada no servidor."
+            )
+
         try:
             with get_db() as conn:
                 cur = conn.cursor()
@@ -18568,11 +20730,11 @@ class RelatoriosPage(PageBase):
         lines.append(f"{'FOLHA DE PRESTAÇÃO DE CONTAS':^118}")
         lines.append("=" * 118)
         lines.append(f"CÓDIGO: {prog}   DATA: {data_criacao or '-'}   STATUS: {upper(status or '-')}   PRESTAÇÃO: {upper(prest or '-')}")
-        lines.append(f"MOTORISTA: {upper(motorista or '-')}   VEÍCULO: {upper(veiculo or '-')}   EQUIPE: {equipe_txt or '-'}")
+        lines.append(f"MOTORISTA: {upper(motorista or '-')}   VEÃÂCULO: {upper(veiculo or '-')}   EQUIPE: {equipe_txt or '-'}")
         lines.append("-" * 118)
         lines.append(
             f"ENTRADAS (RECEB+ADIANT.): {self._fmt_rel_money(entradas)}   "
-            f"SAÍDAS (DESPESAS): {self._fmt_rel_money(saidas)}   "
+            f"SAÃÂDAS (DESPESAS): {self._fmt_rel_money(saidas)}   "
             f"RESULTADO: {self._fmt_rel_money(resultado)}"
         )
         lines.append(
@@ -18595,7 +20757,7 @@ class RelatoriosPage(PageBase):
         if not desp:
             lines.append("Sem despesas.")
         lines.append("-" * 118)
-        lines.append("[RASTREABILIDADE LOGÍSTICA]")
+        lines.append("[RASTREABILIDADE LOGÃÂSTICA]")
         for ln in (log_info.get("resumo") or []):
             lines.append(str(ln))
         lines.append(
@@ -18618,17 +20780,46 @@ class RelatoriosPage(PageBase):
 
     def _gerar_relatorio_rotina_motoristas_ajudantes(self):
         filtro_mot = upper(self.ent_filtro_motorista.get().strip()) if hasattr(self, "ent_filtro_motorista") else ""
-        with get_db() as conn:
-            cur = conn.cursor()
-            cur.execute("PRAGMA table_info(programacoes)")
-            cols = {str(c[1]).lower() for c in (cur.fetchall() or [])}
-            km_expr = "COALESCE(km_rodado,0)" if "km_rodado" in cols else "0"
-            cur.execute(f"""
-                SELECT COALESCE(codigo_programacao,''), COALESCE(motorista,''), COALESCE(equipe,''), COALESCE(status,''), COALESCE(kg_vendido,0), {km_expr}
-                FROM programacoes
-                ORDER BY id DESC
-            """)
-            rows = cur.fetchall() or []
+        rows = []
+        api_succeeded = False
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                q = urllib.parse.quote(filtro_mot, safe="")
+                resp = _call_api(
+                    "GET",
+                    f"desktop/relatorios/rotina-motoristas?motorista_like={q}",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                if isinstance(resp, dict):
+                    rows = [
+                        (
+                            str((r or {}).get("codigo_programacao") or ""),
+                            str((r or {}).get("motorista") or ""),
+                            str((r or {}).get("equipe") or ""),
+                            str((r or {}).get("status") or ""),
+                            safe_float((r or {}).get("kg_vendido"), 0.0),
+                            safe_float((r or {}).get("km_rodado"), 0.0),
+                        )
+                        for r in (resp.get("rows") or [])
+                        if isinstance(r, dict)
+                    ]
+                    api_succeeded = True
+            except Exception:
+                logging.debug("Falha no relatorio de rotina via API; usando fallback local.", exc_info=True)
+
+        if not api_succeeded:
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute("PRAGMA table_info(programacoes)")
+                cols = {str(c[1]).lower() for c in (cur.fetchall() or [])}
+                km_expr = "COALESCE(km_rodado,0)" if "km_rodado" in cols else "0"
+                cur.execute(f"""
+                    SELECT COALESCE(codigo_programacao,''), COALESCE(motorista,''), COALESCE(equipe,''), COALESCE(status,''), COALESCE(kg_vendido,0), {km_expr}
+                    FROM programacoes
+                    ORDER BY id DESC
+                """)
+                rows = cur.fetchall() or []
 
         mot = {}
         aju = {}
@@ -18681,19 +20872,45 @@ class RelatoriosPage(PageBase):
         self.set_status(f"STATUS: Relatório de rotina gerado ({len(rank_m)} motorista(s)).")
 
     def _gerar_relatorio_km_veiculos(self):
-        with get_db() as conn:
-            cur = conn.cursor()
-            cur.execute("PRAGMA table_info(programacoes)")
-            cols = {str(c[1]).lower() for c in (cur.fetchall() or [])}
-            km_expr = "COALESCE(km_rodado,0)" if "km_rodado" in cols else "0"
-            media_expr = "COALESCE(media_km_l,0)" if "media_km_l" in cols else "0"
-            cur.execute(f"""
-                SELECT COALESCE(veiculo,''), COUNT(1), COALESCE(SUM({km_expr}),0), COALESCE(AVG(NULLIF({media_expr},0)),0)
-                FROM programacoes
-                GROUP BY COALESCE(veiculo,'')
-                ORDER BY 3 DESC, 1 ASC
-            """)
-            rows = cur.fetchall() or []
+        rows = []
+        api_succeeded = False
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                resp = _call_api(
+                    "GET",
+                    "desktop/relatorios/km-veiculos",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                if isinstance(resp, dict):
+                    rows = [
+                        (
+                            str((r or {}).get("veiculo") or ""),
+                            safe_int((r or {}).get("viagens"), 0),
+                            safe_float((r or {}).get("km_rodado"), 0.0),
+                            safe_float((r or {}).get("media_km_l"), 0.0),
+                        )
+                        for r in (resp.get("rows") or [])
+                        if isinstance(r, dict)
+                    ]
+                    api_succeeded = True
+            except Exception:
+                logging.debug("Falha no relatorio KM via API; usando fallback local.", exc_info=True)
+
+        if not api_succeeded:
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute("PRAGMA table_info(programacoes)")
+                cols = {str(c[1]).lower() for c in (cur.fetchall() or [])}
+                km_expr = "COALESCE(km_rodado,0)" if "km_rodado" in cols else "0"
+                media_expr = "COALESCE(media_km_l,0)" if "media_km_l" in cols else "0"
+                cur.execute(f"""
+                    SELECT COALESCE(veiculo,''), COUNT(1), COALESCE(SUM({km_expr}),0), COALESCE(AVG(NULLIF({media_expr},0)),0)
+                    FROM programacoes
+                    GROUP BY COALESCE(veiculo,'')
+                    ORDER BY 3 DESC, 1 ASC
+                """)
+                rows = cur.fetchall() or []
         self.txt.delete("1.0", "end")
         self.txt.insert("end", "RELATORIO DE KM POR VEICULO\n")
         self.txt.insert("end", "=" * 90 + "\n\n")
@@ -18704,26 +20921,51 @@ class RelatoriosPage(PageBase):
         total_km = sum(safe_float(r[2], 0.0) for r in rows)
         top = rows[0][0] if rows else "-"
         self._set_dashboard(
-            f"Veículos: {len(rows)}",
+            f"VeÃÂculos: {len(rows)}",
             f"KM total: {total_km:.2f}",
-            f"Média KM/veículo: {(total_km / max(len(rows), 1)):.2f}",
+            f"Média KM/veÃÂculo: {(total_km / max(len(rows), 1)):.2f}",
             f"Destaque: {upper(top or '-')}",
             [upper((r[0] or "-")) for r in rows[:8]],
             [safe_float(r[2], 0.0) for r in rows[:8]],
             color="#2563EB",
         )
-        self.set_status(f"STATUS: Relatório de KM por veículo gerado ({len(rows)} veículo(s)).")
+        self.set_status(f"STATUS: Relatório de KM por veÃÂculo gerado ({len(rows)} veÃÂculo(s)).")
 
     def _gerar_relatorio_despesas_geral(self):
-        with get_db() as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT COALESCE(categoria,'OUTROS') AS categoria, COUNT(1) AS qtd, COALESCE(SUM(valor),0) AS total
-                FROM despesas
-                GROUP BY COALESCE(categoria,'OUTROS')
-                ORDER BY total DESC, categoria ASC
-            """)
-            rows = cur.fetchall() or []
+        rows = []
+        api_succeeded = False
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                resp = _call_api(
+                    "GET",
+                    "desktop/relatorios/despesas-categorias",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                if isinstance(resp, dict):
+                    rows = [
+                        (
+                            str((r or {}).get("categoria") or "OUTROS"),
+                            safe_int((r or {}).get("qtd"), 0),
+                            safe_float((r or {}).get("total"), 0.0),
+                        )
+                        for r in (resp.get("rows") or [])
+                        if isinstance(r, dict)
+                    ]
+                    api_succeeded = True
+            except Exception:
+                logging.debug("Falha no relatorio de despesas via API; usando fallback local.", exc_info=True)
+
+        if not api_succeeded:
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT COALESCE(categoria,'OUTROS') AS categoria, COUNT(1) AS qtd, COALESCE(SUM(valor),0) AS total
+                    FROM despesas
+                    GROUP BY COALESCE(categoria,'OUTROS')
+                    ORDER BY total DESC, categoria ASC
+                """)
+                rows = cur.fetchall() or []
         self.txt.delete("1.0", "end")
         self.txt.insert("end", "RELATORIO GERAL DE DESPESAS\n")
         self.txt.insert("end", "=" * 90 + "\n\n")
@@ -18799,136 +21041,244 @@ class RelatoriosPage(PageBase):
         despesas = []
         clientes_programacao = []
 
-        with get_db() as conn:
-            cur = conn.cursor()
-            cols = []
-
-            def has_col(col):
-                try:
-                    return db_has_column(cur, "programacoes", col)
-                except Exception:
-                    return False
-
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        api_enabled = bool(desktop_secret and is_desktop_api_sync_enabled())
+        bundle = self._api_bundle_relatorio(prog)
+        api_state = str(getattr(self, "_last_bundle_api_state", ""))
+        if api_enabled and api_state == "not_found":
+            messagebox.showwarning("ATENCAO", f"Programacao nao encontrada no servidor: {prog}")
+            return
+        if bundle:
             try:
-                cur.execute("PRAGMA table_info(programacoes)")
-                cols = [str(c[1]).lower() for c in (cur.fetchall() or [])]
+                rota = bundle.get("rota") or {}
+                clientes_api = [r for r in (bundle.get("clientes") or []) if isinstance(r, dict)]
+                receb_api = [r for r in (bundle.get("recebimentos") or []) if isinstance(r, dict)]
+                desp_api = [r for r in (bundle.get("despesas") or []) if isinstance(r, dict)]
+
+                motorista = str(rota.get("motorista") or "")
+                veiculo = str(rota.get("veiculo") or "")
+                equipe = str(rota.get("equipe") or "")
+                status = upper(str(rota.get("status") or ""))
+                prestacao = upper(str(rota.get("prestacao_status") or ""))
+                data_criacao = str(rota.get("data_criacao") or rota.get("data") or "")
+                usuario_criacao = str(
+                    rota.get("usuario")
+                    or rota.get("criado_por")
+                    or rota.get("usuario_criacao")
+                    or rota.get("created_by")
+                    or rota.get("autor")
+                    or rota.get("responsavel")
+                    or ""
+                )
+                kg_estimado = safe_float(rota.get("kg_estimado"), 0.0)
+                nf = str(rota.get("num_nf") or rota.get("nf_numero") or "")
+                local_rota = str(rota.get("local_rota") or rota.get("tipo_rota") or "")
+                local_carreg = str(rota.get("local_carregamento") or rota.get("granja_carregada") or "")
+                data_saida = str(rota.get("data_saida") or "")
+                hora_saida = str(rota.get("hora_saida") or "")
+                data_chegada = str(rota.get("data_chegada") or "")
+                hora_chegada = str(rota.get("hora_chegada") or "")
+                nf_kg = safe_float(rota.get("nf_kg"), 0.0)
+                nf_caixas = safe_int(rota.get("nf_caixas"), 0)
+                nf_kg_carregado = safe_float(rota.get("nf_kg_carregado"), 0.0)
+                nf_kg_vendido = safe_float(rota.get("nf_kg_vendido"), 0.0)
+                nf_saldo = safe_float(rota.get("nf_saldo"), 0.0)
+                km_inicial = safe_float(rota.get("km_inicial"), 0.0)
+                km_final = safe_float(rota.get("km_final"), 0.0)
+                litros = safe_float(rota.get("litros"), 0.0)
+                km_rodado = safe_float(rota.get("km_rodado"), 0.0)
+                media_km_l = safe_float(rota.get("media_km_l"), 0.0)
+                custo_km = safe_float(rota.get("custo_km"), 0.0)
+                ced_qtd[200] = safe_int(rota.get("ced_200_qtd"), 0)
+                ced_qtd[100] = safe_int(rota.get("ced_100_qtd"), 0)
+                ced_qtd[50] = safe_int(rota.get("ced_50_qtd"), 0)
+                ced_qtd[20] = safe_int(rota.get("ced_20_qtd"), 0)
+                ced_qtd[10] = safe_int(rota.get("ced_10_qtd"), 0)
+                ced_qtd[5] = safe_int(rota.get("ced_5_qtd"), 0)
+                ced_qtd[2] = safe_int(rota.get("ced_2_qtd"), 0)
+                valor_dinheiro = safe_float(rota.get("valor_dinheiro"), 0.0)
+                adiantamento = safe_float(rota.get("adiantamento"), 0.0)
+
+                data_saida, hora_saida = normalize_date_time_components(data_saida, hora_saida)
+                data_chegada, hora_chegada = normalize_date_time_components(data_chegada, hora_chegada)
+
+                clientes_programacao = [
+                    (
+                        str((r or {}).get("cod_cliente") or ""),
+                        str((r or {}).get("nome_cliente") or ""),
+                        safe_float((r or {}).get("preco_atual"), safe_float((r or {}).get("preco"), 0.0)),
+                        str((r or {}).get("vendedor") or ""),
+                    )
+                    for r in clientes_api
+                ]
+                total_entregas = len(clientes_programacao)
+
+                if is_prestacao:
+                    recebimentos = [
+                        (
+                            str((r or {}).get("cod_cliente") or ""),
+                            str((r or {}).get("nome_cliente") or ""),
+                            safe_float((r or {}).get("valor"), 0.0),
+                            str((r or {}).get("forma_pagamento") or ""),
+                            str((r or {}).get("observacao") or ""),
+                            str((r or {}).get("data_registro") or ""),
+                        )
+                        for r in receb_api
+                    ]
+                    despesas = [
+                        (
+                            str((r or {}).get("descricao") or ""),
+                            safe_float((r or {}).get("valor"), 0.0),
+                            str((r or {}).get("categoria") or "OUTROS"),
+                            str((r or {}).get("observacao") or ""),
+                            str((r or {}).get("data_registro") or ""),
+                        )
+                        for r in desp_api
+                    ]
+                    total_receb = sum(safe_float(r[2], 0.0) for r in recebimentos)
+                    total_desp = sum(safe_float(r[1], 0.0) for r in despesas)
             except Exception:
+                logging.debug("Falha ao carregar resumo via API.", exc_info=True)
+                if api_enabled:
+                    messagebox.showwarning(
+                        "Relatorios",
+                        "Falha ao processar dados retornados pelo servidor para esta programacao.\n"
+                        "Tente novamente apos atualizar o servidor.",
+                    )
+                    return
+                bundle = None
+
+        if not bundle:
+            with get_db() as conn:
+                cur = conn.cursor()
                 cols = []
 
-            usuario_col_name = ""
-            for cand in ("usuario", "criado_por", "usuario_criacao", "user", "created_by", "autor", "responsavel"):
-                if cand in cols:
-                    usuario_col_name = cand
-                    break
+                def has_col(col):
+                    try:
+                        return db_has_column(cur, "programacoes", col)
+                    except Exception:
+                        return False
 
-            nf_col = "num_nf" if has_col("num_nf") else ("nf_numero" if has_col("nf_numero") else "'' as num_nf")
-            local_rota_col = "local_rota" if has_col("local_rota") else ("tipo_rota" if has_col("tipo_rota") else "'' as local_rota")
-            local_carreg_col = "local_carregamento" if has_col("local_carregamento") else ("granja_carregada" if has_col("granja_carregada") else "'' as local_carregamento")
+                try:
+                    cur.execute("PRAGMA table_info(programacoes)")
+                    cols = [str(c[1]).lower() for c in (cur.fetchall() or [])]
+                except Exception:
+                    cols = []
 
-            if has_col("adiantamento") and has_col("adiantamento_rota"):
-                adiant_col = (
-                    "CASE WHEN COALESCE(adiantamento, 0) <> 0 THEN adiantamento "
-                    "ELSE COALESCE(adiantamento_rota, 0) END as adiantamento"
-                )
-            elif has_col("adiantamento"):
-                adiant_col = "adiantamento"
-            elif has_col("adiantamento_rota"):
-                adiant_col = "adiantamento_rota as adiantamento"
-            else:
-                adiant_col = "0 as adiantamento"
+                usuario_col_name = ""
+                for cand in ("usuario", "criado_por", "usuario_criacao", "user", "created_by", "autor", "responsavel"):
+                    if cand in cols:
+                        usuario_col_name = cand
+                        break
 
-            status_col = "COALESCE(status,'') as status" if has_col("status") else "'' as status"
-            prest_col = "COALESCE(prestacao_status,'') as prestacao_status" if has_col("prestacao_status") else "'' as prestacao_status"
-            data_col = "COALESCE(data_criacao,'') as data_criacao" if has_col("data_criacao") else ("COALESCE(data,'') as data_criacao" if has_col("data") else "'' as data_criacao")
-            usuario_col = f"COALESCE({usuario_col_name},'') as usuario_criacao" if usuario_col_name else "'' as usuario_criacao"
+                nf_col = "num_nf" if has_col("num_nf") else ("nf_numero" if has_col("nf_numero") else "'' as num_nf")
+                local_rota_col = "local_rota" if has_col("local_rota") else ("tipo_rota" if has_col("tipo_rota") else "'' as local_rota")
+                local_carreg_col = "local_carregamento" if has_col("local_carregamento") else ("granja_carregada" if has_col("granja_carregada") else "'' as local_carregamento")
 
-            cur.execute(f"""
-                SELECT
-                    motorista, veiculo, equipe,
-                    {status_col}, {prest_col}, {data_col},
-                    {usuario_col},
-                    COALESCE(kg_estimado,0),
-                    {nf_col} as num_nf,
-                    {local_rota_col} as local_rota,
-                    {local_carreg_col} as local_carreg,
-                    COALESCE(data_saida,''), COALESCE(hora_saida,''),
-                    COALESCE(data_chegada,''), COALESCE(hora_chegada,''),
-                    COALESCE(nf_kg,0), COALESCE(nf_caixas,0), COALESCE(nf_kg_carregado,0),
-                    COALESCE(nf_kg_vendido,0), COALESCE(nf_saldo,0),
-                    COALESCE(km_inicial,0), COALESCE(km_final,0), COALESCE(litros,0),
-                    COALESCE(km_rodado,0), COALESCE(media_km_l,0), COALESCE(custo_km,0),
-                    COALESCE(ced_200_qtd,0), COALESCE(ced_100_qtd,0), COALESCE(ced_50_qtd,0),
-                    COALESCE(ced_20_qtd,0), COALESCE(ced_10_qtd,0), COALESCE(ced_5_qtd,0), COALESCE(ced_2_qtd,0),
-                    COALESCE(valor_dinheiro,0),
-                    {adiant_col}
-                FROM programacoes
-                WHERE codigo_programacao=?
-                LIMIT 1
-            """, (prog,))
-            row = cur.fetchone()
-            if not row:
-                messagebox.showwarning("ATENCAO", f"Programacao nao encontrada: {prog}")
-                return
+                if has_col("adiantamento") and has_col("adiantamento_rota"):
+                    adiant_col = (
+                        "CASE WHEN COALESCE(adiantamento, 0) <> 0 THEN adiantamento "
+                        "ELSE COALESCE(adiantamento_rota, 0) END as adiantamento"
+                    )
+                elif has_col("adiantamento"):
+                    adiant_col = "adiantamento"
+                elif has_col("adiantamento_rota"):
+                    adiant_col = "adiantamento_rota as adiantamento"
+                else:
+                    adiant_col = "0 as adiantamento"
 
-            motorista, veiculo, equipe = row[0] or "", row[1] or "", row[2] or ""
-            status, prestacao = upper(row[3] or ""), upper(row[4] or "")
-            data_criacao = row[5] or ""
-            usuario_criacao = row[6] or ""
-            kg_estimado = safe_float(row[7], 0.0)
-            nf, local_rota, local_carreg = row[8] or "", row[9] or "", row[10] or ""
-            data_saida, hora_saida = row[11] or "", row[12] or ""
-            data_chegada, hora_chegada = row[13] or "", row[14] or ""
-            nf_kg, nf_caixas, nf_kg_carregado = safe_float(row[15], 0.0), safe_int(row[16], 0), safe_float(row[17], 0.0)
-            nf_kg_vendido, nf_saldo = safe_float(row[18], 0.0), safe_float(row[19], 0.0)
-            km_inicial, km_final = safe_float(row[20], 0.0), safe_float(row[21], 0.0)
-            litros, km_rodado = safe_float(row[22], 0.0), safe_float(row[23], 0.0)
-            media_km_l, custo_km = safe_float(row[24], 0.0), safe_float(row[25], 0.0)
-            ced_qtd[200], ced_qtd[100], ced_qtd[50] = safe_int(row[26], 0), safe_int(row[27], 0), safe_int(row[28], 0)
-            ced_qtd[20], ced_qtd[10], ced_qtd[5], ced_qtd[2] = safe_int(row[29], 0), safe_int(row[30], 0), safe_int(row[31], 0), safe_int(row[32], 0)
-            valor_dinheiro = safe_float(row[33], 0.0)
-            adiantamento = safe_float(row[34], 0.0)
+                status_col = "COALESCE(status,'') as status" if has_col("status") else "'' as status"
+                prest_col = "COALESCE(prestacao_status,'') as prestacao_status" if has_col("prestacao_status") else "'' as prestacao_status"
+                data_col = "COALESCE(data_criacao,'') as data_criacao" if has_col("data_criacao") else ("COALESCE(data,'') as data_criacao" if has_col("data") else "'' as data_criacao")
+                usuario_col = f"COALESCE({usuario_col_name},'') as usuario_criacao" if usuario_col_name else "'' as usuario_criacao"
 
-            data_saida, hora_saida = normalize_date_time_components(data_saida, hora_saida)
-            data_chegada, hora_chegada = normalize_date_time_components(data_chegada, hora_chegada)
+                cur.execute(f"""
+                    SELECT
+                        motorista, veiculo, equipe,
+                        {status_col}, {prest_col}, {data_col},
+                        {usuario_col},
+                        COALESCE(kg_estimado,0),
+                        {nf_col} as num_nf,
+                        {local_rota_col} as local_rota,
+                        {local_carreg_col} as local_carreg,
+                        COALESCE(data_saida,''), COALESCE(hora_saida,''),
+                        COALESCE(data_chegada,''), COALESCE(hora_chegada,''),
+                        COALESCE(nf_kg,0), COALESCE(nf_caixas,0), COALESCE(nf_kg_carregado,0),
+                        COALESCE(nf_kg_vendido,0), COALESCE(nf_saldo,0),
+                        COALESCE(km_inicial,0), COALESCE(km_final,0), COALESCE(litros,0),
+                        COALESCE(km_rodado,0), COALESCE(media_km_l,0), COALESCE(custo_km,0),
+                        COALESCE(ced_200_qtd,0), COALESCE(ced_100_qtd,0), COALESCE(ced_50_qtd,0),
+                        COALESCE(ced_20_qtd,0), COALESCE(ced_10_qtd,0), COALESCE(ced_5_qtd,0), COALESCE(ced_2_qtd,0),
+                        COALESCE(valor_dinheiro,0),
+                        {adiant_col}
+                    FROM programacoes
+                    WHERE codigo_programacao=?
+                    LIMIT 1
+                """, (prog,))
+                row = cur.fetchone()
+                if not row:
+                    messagebox.showwarning("ATENCAO", f"Programacao nao encontrada: {prog}")
+                    return
 
-            try:
-                cur.execute("SELECT COUNT(*) FROM programacao_itens WHERE codigo_programacao=?", (prog,))
-                total_entregas = safe_int((cur.fetchone() or [0])[0], 0)
-            except Exception:
-                total_entregas = 0
+                motorista, veiculo, equipe = row[0] or "", row[1] or "", row[2] or ""
+                status, prestacao = upper(row[3] or ""), upper(row[4] or "")
+                data_criacao = row[5] or ""
+                usuario_criacao = row[6] or ""
+                kg_estimado = safe_float(row[7], 0.0)
+                nf, local_rota, local_carreg = row[8] or "", row[9] or "", row[10] or ""
+                data_saida, hora_saida = row[11] or "", row[12] or ""
+                data_chegada, hora_chegada = row[13] or "", row[14] or ""
+                nf_kg, nf_caixas, nf_kg_carregado = safe_float(row[15], 0.0), safe_int(row[16], 0), safe_float(row[17], 0.0)
+                nf_kg_vendido, nf_saldo = safe_float(row[18], 0.0), safe_float(row[19], 0.0)
+                km_inicial, km_final = safe_float(row[20], 0.0), safe_float(row[21], 0.0)
+                litros, km_rodado = safe_float(row[22], 0.0), safe_float(row[23], 0.0)
+                media_km_l, custo_km = safe_float(row[24], 0.0), safe_float(row[25], 0.0)
+                ced_qtd[200], ced_qtd[100], ced_qtd[50] = safe_int(row[26], 0), safe_int(row[27], 0), safe_int(row[28], 0)
+                ced_qtd[20], ced_qtd[10], ced_qtd[5], ced_qtd[2] = safe_int(row[29], 0), safe_int(row[30], 0), safe_int(row[31], 0), safe_int(row[32], 0)
+                valor_dinheiro = safe_float(row[33], 0.0)
+                adiantamento = safe_float(row[34], 0.0)
 
-            cur.execute("""
-                SELECT COALESCE(cod_cliente,''), COALESCE(nome_cliente,''), COALESCE(preco,0), COALESCE(vendedor,'')
-                FROM programacao_itens
-                WHERE codigo_programacao=?
-                ORDER BY nome_cliente ASC, cod_cliente ASC
-            """, (prog,))
-            clientes_programacao = cur.fetchall() or []
+                data_saida, hora_saida = normalize_date_time_components(data_saida, hora_saida)
+                data_chegada, hora_chegada = normalize_date_time_components(data_chegada, hora_chegada)
 
-            if is_prestacao:
-                cur.execute("SELECT COALESCE(SUM(valor),0) FROM recebimentos WHERE codigo_programacao=?", (prog,))
-                total_receb = safe_float((cur.fetchone() or [0])[0], 0.0)
-
-                cur.execute("SELECT COALESCE(SUM(valor),0) FROM despesas WHERE codigo_programacao=?", (prog,))
-                total_desp = safe_float((cur.fetchone() or [0])[0], 0.0)
+                try:
+                    cur.execute("SELECT COUNT(*) FROM programacao_itens WHERE codigo_programacao=?", (prog,))
+                    total_entregas = safe_int((cur.fetchone() or [0])[0], 0)
+                except Exception:
+                    total_entregas = 0
 
                 cur.execute("""
-                    SELECT COALESCE(cod_cliente,''), COALESCE(nome_cliente,''), COALESCE(valor,0),
-                           COALESCE(forma_pagamento,''), COALESCE(observacao,''), COALESCE(data_registro,'')
-                    FROM recebimentos
+                    SELECT COALESCE(cod_cliente,''), COALESCE(nome_cliente,''), COALESCE(preco,0), COALESCE(vendedor,'')
+                    FROM programacao_itens
                     WHERE codigo_programacao=?
-                    ORDER BY data_registro DESC, id DESC
+                    ORDER BY nome_cliente ASC, cod_cliente ASC
                 """, (prog,))
-                recebimentos = cur.fetchall() or []
+                clientes_programacao = cur.fetchall() or []
 
-                cur.execute("""
-                    SELECT COALESCE(descricao,''), COALESCE(valor,0), COALESCE(categoria,'OUTROS'),
-                           COALESCE(observacao,''), COALESCE(data_registro,'')
-                    FROM despesas
-                    WHERE codigo_programacao=?
-                    ORDER BY data_registro DESC, id DESC
-                """, (prog,))
-                despesas = cur.fetchall() or []
+                if is_prestacao:
+                    cur.execute("SELECT COALESCE(SUM(valor),0) FROM recebimentos WHERE codigo_programacao=?", (prog,))
+                    total_receb = safe_float((cur.fetchone() or [0])[0], 0.0)
+
+                    cur.execute("SELECT COALESCE(SUM(valor),0) FROM despesas WHERE codigo_programacao=?", (prog,))
+                    total_desp = safe_float((cur.fetchone() or [0])[0], 0.0)
+
+                    cur.execute("""
+                        SELECT COALESCE(cod_cliente,''), COALESCE(nome_cliente,''), COALESCE(valor,0),
+                               COALESCE(forma_pagamento,''), COALESCE(observacao,''), COALESCE(data_registro,'')
+                        FROM recebimentos
+                        WHERE codigo_programacao=?
+                        ORDER BY data_registro DESC, id DESC
+                    """, (prog,))
+                    recebimentos = cur.fetchall() or []
+
+                    cur.execute("""
+                        SELECT COALESCE(descricao,''), COALESCE(valor,0), COALESCE(categoria,'OUTROS'),
+                               COALESCE(observacao,''), COALESCE(data_registro,'')
+                        FROM despesas
+                        WHERE codigo_programacao=?
+                        ORDER BY data_registro DESC, id DESC
+                    """, (prog,))
+                    despesas = cur.fetchall() or []
 
         equipe_txt = resolve_equipe_nomes(equipe)
         data_criacao_n = normalize_date(data_criacao)
@@ -19068,7 +21418,7 @@ class RelatoriosPage(PageBase):
             f"Despesas: {fmt_money(total_desp)}",
             f"Resultado: {fmt_money(resultado)}",
             f"Prestação: {prestacao or '-'}",
-            ["Entradas", "Saídas", "Resultado"],
+            ["Entradas", "SaÃÂdas", "Resultado"],
             [total_entradas, total_saidas, abs(resultado)],
             color="#0EA5E9",
         )
@@ -19088,55 +21438,101 @@ class RelatoriosPage(PageBase):
             data_patterns.append(filtro_data_raw)
             data_patterns = [p for p in dict.fromkeys(data_patterns) if p]
 
-        with get_db() as conn:
-            cur = conn.cursor()
+        rows = []
+        used_api = False
+        api_failed = False
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        api_enabled = bool(desktop_secret and is_desktop_api_sync_enabled())
+        if api_enabled:
+            try:
+                q_cod = urllib.parse.quote(filtro_cod, safe="")
+                q_mot = urllib.parse.quote(filtro_mot, safe="")
+                q_data = urllib.parse.quote("|".join(data_patterns), safe="")
+                resp = _call_api(
+                    "GET",
+                    f"desktop/relatorios/mortalidade-motorista?codigo_like={q_cod}&motorista_like={q_mot}&data_like={q_data}",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                if isinstance(resp, dict):
+                    rows = [
+                        (
+                            str((r or {}).get("codigo_programacao") or ""),
+                            str((r or {}).get("motorista") or ""),
+                            str((r or {}).get("data_ref") or ""),
+                            str((r or {}).get("status_ref") or ""),
+                            safe_int((r or {}).get("mortalidade_total"), 0),
+                            safe_int((r or {}).get("clientes_com_mortalidade"), 0),
+                        )
+                        for r in (resp.get("rows") or [])
+                        if isinstance(r, dict)
+                    ]
+                    used_api = True
+                else:
+                    messagebox.showwarning(
+                        "Relatorios",
+                        "Resposta invalida do servidor para o relatorio de mortalidade.",
+                    )
+                    return
+            except Exception:
+                api_failed = True
+                logging.debug("Falha no relatorio de mortalidade via API; usando fallback local.", exc_info=True)
 
-            cur.execute("PRAGMA table_info(programacoes)")
-            cols_p = [str(c[1]).lower() for c in (cur.fetchall() or [])]
-            has_status = "status" in cols_p
-            has_data_criacao = "data_criacao" in cols_p
-            has_data = "data" in cols_p
-            data_expr = (
-                "COALESCE(p.data_criacao,'')"
-                if has_data_criacao
-                else ("COALESCE(p.data,'')" if has_data else "''")
-            )
-            status_expr = "COALESCE(p.status,'')" if has_status else "''"
+        if not used_api:
+            if api_enabled and (not api_failed):
+                messagebox.showwarning(
+                    "Relatorios",
+                    "Nao foi possivel validar os dados do relatorio de mortalidade no servidor.",
+                )
+                return
+            with get_db() as conn:
+                cur = conn.cursor()
 
-            sql = f"""
-                SELECT
-                    COALESCE(p.codigo_programacao,'') as codigo_programacao,
-                    COALESCE(p.motorista,'') as motorista,
-                    {data_expr} as data_ref,
-                    {status_expr} as status_ref,
-                    COALESCE(SUM(COALESCE(pc.mortalidade_aves, 0)), 0) as mortalidade_total,
-                    COUNT(CASE WHEN COALESCE(pc.mortalidade_aves,0) > 0 THEN 1 END) as clientes_com_mortalidade
-                FROM programacoes p
-                LEFT JOIN programacao_itens_controle pc
-                  ON UPPER(COALESCE(pc.codigo_programacao,'')) = UPPER(COALESCE(p.codigo_programacao,''))
-                WHERE 1=1
-            """
-            params = []
+                cur.execute("PRAGMA table_info(programacoes)")
+                cols_p = [str(c[1]).lower() for c in (cur.fetchall() or [])]
+                has_status = "status" in cols_p
+                has_data_criacao = "data_criacao" in cols_p
+                has_data = "data" in cols_p
+                data_expr = (
+                    "COALESCE(p.data_criacao,'')"
+                    if has_data_criacao
+                    else ("COALESCE(p.data,'')" if has_data else "''")
+                )
+                status_expr = "COALESCE(p.status,'')" if has_status else "''"
 
-            if filtro_cod:
-                sql += " AND UPPER(COALESCE(p.codigo_programacao,'')) LIKE ?"
-                params.append(f"%{filtro_cod}%")
-            if filtro_mot:
-                sql += " AND UPPER(COALESCE(p.motorista,'')) LIKE ?"
-                params.append(f"%{filtro_mot}%")
-            if data_patterns:
-                clauses = []
-                for pat in data_patterns:
-                    clauses.append(f"{data_expr} LIKE ?")
-                    params.append(f"%{pat}%")
-                sql += " AND (" + " OR ".join(clauses) + ")"
+                sql = f"""
+                    SELECT
+                        COALESCE(p.codigo_programacao,'') as codigo_programacao,
+                        COALESCE(p.motorista,'') as motorista,
+                        {data_expr} as data_ref,
+                        {status_expr} as status_ref,
+                        COALESCE(SUM(COALESCE(pc.mortalidade_aves, 0)), 0) as mortalidade_total,
+                        COUNT(CASE WHEN COALESCE(pc.mortalidade_aves,0) > 0 THEN 1 END) as clientes_com_mortalidade
+                    FROM programacoes p
+                    LEFT JOIN programacao_itens_controle pc
+                      ON UPPER(COALESCE(pc.codigo_programacao,'')) = UPPER(COALESCE(p.codigo_programacao,''))
+                    WHERE 1=1
+                """
+                params = []
 
-            sql += """
-                GROUP BY p.codigo_programacao, p.motorista, data_ref, status_ref
-                ORDER BY mortalidade_total ASC, p.codigo_programacao DESC
-            """
-            cur.execute(sql, tuple(params))
-            rows = cur.fetchall() or []
+                if filtro_cod:
+                    sql += " AND UPPER(COALESCE(p.codigo_programacao,'')) LIKE ?"
+                    params.append(f"%{filtro_cod}%")
+                if filtro_mot:
+                    sql += " AND UPPER(COALESCE(p.motorista,'')) LIKE ?"
+                    params.append(f"%{filtro_mot}%")
+                if data_patterns:
+                    clauses = []
+                    for pat in data_patterns:
+                        clauses.append(f"{data_expr} LIKE ?")
+                        params.append(f"%{pat}%")
+                    sql += " AND (" + " OR ".join(clauses) + ")"
+
+                sql += """
+                    GROUP BY p.codigo_programacao, p.motorista, data_ref, status_ref
+                    ORDER BY mortalidade_total ASC, p.codigo_programacao DESC
+                """
+                cur.execute(sql, tuple(params))
+                rows = cur.fetchall() or []
 
         self.txt.delete("1.0", "end")
         self.txt.insert("end", "RELATORIO DE MORTALIDADE POR MOTORISTA\n")
@@ -19150,7 +21546,7 @@ class RelatoriosPage(PageBase):
 
         # Ranking por rota (menor mortalidade primeiro)
         self.txt.insert("end", "[RANKING POR ROTA - MENOR MORTALIDADE]\n")
-        self.txt.insert("end", "POS | PROGRAMAÃ‡ÃƒO | MOTORISTA | MORTALIDADE | CLIENTES C/ MORT. | DATA | STATUS\n")
+        self.txt.insert("end", "POS | PROGRAMAÇÃO | MOTORISTA | MORTALIDADE | CLIENTES C/ MORT. | DATA | STATUS\n")
         self.txt.insert("end", "-" * 95 + "\n")
         for i, (codigo, motorista, data_ref, status_ref, mort_total, cli_mort) in enumerate(rows, start=1):
             self.txt.insert(
@@ -19196,8 +21592,8 @@ class RelatoriosPage(PageBase):
         self.txt.insert("end", "\n[DESTAQUE]\n")
         self.txt.insert(
             "end",
-            f"Motorista com menor mÃ©dia de mortalidade por rota: {melhor_mot} "
-            f"(mÃ©dia {melhor_media:.2f} aves/rota em {melhor_data['rotas']} rota(s)).\n",
+            f"Motorista com menor média de mortalidade por rota: {melhor_mot} "
+            f"(média {melhor_media:.2f} aves/rota em {melhor_data['rotas']} rota(s)).\n",
         )
         self._set_dashboard(
             f"Rotas analisadas: {len(rows)}",
@@ -19208,14 +21604,14 @@ class RelatoriosPage(PageBase):
             [(_d["mort_total"] / max(_d["rotas"], 1)) for _m, _d in ranking_motorista[:8]],
             color="#7C3AED",
         )
-        self.set_status(f"STATUS: RelatÃ³rio de mortalidade gerado ({len(rows)} rota(s)).")
+        self.set_status(f"STATUS: Relatório de mortalidade gerado ({len(rows)} rota(s)).")
 
     def exportar_excel(self):
         prog = upper(self.cb_prog.get())
         if not (require_pandas() and require_openpyxl()):
             return
         if not prog:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Selecione uma programaÃ§Ã£o.")
+            messagebox.showwarning("ATENÇÃO", "Selecione uma programação.")
             return
 
         path = filedialog.asksaveasfilename(
@@ -19228,25 +21624,47 @@ class RelatoriosPage(PageBase):
             return
 
         try:
-            with get_db() as conn:
-                cur = conn.cursor()
+            desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+            api_enabled = bool(desktop_secret and is_desktop_api_sync_enabled())
+            bundle = self._api_bundle_relatorio(prog)
+            api_state = str(getattr(self, "_last_bundle_api_state", ""))
+            if api_enabled and api_state == "not_found":
+                messagebox.showwarning("ATENCAO", f"Programacao nao encontrada no servidor: {prog}")
+                return
+            if bundle:
+                itens = [dict(r) for r in (bundle.get("clientes") or []) if isinstance(r, dict)]
+                rec = [dict(r) for r in (bundle.get("recebimentos") or []) if isinstance(r, dict)]
+                desp = [dict(r) for r in (bundle.get("despesas") or []) if isinstance(r, dict)]
+                df_itens = pd.DataFrame(itens)
+                df_rec = pd.DataFrame(rec)
+                df_desp = pd.DataFrame(desp)
+            else:
+                if api_enabled and api_state not in ("failed", "disabled"):
+                    messagebox.showwarning(
+                        "ATENCAO",
+                        "Falha ao processar dados da programacao no servidor. Tente novamente.",
+                    )
+                    return
+                with get_db() as conn:
+                    cur = conn.cursor()
 
-                cur.execute("SELECT * FROM programacao_itens WHERE codigo_programacao=?", (prog,))
-                itens = cur.fetchall()
-                cols_itens = [d[0] for d in cur.description]
+                    cur.execute("SELECT * FROM programacao_itens WHERE codigo_programacao=?", (prog,))
+                    itens = cur.fetchall()
+                    cols_itens = [d[0] for d in cur.description]
 
-                cur.execute("SELECT * FROM recebimentos WHERE codigo_programacao=?", (prog,))
-                rec = cur.fetchall()
-                cols_rec = [d[0] for d in cur.description]
+                    cur.execute("SELECT * FROM recebimentos WHERE codigo_programacao=?", (prog,))
+                    rec = cur.fetchall()
+                    cols_rec = [d[0] for d in cur.description]
 
-                cur.execute("SELECT * FROM despesas WHERE codigo_programacao=?", (prog,))
-                desp = cur.fetchall()
-                cols_desp = [d[0] for d in cur.description]
+                    cur.execute("SELECT * FROM despesas WHERE codigo_programacao=?", (prog,))
+                    desp = cur.fetchall()
+                    cols_desp = [d[0] for d in cur.description]
 
-            with pd.ExcelWriter(path, engine="openpyxl") as writer:
                 df_itens = pd.DataFrame(itens, columns=cols_itens)
                 df_rec = pd.DataFrame(rec, columns=cols_rec)
                 df_desp = pd.DataFrame(desp, columns=cols_desp)
+
+            with pd.ExcelWriter(path, engine="openpyxl") as writer:
 
                 if "data_registro" in df_rec.columns:
                     df_rec["data_registro"] = normalize_datetime_column(df_rec["data_registro"])
@@ -19292,7 +21710,7 @@ class RelatoriosPage(PageBase):
                 if hasattr(self, "app") and hasattr(self.app, "pages"):
                     despesas_page = self.app.pages.get("Despesas")
                 if not despesas_page or not hasattr(despesas_page, "imprimir_resumo"):
-                    messagebox.showerror("ERRO", "Tela de Despesas indisponível para gerar PDF da prestação.")
+                    messagebox.showerror("ERRO", "Tela de Despesas indisponÃÂvel para gerar PDF da prestação.")
                     return
 
                 prev_prog = getattr(despesas_page, "_current_programacao", "")
@@ -19349,49 +21767,45 @@ class RelatoriosPage(PageBase):
     def finalizar_rota(self):
         prog = upper(self.cb_prog.get())
         if not prog:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Selecione uma programaÃ§Ã£o.")
+            messagebox.showwarning("ATENCAO", "Selecione uma programacao.")
+            return
+        if not ensure_system_api_binding(context=f"Finalizar rota ({prog})", parent=self):
             return
 
         info = self._get_prog_status_info(prog)
         st = info.get("status", "")
         prest = info.get("prestacao_status", "")
 
-        # âœ… Se prestaÃ§Ã£o fechada, nÃ£o faz sentido "finalizar" (jÃ¡ deveria estar travada)
         if prest == "FECHADA":
             messagebox.showwarning(
                 "BLOQUEADO",
-                f"A rota {prog} estÃ¡ com a prestaÃ§Ã£o FECHADA.\n\n"
-                "Ela jÃ¡ estÃ¡ travada para alteraÃ§Ãµes. (VocÃª pode apenas gerar relatÃ³rios/exportar.)"
+                f"A rota {prog} esta com a prestacao FECHADA.\n\n"
+                "Ela ja esta travada para alteracoes."
             )
             return
 
-        # âœ… Evita clicar 2x
         if st == "FINALIZADA":
-            messagebox.showinfo("Info", f"A rota {prog} jÃ¡ estÃ¡ FINALIZADA.")
+            messagebox.showinfo("Info", f"A rota {prog} ja esta FINALIZADA.")
             return
 
         if not messagebox.askyesno(
             "CONFIRMAR",
             f"Deseja FINALIZAR a rota {prog}?\n\n"
-            "Ela deixarÃ¡ de aparecer nas Rotas Ativas."
+            "Ela deixara de aparecer nas Rotas Ativas."
         ):
             return
 
         try:
-            with get_db() as conn:
-                cur = conn.cursor()
-                try:
-                    cur.execute(
-                        """
-                        UPDATE programacoes
-                        SET status='FINALIZADA',
-                            finalizada_no_app=0
-                        WHERE codigo_programacao=?
-                        """,
-                        (prog,),
-                    )
-                except Exception:
-                    cur.execute("UPDATE programacoes SET status='FINALIZADA' WHERE codigo_programacao=?", (prog,))
+            desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+            _call_api(
+                "PUT",
+                f"desktop/rotas/{urllib.parse.quote(upper(prog))}/status",
+                payload={
+                    "status": "FINALIZADA",
+                    "finalizada_no_app": 0,
+                },
+                extra_headers={"X-Desktop-Secret": desktop_secret},
+            )
 
             messagebox.showinfo("OK", f"Rota FINALIZADA: {prog}")
 
@@ -19407,49 +21821,46 @@ class RelatoriosPage(PageBase):
     def reabrir_rota(self):
         prog = upper(self.cb_prog.get())
         if not prog:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Selecione uma programaÃ§Ã£o.")
+            messagebox.showwarning("ATENCAO", "Selecione uma programacao.")
+            return
+        if not ensure_system_api_binding(context=f"Reabrir rota ({prog})", parent=self):
             return
 
         info = self._get_prog_status_info(prog)
         st = info.get("status", "")
         prest = info.get("prestacao_status", "")
 
-        # âœ… Regra principal: prestaÃ§Ã£o FECHADA => nÃ£o reabrir rota (senÃ£o volta a mexer em despesas/adiantamento)
         if prest == "FECHADA":
             messagebox.showwarning(
                 "BLOQUEADO",
-                f"NÃ£o Ã© permitido REABRIR a rota {prog} pois a prestaÃ§Ã£o estÃ¡ FECHADA.\n\n"
-                "Se precisar reabrir, primeiro reabra a prestaÃ§Ã£o (criar funÃ§Ã£o especÃ­fica) ou ajuste no administrativo."
+                f"Nao e permitido REABRIR a rota {prog} pois a prestacao esta FECHADA.\n\n"
+                "Se precisar reabrir, primeiro reabra a prestacao."
             )
             return
 
         if st == "ATIVA":
-            messagebox.showinfo("Info", f"A rota {prog} jÃ¡ estÃ¡ ATIVA.")
+            messagebox.showinfo("Info", f"A rota {prog} ja esta ATIVA.")
             return
 
         if not messagebox.askyesno(
             "CONFIRMAR",
             f"Deseja REABRIR a rota {prog}?\n\n"
-            "Ela voltarÃ¡ a aparecer nas Rotas Ativas."
+            "Ela voltara a aparecer nas Rotas Ativas."
         ):
             return
 
         try:
-            with get_db() as conn:
-                cur = conn.cursor()
-                try:
-                    cur.execute(
-                        """
-                        UPDATE programacoes
-                        SET status='ATIVA',
-                            status_operacional=NULL,
-                            finalizada_no_app=0
-                        WHERE codigo_programacao=?
-                        """,
-                        (prog,),
-                    )
-                except Exception:
-                    cur.execute("UPDATE programacoes SET status='ATIVA' WHERE codigo_programacao=?", (prog,))
+            desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+            _call_api(
+                "PUT",
+                f"desktop/rotas/{urllib.parse.quote(upper(prog))}/status",
+                payload={
+                    "status": "ATIVA",
+                    "status_operacional": "",
+                    "finalizada_no_app": 0,
+                },
+                extra_headers={"X-Desktop-Secret": desktop_secret},
+            )
 
             messagebox.showinfo("OK", f"Rota REABERTA: {prog}")
 
@@ -19461,6 +21872,7 @@ class RelatoriosPage(PageBase):
 
         except Exception as e:
             messagebox.showerror("ERRO", f"Erro ao reabrir rota: {str(e)}")
+    
 
 # ==========================
 # ===== FIM DA PARTE 8 (ATUALIZADA) =====
@@ -19482,21 +21894,21 @@ class BackupExportarPage(PageBase):
 
         ttk.Label(card, text="Ferramentas", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 10))
 
-        ttk.Button(card, text="🗄 FAZER BACKUP DO BANCO", style="Primary.TButton", command=self.backup_db)\
+        ttk.Button(card, text="ðÅ¸â€”â€ž FAZER BACKUP DO BANCO", style="Primary.TButton", command=self.backup_db)\
             .grid(row=1, column=0, sticky="ew", pady=6)
-        ttk.Button(card, text="♻ RESTAURAR BANCO (IMPORTAR .DB)", style="Warn.TButton", command=self.restore_db)\
+        ttk.Button(card, text="ââ„¢» RESTAURAR BANCO (IMPORTAR .DB)", style="Warn.TButton", command=self.restore_db)\
             .grid(row=2, column=0, sticky="ew", pady=6)
-        ttk.Button(card, text="📤 EXPORTAR VENDAS IMPORTADAS (EXCEL)", style="Ghost.TButton", command=self.exportar_vendas)\
+        ttk.Button(card, text="ðÅ¸â€œ¤ EXPORTAR VENDAS IMPORTADAS (EXCEL)", style="Ghost.TButton", command=self.exportar_vendas)\
             .grid(row=3, column=0, sticky="ew", pady=6)
 
-        self.lbl = ttk.Label(card, text="Dica: FaÃ§a backup diariamente.", background="white", foreground="#444")
+        self.lbl = ttk.Label(card, text="Dica: Faça backup diariamente.", background="white", foreground="#444")
         self.lbl.grid(row=4, column=0, sticky="w", pady=(12, 0))
 
     def on_show(self):
-        self.set_status("STATUS: Backup e exportaÃ§Ãµes.")
+        self.set_status("STATUS: Backup e exportações.")
 
     # ----------------------------
-    # Helpers de seguranÃ§a
+    # Helpers de segurança
     # ----------------------------
     def _is_sqlite_db_file(self, path: str) -> bool:
         """Valida assinatura do arquivo SQLite (primeiros 16 bytes)."""
@@ -19508,7 +21920,7 @@ class BackupExportarPage(PageBase):
             return False
 
     def _make_safe_copy(self, src: str, dst: str):
-        """CÃ³pia binÃ¡ria simples (mantÃ©m compatibilidade)."""
+        """Cópia binária simples (mantém compatibilidade)."""
         with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
             shutil.copyfileobj(fsrc, fdst)
 
@@ -19522,7 +21934,7 @@ class BackupExportarPage(PageBase):
                     logging.debug("Falha ignorada")
 
     def _backup_current_db_automatic(self) -> str:
-        """Cria um backup automÃ¡tico no mesmo diretÃ³rio do DB (antes do restore)."""
+        """Cria um backup automático no mesmo diretório do DB (antes do restore)."""
         if not os.path.exists(DB_PATH):
             return ""
         try:
@@ -19536,7 +21948,7 @@ class BackupExportarPage(PageBase):
 
     def backup_db(self):
         if not os.path.exists(DB_PATH):
-            messagebox.showerror("ERRO", "Banco nÃ£o encontrado.")
+            messagebox.showerror("ERRO", "Banco não encontrado.")
             return
 
         path = filedialog.asksaveasfilename(
@@ -19549,7 +21961,7 @@ class BackupExportarPage(PageBase):
             return
 
         try:
-            # âœ… melhor prÃ¡tica: usar SQLite backup API quando possÃ­vel
+            # âÅâ€œââ‚¬¦ melhor prática: usar SQLite backup API quando possÃÂÂvel
             try:
                 import sqlite3
                 src = sqlite3.connect(DB_PATH)
@@ -19559,7 +21971,7 @@ class BackupExportarPage(PageBase):
                 dst.close()
                 src.close()
             except Exception:
-                # fallback: cÃ³pia binÃ¡ria (mantÃ©m funcionamento se der algo no backup API)
+                # fallback: cópia binária (mantém funcionamento se der algo no backup API)
                 self._make_safe_copy(DB_PATH, path)
 
             messagebox.showinfo("OK", "Backup criado com sucesso!")
@@ -19576,49 +21988,49 @@ class BackupExportarPage(PageBase):
         if not path:
             return
 
-        # âœ… valida se Ã© sqlite de verdade
+        # âÅâ€œââ‚¬¦ valida se é sqlite de verdade
         if not self._is_sqlite_db_file(path):
             messagebox.showerror(
                 "ERRO",
-                "O arquivo selecionado nÃ£o parece ser um banco SQLite vÃ¡lido.\n\n"
+                "O arquivo selecionado não parece ser um banco SQLite válido.\n\n"
                 "Selecione um .db gerado pelo sistema (backup)."
             )
             return
 
-        # confirmaÃ§Ã£o mais clara (alto risco)
+        # confirmação mais clara (alto risco)
         if not messagebox.askyesno(
-            "CONFIRMAR RESTAURAÃ‡ÃƒO",
+            "CONFIRMAR RESTAURAÇÃO",
             "Isso vai SUBSTITUIR seu banco atual.\n\n"
-            "Recomendado: fechar telas e nÃ£o estar com operaÃ§Ãµes em andamento.\n\n"
+            "Recomendado: fechar telas e não estar com operações em andamento.\n\n"
             "Deseja continuar?"
         ):
             return
 
         try:
-            # âœ… cria backup automÃ¡tico do DB atual
+            # âÅâ€œââ‚¬¦ cria backup automático do DB atual
             auto_backup = self._backup_current_db_automatic()
 
-            # ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ tenta fechar conexÃƒÆ’Ã‚Âµes ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œconhecidasÃƒÂ¢Ã¢â€šÂ¬Ã‚ (melhor esforÃƒÆ’Ã‚Â§o, sem quebrar)
+            # âÅâââ€š¬Åâ€œââââ‚¬Å¡¬¦ tenta fechar conexÃÆââ‚¬â„¢µes âââââ€š¬Å¡¬Åâââ€š¬Åâ€œconhecidasâââââ€š¬Å¡¬Â (melhor esforÃÆââ‚¬â„¢§o, sem quebrar)
             try:
-                # se existir algum mÃ©todo no app para reabrir/fechar conexÃµes, chamamos
+                # se existir algum método no app para reabrir/fechar conexões, chamamos
                 if hasattr(self.app, "close_db_connections"):
                     self.app.close_db_connections()
             except Exception:
                 logging.debug("Falha ignorada")
 
-            # limpa WAL/SHM antigos (melhor esforÃ§o)
+            # limpa WAL/SHM antigos (melhor esforço)
             try:
                 self._cleanup_sqlite_wal(DB_PATH)
             except Exception:
                 logging.debug("Falha ignorada")
 
-            # âœ… restaura por cÃ³pia binÃ¡ria (simples e compatÃ­vel)
-            # ObservaÃ§Ã£o: se houver conexÃ£o aberta, pode falhar no Windows.
+            # âÅâ€œââ‚¬¦ restaura por cópia binária (simples e compatÃÂÂvel)
+            # Observação: se houver conexão aberta, pode falhar no Windows.
             self._make_safe_copy(path, DB_PATH)
 
             msg = "Banco restaurado! Reinicie o sistema."
             if auto_backup:
-                msg += f"\n\nBackup automÃ¡tico do banco anterior:\n{os.path.basename(auto_backup)}"
+                msg += f"\n\nBackup automático do banco anterior:\n{os.path.basename(auto_backup)}"
 
             messagebox.showinfo("OK", msg)
             self.set_status("STATUS: Banco restaurado. Reinicie o sistema.")
@@ -19626,7 +22038,7 @@ class BackupExportarPage(PageBase):
         except PermissionError:
             messagebox.showerror(
                 "ERRO",
-                "NÃ£o foi possÃ­vel substituir o banco (arquivo em uso).\n\n"
+                "Não foi possÃÂÂvel substituir o banco (arquivo em uso).\n\n"
                 "Feche o sistema e tente novamente, ou reinicie o computador."
             )
         except Exception as e:
@@ -19649,7 +22061,7 @@ class BackupExportarPage(PageBase):
                 df = pd.read_sql_query("SELECT * FROM vendas_importadas ORDER BY id DESC", conn)
 
             if df.empty:
-                messagebox.showwarning("ATENÃ‡ÃƒO", "NÃ£o hÃ¡ vendas importadas para exportar.")
+                messagebox.showwarning("ATENÇÃO", "Não há vendas importadas para exportar.")
                 return
 
             try:
@@ -19660,12 +22072,12 @@ class BackupExportarPage(PageBase):
                 messagebox.showerror(
                     "ERRO",
                     "Falha ao exportar para Excel.\n\n"
-                    "Verifique se o pacote 'openpyxl' estÃ¡ instalado.\n\n"
+                    "Verifique se o pacote 'openpyxl' está instalado.\n\n"
                     f"Detalhes: {str(e)}"
                 )
                 return
 
-            messagebox.showinfo("OK", "ExportaÃ§Ã£o feita com sucesso!")
+            messagebox.showinfo("OK", "Exportação feita com sucesso!")
             self.set_status(f"STATUS: Vendas exportadas: {os.path.basename(path)}")
 
         except Exception as e:
@@ -19685,7 +22097,7 @@ class LoginWindow(tk.Tk):
 
         self.title(APP_TITLE_DESKTOP)
         apply_window_icon(self)
-        self.geometry("440x280")  # +20px p/ nÃ£o apertar botÃµes
+        self.geometry("440x280")  # +20px p/ não apertar botões
         self.resizable(False, False)
 
         # ---- Aplica estilo
@@ -19701,10 +22113,10 @@ class LoginWindow(tk.Tk):
         y = (self.winfo_screenheight() // 2) - (h // 2)
         self.geometry(f"{w}x{h}+{x}+{y}")
 
-        # ---- Fallback de estilo (evita botÃ£o "sumir" por estilo invisÃ­vel)
+        # ---- Fallback de estilo (evita botão "sumir" por estilo invisÃÂÂvel)
         self._ensure_button_styles()
 
-        # ---- Controle de tentativas (seguranÃ§a leve sem quebrar fluxo)
+        # ---- Controle de tentativas (segurança leve sem quebrar fluxo)
         self._attempts = 0
         self._blocked_until = 0  # epoch seconds
         self._max_attempts = 5
@@ -19713,7 +22125,7 @@ class LoginWindow(tk.Tk):
         card = ttk.Frame(self, style="Card.TFrame", padding=18)
         card.pack(fill="both", expand=True, padx=12, pady=12)
 
-        # âœ… garante espaÃ§o do grid dentro do card
+        # âÅâ€œââ‚¬¦ garante espaço do grid dentro do card
         card.grid_columnconfigure(0, weight=1)
 
         ttk.Label(
@@ -19751,11 +22163,11 @@ class LoginWindow(tk.Tk):
         btns.grid_columnconfigure(0, weight=1)
         btns.grid_columnconfigure(1, weight=1)
 
-        # âœ… padding e sticky garantem que apareÃ§am e tenham tamanho
+        # âÅâ€œââ‚¬¦ padding e sticky garantem que apareçam e tenham tamanho
         self.btn_entrar = ttk.Button(btns, text="🔐 ENTRAR", style="Primary.TButton", command=self.try_login)
         self.btn_entrar.grid(row=0, column=0, sticky="ew", padx=(0, 6), ipady=6)
 
-        self.btn_sair = ttk.Button(btns, text="⏻ SAIR", style="Danger.TButton", command=self._request_close)
+        self.btn_sair = ttk.Button(btns, text="âÂ» SAIR", style="Danger.TButton", command=self._request_close)
         self.btn_sair.grid(row=0, column=1, sticky="ew", padx=(6, 0), ipady=6)
 
         self.ent_codigo.focus_set()
@@ -19763,11 +22175,11 @@ class LoginWindow(tk.Tk):
         self.bind("<Escape>", lambda e: self._request_close())
         self.protocol("WM_DELETE_WINDOW", self._request_close)
 
-        self.user = None  # serÃ¡ preenchido quando logar
+        self.user = None  # será preenchido quando logar
 
     def _request_close(self):
         try:
-            ok = messagebox.askyesno("Confirmar saída", "Deseja realmente fechar o sistema?")
+            ok = messagebox.askyesno("Confirmar saÃÂda", "Deseja realmente fechar o sistema?")
         except Exception:
             ok = True
         if ok:
@@ -19775,16 +22187,16 @@ class LoginWindow(tk.Tk):
 
     def _ensure_button_styles(self):
         """
-        Se o tema nÃ£o criou Primary.TButton / Danger.TButton, cria um fallback
-        para evitar o efeito de "botÃ£o invisÃ­vel".
-        NÃ£o altera seu tema se jÃ¡ existir.
+        Se o tema não criou Primary.TButton / Danger.TButton, cria um fallback
+        para evitar o efeito de "botão invisÃÂÂvel".
+        Não altera seu tema se já existir.
         """
         try:
             st = ttk.Style(self)
-            existing = set(st.theme_names())  # sÃ³ pra nÃ£o dar erro em alguns temas
+            existing = set(st.theme_names())  # só pra não dar erro em alguns temas
             _ = existing  # quiet
 
-            # Alguns temas nÃ£o suportam lookup; entÃ£o testamos com lookup e fallback
+            # Alguns temas não suportam lookup; então testamos com lookup e fallback
             def _style_exists(name: str) -> bool:
                 try:
                     # se retornar algo sem dar exception, consideramos "existe"
@@ -19826,10 +22238,10 @@ class LoginWindow(tk.Tk):
         senha = self.ent_senha.get().strip()
 
         if not codigo or not senha:
-            messagebox.showwarning("ATENÃ‡ÃƒO", "Informe cÃ³digo e senha.")
+            messagebox.showwarning("ATENÇÃO", "Informe código e senha.")
             return
 
-        # âœ… login real: usa sua funÃ§Ã£o existente (mantÃ©m o sistema)
+        # âÅâ€œââ‚¬¦ login real: usa sua função existente (mantém o sistema)
         try:
             user = autenticar_usuario(codigo, senha)
         except Exception as e:
@@ -19844,7 +22256,7 @@ class LoginWindow(tk.Tk):
                 self.lbl_status.config(text="Muitas tentativas. Login bloqueado temporariamente.")
             else:
                 self.lbl_status.config(
-                    text=f"CÃ³digo ou senha invÃ¡lidos. Tentativas: {self._attempts}/{self._max_attempts}"
+                    text=f"Código ou senha inválidos. Tentativas: {self._attempts}/{self._max_attempts}"
                 )
             return
 
@@ -19857,7 +22269,7 @@ def abrir_login():
     win.mainloop()
 
     if not getattr(win, "user", None):
-        return  # usuÃ¡rio saiu / cancelou
+        return  # usuário saiu / cancelou
 
     app = App(user=win.user)
 
@@ -19870,7 +22282,7 @@ def abrir_login():
 
 
 if __name__ == "__main__":
-    db_init()  # garante migraÃ§Ãµes
+    db_init()  # garante migrações
     abrir_login()
 
 # ==========================
