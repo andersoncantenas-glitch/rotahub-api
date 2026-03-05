@@ -18614,7 +18614,7 @@ class EscalaPage(PageBase):
         )
         self.cb_status.grid(row=1, column=1, sticky="w", padx=(0, 10))
 
-        ttk.Button(filtros, text="ðŸ”„ ATUALIZAR", style="Ghost.TButton", command=self.refresh_data).grid(
+        ttk.Button(filtros, text="\U0001F504 ATUALIZAR", style="Ghost.TButton", command=self.refresh_data).grid(
             row=1, column=2, sticky="w"
         )
 
@@ -18638,12 +18638,12 @@ class EscalaPage(PageBase):
         self.lbl_esc_kpi_mot = ttk.Label(kpi_2, text="0", font=("Segoe UI", 13, "bold"), foreground="#0F766E")
         self.lbl_esc_kpi_mot.grid(row=0, column=0, sticky="w")
 
-        kpi_3 = ttk.LabelFrame(kpi_row, text=" KM Médio/Motorista ", padding=8)
+        kpi_3 = ttk.LabelFrame(kpi_row, text=" KM Medio/Motorista ", padding=8)
         kpi_3.grid(row=0, column=2, sticky="ew", padx=6)
         self.lbl_esc_kpi_km = ttk.Label(kpi_3, text="0,0", font=("Segoe UI", 13, "bold"), foreground="#B45309")
         self.lbl_esc_kpi_km.grid(row=0, column=0, sticky="w")
 
-        kpi_4 = ttk.LabelFrame(kpi_row, text=" Horas Médias/Motorista ", padding=8)
+        kpi_4 = ttk.LabelFrame(kpi_row, text=" Horas Medias/Motorista ", padding=8)
         kpi_4.grid(row=0, column=3, sticky="ew", padx=(6, 0))
         self.lbl_esc_kpi_horas = ttk.Label(kpi_4, text="0,00", font=("Segoe UI", 13, "bold"), foreground="#7C3AED")
         self.lbl_esc_kpi_horas.grid(row=0, column=0, sticky="w")
@@ -18657,7 +18657,7 @@ class EscalaPage(PageBase):
         box_resumo.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         box_resumo.grid_columnconfigure(0, weight=1)
 
-        box_reco = ttk.LabelFrame(txt_row, text=" Recomendações ", padding=(10, 8))
+        box_reco = ttk.LabelFrame(txt_row, text=" Recomendacoes ", padding=(10, 8))
         box_reco.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
         box_reco.grid_columnconfigure(0, weight=1)
 
@@ -18822,7 +18822,7 @@ class EscalaPage(PageBase):
         cv.delete("all")
         data = list(getattr(self, "_esc_chart_data", []) or [])
         if not data:
-            cv.create_text(12, 12, anchor="nw", text="Sem dados para o perÃÂodo selecionado.", fill="#6B7280", font=("Segoe UI", 9))
+            cv.create_text(12, 12, anchor="nw", text="Sem dados para o periodo selecionado.", fill="#6B7280", font=("Segoe UI", 9))
             return
 
         w = max(cv.winfo_width(), 360)
@@ -19499,11 +19499,11 @@ class CentroCustosPage(PageBase):
         )
         self.cb_veiculo.grid(row=1, column=1, sticky="w", padx=(0, 10))
 
-        ttk.Button(filtros, text="ðŸ”„ ATUALIZAR", style="Ghost.TButton", command=self.refresh_data).grid(
+        ttk.Button(filtros, text="\U0001F504 ATUALIZAR", style="Ghost.TButton", command=self.refresh_data).grid(
             row=1, column=2, sticky="w", padx=(0, 6)
         )
 
-        ttk.Label(filtros, text="Métrica do gráfico", style="CardLabel.TLabel").grid(row=0, column=3, sticky="w")
+        ttk.Label(filtros, text="Metrica do grafico", style="CardLabel.TLabel").grid(row=0, column=3, sticky="w")
         self.var_chart_metric = tk.StringVar(value="CUSTO_KM")
         self.cb_chart_metric = ttk.Combobox(
             filtros,
@@ -19591,7 +19591,7 @@ class CentroCustosPage(PageBase):
             w = max(cv.winfo_width(), 10)
             h = max(cv.winfo_height(), 10)
             if (not labels) or (not values):
-                cv.create_text(w / 2, h / 2, text="Sem dados para gráfico", fill="#6B7280", font=("Segoe UI", 10))
+                cv.create_text(w / 2, h / 2, text="Sem dados para grafico", fill="#6B7280", font=("Segoe UI", 10))
                 return
 
             n = min(len(labels), len(values), 10)
@@ -19893,7 +19893,7 @@ class RelatoriosPage(PageBase):
         self.ent_filtro_data.grid(row=1, column=3, sticky="ew", padx=6)
         self._bind_date_mask_relatorio(self.ent_filtro_data)
 
-        ttk.Button(card, text="ðŸ”Ž BUSCAR", style="Primary.TButton", command=self._buscar_programacoes_relatorio).grid(
+        ttk.Button(card, text="\U0001F50D BUSCAR", style="Primary.TButton", command=self._buscar_programacoes_relatorio).grid(
             row=1, column=4, padx=6
         )
         ttk.Button(card, text="\U0001F9F9 LIMPAR", style="Ghost.TButton", command=self._limpar_filtros_relatorio).grid(
@@ -19916,14 +19916,14 @@ class RelatoriosPage(PageBase):
         ttk.Button(card, text="\U0001F441 PREVIEW", style="Ghost.TButton", command=self.abrir_previsualizacao_relatorio).grid(
             row=3, column=4, padx=6
         )
-        ttk.Button(card, text="ðŸ”„ ATUALIZAR", style="Ghost.TButton", command=self.refresh_comboboxes).grid(
+        ttk.Button(card, text="\U0001F504 ATUALIZAR", style="Ghost.TButton", command=self.refresh_comboboxes).grid(
             row=3, column=5, padx=6
         )
 
         ttk.Button(card, text="\U0001F3C1 FINALIZAR ROTA", style="Danger.TButton", command=self.finalizar_rota).grid(
             row=3, column=6, padx=6
         )
-        ttk.Button(card, text="ââ€ © REABRIR ROTA", style="Warn.TButton", command=self.reabrir_rota).grid(
+        ttk.Button(card, text="\u21A9 REABRIR ROTA", style="Warn.TButton", command=self.reabrir_rota).grid(
             row=3, column=7, padx=6
         )
 
@@ -19955,7 +19955,7 @@ class RelatoriosPage(PageBase):
         self.lbl_kpi_1.grid(row=0, column=0, sticky="w")
         self.lbl_kpi_2 = ttk.Label(dash, text="Total: R$ 0,00", style="CardLabel.TLabel")
         self.lbl_kpi_2.grid(row=0, column=1, sticky="w")
-        self.lbl_kpi_3 = ttk.Label(dash, text="Média: 0,00", style="CardLabel.TLabel")
+        self.lbl_kpi_3 = ttk.Label(dash, text="Media: 0,00", style="CardLabel.TLabel")
         self.lbl_kpi_3.grid(row=1, column=0, sticky="w")
         self.lbl_kpi_4 = ttk.Label(dash, text="Destaque: -", style="CardLabel.TLabel")
         self.lbl_kpi_4.grid(row=1, column=1, sticky="w")
@@ -21845,7 +21845,7 @@ class RelatoriosPage(PageBase):
         if not (require_pandas() and require_openpyxl()):
             return
         if not prog:
-            messagebox.showwarning("ATENÇÃO", "Selecione uma programação.")
+            messagebox.showwarning("ATENCAO", "Selecione uma programacao.")
             return
 
         path = filedialog.asksaveasfilename(
@@ -21944,7 +21944,7 @@ class RelatoriosPage(PageBase):
                 if hasattr(self, "app") and hasattr(self.app, "pages"):
                     despesas_page = self.app.pages.get("Despesas")
                 if not despesas_page or not hasattr(despesas_page, "imprimir_resumo"):
-                    messagebox.showerror("ERRO", "Tela de Despesas indisponÃÂvel para gerar PDF da prestação.")
+                    messagebox.showerror("ERRO", "Tela de Despesas indisponivel para gerar PDF da prestacao.")
                     return
 
                 prev_prog = getattr(despesas_page, "_current_programacao", "")
@@ -21952,7 +21952,7 @@ class RelatoriosPage(PageBase):
                 despesas_page.imprimir_resumo()
                 despesas_page._current_programacao = prev_prog
             except Exception as e:
-                messagebox.showerror("ERRO", f"Erro ao gerar PDF da prestação: {str(e)}")
+                messagebox.showerror("ERRO", f"Erro ao gerar PDF da prestacao: {str(e)}")
             return
 
         if (not is_mortalidade) and (not prog):
