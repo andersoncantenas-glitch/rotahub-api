@@ -1,7 +1,11 @@
 RotaHub Desktop - Historico de Versoes
 
+Versao 1.1.6
+- Bloqueio de downgrade: update nao instala versao remota menor/igual a local.
+- Comparacao manifesto x API: quando manifesto estiver atrasado, usa a maior versao detectada.
+- Ajustes de textos da Home/Menu para remover caracteres corrompidos.
+
 Versao 9.0.0
 - Estrutura de manifest/changelog para atualizacao automatica.
 - Painel "Informacoes do Sistema" com verificacao de atualizacoes.
 - Indicador de status da API na Home.
-

@@ -1,6 +1,6 @@
 {
-  "version": "1.1.4",
-  "setup_url": "https://github.com/andersoncantenas-glitch/rotahub-api/releases/download/v1.1.4/RotaHubDesktop_Setup_1.1.4.exe",
+  "version": "1.1.6",
+  "setup_url": "https://github.com/andersoncantenas-glitch/rotahub-api/releases/download/v1.1.6/RotaHubDesktop_Setup_1.1.6.exe",
   "changelog_url": "https://raw.githubusercontent.com/andersoncantenas-glitch/rotahub-api/main/updates/changelog.txt",
   "alert": "",
   "alerts": [

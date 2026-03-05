@@ -161,7 +161,7 @@ if is_desktop_api_sync_enabled() and not os.environ.get("ROTA_SECRET", "").strip
     )
 
 # Versao/update/suporte (customizavel via variaveis de ambiente no servidor/estacao)
-APP_VERSION = "1.1.5"
+APP_VERSION = "1.1.6"
 DEFAULT_UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/andersoncantenas-glitch/rotahub-api/main/updates/version.json"
 UPDATE_MANIFEST_URL = os.environ.get("ROTA_UPDATE_MANIFEST_URL", DEFAULT_UPDATE_MANIFEST_URL).strip()
 SETUP_DOWNLOAD_URL = os.environ.get("ROTA_SETUP_URL", "").strip()
@@ -3835,23 +3835,23 @@ class Sidebar(ttk.Frame):
         self.canvas.bind("<Configure>", _on_canvas_configure)
 
         # Itens do menu
-        self._add_btn("home", "ðÅ¸Â  Home", lambda: app.show_page("Home"))
-        self._add_btn("cadastros", "ðÅ¸â€œÅ¡ Cadastros", lambda: app.show_page("Cadastros"))
-        self._add_btn("rotas", "ðÅ¸â€”ºï¸Â Rotas", lambda: app.show_page("Rotas"))
-        self._add_btn("vendas", "ðÅ¸â€œ¥ Importar Vendas", lambda: app.show_page("ImportarVendas"))
-        self._add_btn("programacao", "ðÅ¸â€”â€œï¸Â Programacao", lambda: app.show_page("Programacao"))
-        self._add_btn("recebimentos", "ðÅ¸â€™µ Recebimentos", lambda: app.show_page("Recebimentos"))
-        self._add_btn("despesas", "ðÅ¸â€™¸ Despesas", lambda: app.show_page("Despesas"))
-        self._add_btn("escala", "ðÅ¸â€œÅ  Escala", lambda: app.show_page("Escala"))
-        self._add_btn("centro_custos", "ðÅ¸Å¡â€º Centro de Custos", lambda: app.show_page("CentroCustos"))
-        self._add_btn("relatorios", "ðÅ¸â€œâ€ž Relatorios", lambda: app.show_page("Relatorios"))
-        self._add_btn("backup", "ðÅ¸â€”â€žï¸Â Backup / Exportar", lambda: app.show_page("BackupExportar"))
+        self._add_btn("home", "Home", lambda: app.show_page("Home"))
+        self._add_btn("cadastros", "Cadastros", lambda: app.show_page("Cadastros"))
+        self._add_btn("rotas", "Rotas", lambda: app.show_page("Rotas"))
+        self._add_btn("vendas", "Importar Vendas", lambda: app.show_page("ImportarVendas"))
+        self._add_btn("programacao", "Programacao", lambda: app.show_page("Programacao"))
+        self._add_btn("recebimentos", "Recebimentos", lambda: app.show_page("Recebimentos"))
+        self._add_btn("despesas", "Despesas", lambda: app.show_page("Despesas"))
+        self._add_btn("escala", "Escala", lambda: app.show_page("Escala"))
+        self._add_btn("centro_custos", "Centro de Custos", lambda: app.show_page("CentroCustos"))
+        self._add_btn("relatorios", "Relatorios", lambda: app.show_page("Relatorios"))
+        self._add_btn("backup", "Backup / Exportar", lambda: app.show_page("BackupExportar"))
 
         # Rodapé
         bottom = ttk.Frame(self, style="Sidebar.TFrame", padding=(10, 12))
         bottom.pack(fill="x")
 
-        ttk.Button(bottom, text="âÂ» SAIR", style="Danger.TButton", command=self._safe_quit).pack(fill="x")
+        ttk.Button(bottom, text="SAIR", style="Danger.TButton", command=self._safe_quit).pack(fill="x")
 
     def _safe_quit(self):
         """Evita travas se houver janelas abertas/toplevels"""
@@ -4185,11 +4185,11 @@ class HomePage(PageBase):
         ttk.Label(
             card,
             text=(
-                "âââ€š¬¢ Cadastre Motoristas, VeÃÂÂculos, Equipes e Clientes.\n"
-                "âââ€š¬¢ Importe Vendas via Excel.\n"
-                "âââ€š¬¢ Gere Programações (códigos automáticos) e vincule pedidos/entregas.\n"
-                "âââ€š¬¢ Registre Recebimentos e Despesas.\n"
-                "âââ€š¬¢ Emita Relatórios e PDF.\n"
+                "- Cadastre Motoristas, Veiculos, Equipes e Clientes.\n"
+                "- Importe Vendas via Excel.\n"
+                "- Gere Programacoes (codigos automaticos) e vincule pedidos/entregas.\n"
+                "- Registre Recebimentos e Despesas.\n"
+                "- Emita Relatorios e PDF.\n"
             ),
             style="CardLabel.TLabel",
             justify="left"
@@ -4264,7 +4264,7 @@ class HomePage(PageBase):
 
         self.lbl_version_remote = ttk.Label(
             panel,
-            text="Versão disponÃÂvel: -",
+            text="Versao disponivel: -",
             background="white",
             foreground="#6B7280",
             font=("Segoe UI", 9),
@@ -4358,6 +4358,16 @@ class HomePage(PageBase):
             subprocess.Popen([setup_path], shell=False)
 
     def _update_now(self):
+        local_v = self._version_tuple(APP_VERSION)
+        remote_v = self._version_tuple(self._remote_version)
+        if remote_v <= local_v:
+            messagebox.showinfo(
+                "Atualização",
+                f"Versão local ({APP_VERSION}) já é igual ou superior à remota ({self._remote_version or '-'}).\n"
+                "Nenhum download será executado.",
+            )
+            return
+
         url = self._remote_setup_url or SETUP_DOWNLOAD_URL
         if not url:
             messagebox.showwarning(
@@ -4542,9 +4552,12 @@ class HomePage(PageBase):
         local_v = self._version_tuple(APP_VERSION)
         remote_v = self._version_tuple(remote_version)
         is_candidate = (remote_v > local_v) and self._is_same_release_line(local_v, remote_v)
+        if remote_v <= local_v:
+            # Evita instalar downgrade quando manifesto remoto estiver atrasado.
+            self._remote_setup_url = ""
         remote_display = remote_version if remote_version != "-" else "-"
 
-        self.lbl_version_remote.config(text=f"Versão disponÃÂvel: {remote_display}")
+        self.lbl_version_remote.config(text=f"Versao disponivel: {remote_display}")
         self.lbl_alerts.config(text=alert_txt or "Sem alertas.")
 
         if is_candidate:
@@ -4554,6 +4567,14 @@ class HomePage(PageBase):
 
     def _check_updates(self, silent=False):
         try:
+            def _fetch_api_version() -> str:
+                req = urllib.request.Request(_build_api_url("openapi.json"), method="GET")
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    data = resp.read().decode("utf-8", errors="replace")
+                openapi = json.loads(data)
+                info = openapi.get("info") if isinstance(openapi, dict) else {}
+                return str((info or {}).get("version") or "").strip()
+
             manifest = None
             if UPDATE_MANIFEST_URL:
                 req = urllib.request.Request(UPDATE_MANIFEST_URL, method="GET")
@@ -4564,12 +4585,7 @@ class HomePage(PageBase):
                     manifest = loaded
 
             if manifest is None:
-                req = urllib.request.Request(_build_api_url("openapi.json"), method="GET")
-                with urllib.request.urlopen(req, timeout=8) as resp:
-                    data = resp.read().decode("utf-8", errors="replace")
-                openapi = json.loads(data)
-                info = openapi.get("info") if isinstance(openapi, dict) else {}
-                api_version = str((info or {}).get("version") or "").strip()
+                api_version = _fetch_api_version()
                 if not api_version:
                     raise ValueError("Nao foi possivel obter versao remota (manifesto e API).")
                 manifest = {
@@ -4582,6 +4598,23 @@ class HomePage(PageBase):
                         "Publique updates/version.json para habilitar update automatizado completo.",
                     ],
                 }
+            else:
+                # Manifesto pode ficar atrasado no GitHub/Render.
+                # Compara com a versao da API e usa a maior para evitar downgrade.
+                try:
+                    api_version = _fetch_api_version()
+                except Exception:
+                    api_version = ""
+                if api_version and self._version_tuple(api_version) > self._version_tuple(str(manifest.get("version") or "")):
+                    alerts = manifest.get("alerts")
+                    if not isinstance(alerts, list):
+                        alerts = []
+                    alerts.append(
+                        "Manifesto de update esta atrasado. Usando versao detectada na API."
+                    )
+                    manifest["version"] = api_version
+                    manifest["setup_url"] = ""
+                    manifest["alerts"] = alerts
 
             self._apply_manifest(manifest)
 
@@ -22489,5 +22522,3 @@ if __name__ == "__main__":
 # ==========================
 # ===== FIM DA PARTE 10 (ATUALIZADA) =====
 # ==========================
-
-
