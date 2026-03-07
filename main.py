@@ -88,11 +88,22 @@ os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
 
 def is_desktop_api_sync_enabled() -> bool:
     """Controla sincronizacao automatica Desktop <-> API central.
-    Padrao: ligado, para manter vinculo continuo entre estacoes e app mobile.
-    Para testes locais isolados, desative explicitamente com ROTA_DESKTOP_SYNC_API=0.
+    O runtime define o valor padrao por ambiente; a variavel de ambiente
+    serve apenas como override explicito do processo atual.
     """
-    raw = str(os.environ.get("ROTA_DESKTOP_SYNC_API", "1") or "").strip().lower()
+    raw = str(os.environ.get("ROTA_DESKTOP_SYNC_API", "1" if ENABLE_API_SYNC else "0") or "").strip().lower()
     return raw in {"1", "true", "yes", "y", "sim", "on"}
+
+
+def can_read_from_api() -> bool:
+    """Permite leitura remota apenas quando o runtime libera a origem central."""
+    if not is_desktop_api_sync_enabled():
+        return False
+    raw = str(os.environ.get("ROTA_ALLOW_REMOTE_READ", "1" if ALLOW_REMOTE_READ else "0") or "").strip().lower()
+    if raw not in {"1", "true", "yes", "y", "sim", "on"}:
+        return False
+    source = str(os.environ.get("ROTA_SOURCE_OF_TRUTH", SOURCE_OF_TRUTH or "") or "").strip().lower()
+    return source in {"api-central", "server", "remote", "hybrid", "api"}
 
 
 _API_BINDING_CACHE = {"ok": False, "checked_at": 0.0, "error": ""}
@@ -2410,7 +2421,7 @@ class CadastroCRUD(ttk.Frame):
 
         # Prioriza API central quando sincronizacao estiver ativa.
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-        if desktop_secret and is_desktop_api_sync_enabled():
+        if desktop_secret and can_read_from_api():
             try:
                 rows = _call_api(
                     "GET",
@@ -2966,7 +2977,7 @@ class CadastroCRUD(ttk.Frame):
 
     def carregar(self):
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-        if desktop_secret and is_desktop_api_sync_enabled():
+        if desktop_secret and can_read_from_api():
             try:
                 api_rows = None
                 if self.table == "motoristas":
@@ -5002,7 +5013,7 @@ class HomePage(PageBase):
         self.lbl_api_status.pack(anchor="e")
 
     def _update_api_status(self):
-        if not is_desktop_api_sync_enabled():
+        if not can_read_from_api():
             self.lbl_api_status.config(text=f"API: LOCAL ONLY ({APP_ENV})", bg="#DBEAFE", fg="#1D4ED8")
             if self._api_job:
                 try:
@@ -5032,7 +5043,7 @@ class HomePage(PageBase):
                 except Exception:
                     api_host = API_BASE_URL
 
-        if online and is_desktop_api_sync_enabled():
+        if online and can_read_from_api():
             desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
             if desktop_secret:
                 try:
@@ -5114,7 +5125,7 @@ class HomePage(PageBase):
 
     def _home_api_rows(self):
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-        if not desktop_secret or not is_desktop_api_sync_enabled():
+        if not desktop_secret or not can_read_from_api():
             return []
         try:
             resp = _call_api(
@@ -5149,7 +5160,7 @@ class HomePage(PageBase):
 
     def _home_api_overview(self):
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-        if not desktop_secret or not is_desktop_api_sync_enabled():
+        if not desktop_secret or not can_read_from_api():
             return None
         try:
             resp = _call_api(
@@ -6804,7 +6815,7 @@ class RotasPage(PageBase):
         self._last_error = ""
 
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-        if desktop_secret and is_desktop_api_sync_enabled():
+        if desktop_secret and can_read_from_api():
             try:
                 resp = _call_api(
                     "GET",
@@ -7563,7 +7574,7 @@ def fetch_programacoes_ativas(limit: int = 400):
     SaÃÂÂda: lista de dicts: {codigo, motorista, veiculo, equipe, data_criacao, status}
     """
     desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-    if desktop_secret and is_desktop_api_sync_enabled():
+    if desktop_secret and can_read_from_api():
         try:
             resp = _call_api(
                 "GET",
@@ -10023,7 +10034,7 @@ class ProgramacaoPage(PageBase):
 
     def refresh_comboboxes(self):
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-        if desktop_secret and is_desktop_api_sync_enabled():
+        if desktop_secret and can_read_from_api():
             try:
                 mot_resp = _call_api("GET", "desktop/cadastros/motoristas", extra_headers={"X-Desktop-Secret": desktop_secret})
                 vei_resp = _call_api("GET", "desktop/cadastros/veiculos", extra_headers={"X-Desktop-Secret": desktop_secret})
@@ -19929,7 +19940,7 @@ class EscalaPage(PageBase):
 
         rows = []
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-        if desktop_secret and is_desktop_api_sync_enabled():
+        if desktop_secret and can_read_from_api():
             try:
                 resp = _call_api(
                     "GET",

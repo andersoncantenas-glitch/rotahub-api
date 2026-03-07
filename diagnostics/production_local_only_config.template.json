@@ -1,0 +1,39 @@
+{
+  "app_env": "production",
+  "tenant": {
+    "tenant_id": "default-company",
+    "company_id": "default-company"
+  },
+  "runtime": {
+    "data_root": "C:\\Users\\fisca\\AppData\\Local\\RotaHubDesktop",
+    "db_path": "C:\\rotahub\\rota_granja_zero.db",
+    "sync_enabled": false,
+    "sql_mirror_api": false,
+    "require_server_binding": false,
+    "allow_remote_write": false,
+    "allow_remote_read": false,
+    "allow_seed_db": false,
+    "allow_version_update": true,
+    "tenant_mode": "database-per-tenant",
+    "source_of_truth": "sqlite-local",
+    "schema_version": 1,
+    "desktop_secret": ""
+  },
+  "api": {
+    "base_url": "https://rotahub-api.onrender.com",
+    "timeout": 60.0
+  },
+  "update": {
+    "channel": "stable",
+    "manifest_url": "https://raw.githubusercontent.com/andersoncantenas-glitch/rotahub-api/main/updates/version.json",
+    "setup_url": "https://github.com/andersoncantenas-glitch/rotahub-api/releases/latest",
+    "changelog_url": "https://raw.githubusercontent.com/andersoncantenas-glitch/rotahub-api/main/updates/changelog.txt"
+  },
+  "logging": {
+    "level": "INFO"
+  },
+  "support": {
+    "whatsapp": "",
+    "email": ""
+  }
+}
