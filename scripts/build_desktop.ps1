@@ -1,5 +1,5 @@
 param(
-    [string]$AppVersion = "1.0.0"
+    [string]$AppVersion = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -8,6 +8,18 @@ $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $root
 
 Write-Host "==> Projeto: $root"
+
+if ([string]::IsNullOrWhiteSpace($AppVersion)) {
+    $versionPy = Join-Path $root "version.py"
+    if (-not (Test-Path $versionPy)) {
+        throw "Arquivo version.py nao encontrado em $versionPy"
+    }
+    $match = Select-String -Path $versionPy -Pattern 'APP_VERSION\s*=\s*"(\d+\.\d+\.\d+)"' | Select-Object -First 1
+    if (-not $match) {
+        throw "Nao foi possivel identificar APP_VERSION em version.py"
+    }
+    $AppVersion = $match.Matches[0].Groups[1].Value
+}
 
 if (-not (Test-Path ".venv")) {
     Write-Host "==> Criando .venv"
@@ -72,5 +84,6 @@ Write-Host "==> Gerando EXE (PyInstaller)"
   main.py
 
 Write-Host "==> Build concluido em: dist\RotaHubDesktop\RotaHubDesktop.exe"
-Write-Host "==> Versao informada: $AppVersion"
+Write-Host "==> Versao do codigo-fonte: $AppVersion"
 Write-Host "==> Proximo passo: gerar instalador com Inno Setup (installer\rotahub.iss)"
+Write-Host "==> Gere o setup somente apos este build, para evitar empacotar um dist antigo."

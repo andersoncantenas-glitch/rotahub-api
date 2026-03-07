@@ -361,7 +361,11 @@ def main() -> int:
         else "Render: render.yaml nao encontrado; revise a configuracao de deploy."
     )
     installer_status = (
-        f"Inno Setup pronto: abra installer/rotahub.iss e gere dist_installer/RotaHubDesktop_Setup_{new_version}.exe."
+        (
+            f"Inno Setup pronto: primeiro rode "
+            f"'powershell -ExecutionPolicy Bypass -File .\\scripts\\build_desktop.ps1', "
+            f"depois gere dist_installer/RotaHubDesktop_Setup_{new_version}.exe em installer/rotahub.iss."
+        )
         if INSTALLER_ISS.exists()
         else "Inno Setup: installer/rotahub.iss nao encontrado."
     )
