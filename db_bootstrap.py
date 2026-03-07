@@ -10,6 +10,7 @@ from typing import Dict
 
 
 PBKDF2_ITERATIONS = 200_000
+DEFAULT_ADMIN_PASSWORD = "123456"
 OPERATIONAL_TABLES = [
     "motoristas",
     "veiculos",
@@ -296,9 +297,9 @@ def ensure_admin_user(conn: sqlite3.Connection, password: str | None = None) -> 
     cur = conn.cursor()
     cur.execute("SELECT id, COALESCE(senha, '') FROM usuarios WHERE UPPER(COALESCE(nome,''))='ADMIN' LIMIT 1")
     row = cur.fetchone()
-    admin_password = (password or os.environ.get("ROTA_ADMIN_PASS") or os.environ.get("ROTA_ADMIN_PASSWORD") or "").strip()
+    admin_password = (password or os.environ.get("ROTA_ADMIN_PASS") or os.environ.get("ROTA_ADMIN_PASSWORD") or DEFAULT_ADMIN_PASSWORD).strip()
     if not admin_password:
-        admin_password = secrets.token_urlsafe(8)
+        admin_password = DEFAULT_ADMIN_PASSWORD
     if row is None:
         cur.execute(
             "INSERT INTO usuarios (nome, permissoes, codigo, senha) VALUES (?, ?, ?, ?)",

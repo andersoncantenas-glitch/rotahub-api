@@ -1484,10 +1484,10 @@ def ensure_admin_user():
             senha_plana = (
                 os.environ.get("ROTA_ADMIN_PASS")
                 or os.environ.get("ROTA_ADMIN_PASSWORD")
-                or ""
+                or "123456"
             ).strip()
             if not senha_plana:
-                senha_plana = secrets.token_urlsafe(8)
+                senha_plana = "123456"
             senha_hash = hash_password_pbkdf2(senha_plana)
 
             if has_permissoes:
