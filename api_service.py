@@ -16,7 +16,7 @@ PROXY_METHODS: List[str] = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", 
 
 app = FastAPI(
     title="Rota Granja API (shim)",
-    version="2.0.0",
+    version="2.0.1",
     description=f"Proxy temporário para {TARGET_SERVER}",
 )
 
