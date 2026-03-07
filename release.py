@@ -21,6 +21,7 @@ MANIFEST_JSON = ROOT / "updates" / "version.json"
 CHANGELOG_TXT = ROOT / "updates" / "changelog.txt"
 INSTALLER_ISS = ROOT / "installer" / "rotahub.iss"
 RENDER_YAML = ROOT / "render.yaml"
+DIST_EXE = ROOT / "dist" / "RotaHubDesktop" / "RotaHubDesktop.exe"
 
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 VERSION_PY_RE = re.compile(r'^(?P<prefix>\s*APP_VERSION\s*=\s*")(?P<ver>\d+\.\d+\.\d+)(".*)$', re.M)
@@ -48,6 +49,7 @@ class ReleaseSummary:
     git_push_status: str
     render_status: str
     installer_status: str
+    dist_status: str
     mismatches: list[str]
     branch: str
     dry_run: bool
@@ -301,6 +303,38 @@ def changed_files_from_state(before: dict[Path, str], after: dict[Path, str]) ->
     return changed
 
 
+def restore_file_state(state: dict[Path, str]) -> None:
+    for path, content in state.items():
+        if content == "":
+            if path.exists():
+                path.unlink()
+            continue
+        write_text(path, content)
+
+
+def dist_freshness_status(reference_files: Iterable[Path]) -> str:
+    if not DIST_EXE.exists():
+        return (
+            "ATENCAO: dist\\RotaHubDesktop\\RotaHubDesktop.exe nao existe. "
+            "Rode powershell -ExecutionPolicy Bypass -File .\\scripts\\build_desktop.ps1 antes do Inno Setup."
+        )
+
+    exe_mtime = DIST_EXE.stat().st_mtime
+    newer_refs: list[str] = []
+    for path in reference_files:
+        if path.exists() and path.stat().st_mtime > exe_mtime:
+            newer_refs.append(str(path.relative_to(ROOT)).replace("\\", "/"))
+
+    if newer_refs:
+        return (
+            "ATENCAO: o dist atual esta desatualizado em relacao a: "
+            + ", ".join(newer_refs)
+            + ". Rode powershell -ExecutionPolicy Bypass -File .\\scripts\\build_desktop.ps1 antes do Inno Setup."
+        )
+
+    return "OK: dist atual parece alinhado com os arquivos de release."
+
+
 def git_commit_and_push(new_version: str, dry_run: bool) -> str:
     commit_msg = f"release: versão {new_version}"
     branch = current_branch()
@@ -369,6 +403,7 @@ def main() -> int:
         if INSTALLER_ISS.exists()
         else "Inno Setup: installer/rotahub.iss nao encontrado."
     )
+    dist_status = dist_freshness_status([VERSION_PY, MANIFEST_JSON, INSTALLER_ISS, API_SERVICE, CHANGELOG_TXT])
 
     summary = ReleaseSummary(
         previous_version=previous_version,
@@ -378,10 +413,14 @@ def main() -> int:
         git_push_status=push_status,
         render_status=render_status,
         installer_status=installer_status,
+        dist_status=dist_status,
         mismatches=mismatches,
         branch=current_branch(),
         dry_run=args.dry_run,
     )
+
+    if args.dry_run:
+        restore_file_state(before)
 
     print(f"Versao anterior: {summary.previous_version}")
     print(f"Nova versao: {summary.new_version}")
@@ -396,6 +435,7 @@ def main() -> int:
     print(f"Status do git push: {summary.git_push_status}")
     print("Instrucoes finais:")
     print(f"- Render: {summary.render_status}")
+    print(f"- Dist: {summary.dist_status}")
     print(f"- Inno Setup: {summary.installer_status}")
     print(f"- Branch atual: {summary.branch}")
     if summary.dry_run:
