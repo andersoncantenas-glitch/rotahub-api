@@ -18,17 +18,23 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 from version import APP_VERSION
+from db_bootstrap import ensure_admin_user as ensure_admin_user_bootstrap, ensure_core_schema
+from database_runtime import log_startup_diagnostics
+from runtime_config import apply_process_environment, ensure_runtime_files, load_app_config
 
 
 # =========================================================
 # CONFIG
 # =========================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+APP_CONFIG = load_app_config("server")
+apply_process_environment(APP_CONFIG)
+ensure_runtime_files(APP_CONFIG)
 
 # âœ… Prioridade:
 # 1) variável de ambiente ROTA_DB
 # 2) rota_granja.db na pasta do projeto
-DB_PATH = os.environ.get("ROTA_DB") or os.path.join(BASE_DIR, "rota_granja.db")
+DB_PATH = APP_CONFIG.db_path
 
 SECRET_KEY = os.environ.get("ROTA_SECRET")
 if not SECRET_KEY:
@@ -72,8 +78,7 @@ security = HTTPBearer()
 # =========================================================
 @contextmanager
 def get_conn() -> Iterator[sqlite3.Connection]:
-    if not os.path.exists(DB_PATH):
-        raise RuntimeError(f"Banco nao encontrado em: {DB_PATH}")
+    os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     try:
         conn.execute("PRAGMA foreign_keys = ON")
@@ -671,6 +676,7 @@ def ensure_tables():
     """
     with get_conn() as conn:
         cur = conn.cursor()
+        ensure_core_schema(conn)
 
         # Controle por cliente (mortalidade/recebimento futuro etc.)
         cur.execute("""
@@ -1408,6 +1414,13 @@ def reconcile_programacoes_motorista_links() -> int:
 @app.on_event("startup")
 def _startup():
     ensure_tables()
+    with sqlite3.connect(DB_PATH) as admin_conn:
+        ensure_admin_user_bootstrap(
+            admin_conn,
+            os.environ.get("ROTA_ADMIN_PASS") or os.environ.get("ROTA_ADMIN_PASSWORD"),
+        )
+    logging.info("Banco publicado inicializado | env=%s | db=%s | admin=%s", APP_CONFIG.app_env, DB_PATH, "configured" if os.environ.get("ROTA_ADMIN_PASS") or os.environ.get("ROTA_ADMIN_PASSWORD") else "generated")
+    log_startup_diagnostics(DB_PATH, APP_CONFIG)
     try:
         fixed = reconcile_transferencias_status()
         logging.info("Reconciliacao de transferencias concluida. Itens ajustados: %s", fixed)

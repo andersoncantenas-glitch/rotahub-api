@@ -7,9 +7,14 @@
   "runtime": {
     "data_root": "C:\\rotahub_server_data",
     "db_path": "C:\\rotahub_server_data\\server\\production\\empresa-001\\rotahub_server.db",
-    "sync_enabled": true,
+    "sync_enabled": false,
     "sql_mirror_api": false,
-    "require_server_binding": false
+    "require_server_binding": false,
+    "allow_remote_write": false,
+    "allow_remote_read": false,
+    "allow_dev_data_upload": false,
+    "allow_seed_db": false,
+    "source_of_truth": "sqlite-local"
   },
   "api": {
     "base_url": "https://rotahub-api.onrender.com",

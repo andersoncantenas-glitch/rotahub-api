@@ -6,10 +6,15 @@
   },
   "runtime": {
     "data_root": "C:\\Users\\Public\\RotaHubDesktop",
-    "db_path": "C:\\Users\\Public\\RotaHubDesktop\\desktop\\staging\\empresa-homolog\\rota_granja.db",
+    "db_path": "C:\\Users\\Public\\RotaHubDesktop\\desktop\\staging\\empresa-homolog\\rotahub_desktop.db",
     "sync_enabled": true,
     "sql_mirror_api": true,
     "require_server_binding": true,
+    "allow_remote_write": true,
+    "allow_remote_read": true,
+    "allow_dev_data_upload": false,
+    "allow_seed_db": false,
+    "source_of_truth": "api-central",
     "desktop_secret": "defina-aqui"
   },
   "api": {

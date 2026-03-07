@@ -167,12 +167,13 @@ def log_startup_diagnostics(db_path: str, config: AppConfig) -> Dict[str, int]:
     counts = count_core_tables(db_path)
     logging.log(
         getattr(logging, str(config.log_level or "INFO").upper(), logging.INFO),
-        "Startup diagnostics | env=%s | db=%s | api=%s | sync=%s | sql_mirror=%s | channel=%s | tenant=%s | company=%s | persistence=%s | source=%s | version=%s | schema=%s | secret=%s | counts=%s",
+        "Startup diagnostics | env=%s | db=%s | api=%s | sync=%s | sql_mirror=%s | allow_dev_upload=%s | channel=%s | tenant=%s | company=%s | persistence=%s | source=%s | version=%s | schema=%s | secret=%s | counts=%s",
         config.app_env,
         os.path.abspath(db_path),
         config.api_base_url,
         config.sync_enabled,
         config.sql_mirror_api,
+        config.allow_dev_data_upload,
         config.update_channel,
         config.tenant_id,
         config.company_id,
@@ -190,6 +191,9 @@ def log_startup_diagnostics(db_path: str, config: AppConfig) -> Dict[str, int]:
 
 def enqueue_sql_statements(db_path: str, config: AppConfig, statements: List[Dict[str, object]], endpoint: str = "desktop/sql/mutate") -> None:
     if not statements:
+        return
+    if config.app_env == "development" and not config.allow_dev_data_upload:
+        logging.info("Ignorando enqueue remoto em development para preservar isolamento local.")
         return
     ensure_runtime_schema(db_path, config)
     conn = sqlite3.connect(db_path)
@@ -225,6 +229,8 @@ def process_sync_queue(
     max_attempts: int = 5,
 ) -> Dict[str, int]:
     result = {"sent": 0, "failed": 0, "dead_letter": 0}
+    if config.app_env == "development" and not config.allow_dev_data_upload:
+        return result
     if not config.sync_enabled or not config.sql_mirror_api or not config.allow_remote_write:
         return result
     if not config.desktop_secret:

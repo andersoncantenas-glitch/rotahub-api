@@ -7,6 +7,7 @@ __pycache__/
 *.db-wal
 *.db-shm
 *.sqlite
+*.sqlite3
 backup/
 certificados/
 .env
@@ -38,4 +39,8 @@ restore_main.py
 
 # Diagnostics snapshots
 diagnostics/*
-!diagnostics/production_local_only_config.template.json
+
+# Runtime persistence by environment
+.rotahub_runtime/
+cache/
+tmp/

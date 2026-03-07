@@ -10,6 +10,9 @@
     "sync_enabled": false,
     "sql_mirror_api": false,
     "require_server_binding": false,
+    "allow_remote_write": false,
+    "allow_remote_read": false,
+    "allow_dev_data_upload": false,
     "desktop_secret": ""
   },
   "api": {

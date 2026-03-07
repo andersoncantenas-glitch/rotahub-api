@@ -8,7 +8,12 @@
   "runtime": {
     "sync_enabled": true,
     "sql_mirror_api": true,
-    "require_server_binding": true
+    "require_server_binding": true,
+    "allow_remote_write": true,
+    "allow_remote_read": true,
+    "allow_dev_data_upload": false,
+    "allow_seed_db": false,
+    "source_of_truth": "api-central"
   },
   "api": {
     "base_url": "https://rotahub-api.onrender.com",
