@@ -1,9 +1,9 @@
 {
-  "version": "3.1.0",
-  "setup_url": "https://github.com/andersoncantenas-glitch/rotahub-api/releases/download/v3.1.0/RotaHubDesktop_Setup_3.1.0.exe",
+  "version": "4.0.0",
+  "setup_url": "https://github.com/andersoncantenas-glitch/rotahub-api/releases/download/v4.0.0/RotaHubDesktop_Setup_4.0.0.exe",
   "changelog_url": "https://raw.githubusercontent.com/andersoncantenas-glitch/rotahub-api/main/updates/changelog.txt",
-  "release_kind": "minor",
-  "released_at": "2026-03-07 09:11:57",
+  "release_kind": "major",
+  "released_at": "2026-03-07 09:12:14",
   "alert": "",
   "alerts": [
     "Melhorias no desempenho."

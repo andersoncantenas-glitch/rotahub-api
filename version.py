@@ -1,2 +1,2 @@
-APP_VERSION = "3.1.0"
+APP_VERSION = "4.0.0"
 __version__ = APP_VERSION
