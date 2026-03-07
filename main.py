@@ -2132,21 +2132,13 @@ def apply_style(root):
     )
     style.map("Treeview", background=[("selected", "#DDE7FF")], foreground=[("selected", TEXT)])
 
-    # Ajustes finais de padronizacao visual
+    # Ajustes finais de padronizacao visual com acabamento mais liso.
     style.configure(".", background=BG, foreground=TEXT)
     style.configure("TFrame", background=BG)
     style.configure("TLabel", background=BG, foreground=TEXT)
     style.configure("Content.TFrame", background=BG)
-    style.configure(
-        "Card.TFrame",
-        background=CARD,
-        relief="solid",
-        borderwidth=1,
-        bordercolor="#CBD5E1",
-        lightcolor="#CBD5E1",
-        darkcolor="#CBD5E1",
-    )
-    style.configure("CardInset.TFrame", background=CARD, relief="flat", borderwidth=0)
+    style.configure("Card.TFrame", background=CARD, relief="flat", borderwidth=0)
+    style.configure("CardInset.TFrame", background="#F5F8FE", relief="flat", borderwidth=0)
     style.configure("CardTitle.TLabel", background=CARD, foreground=TEXT, font=("Segoe UI Semibold", 16))
     style.configure("CardLabel.TLabel", background=CARD, foreground=MUTED, font=("Segoe UI Semibold", 9))
     style.configure("SidebarLogo.TLabel", background=PRIMARY, foreground="white", font=("Segoe UI Semibold", 17))
@@ -2154,16 +2146,17 @@ def apply_style(root):
     style.configure("Subtitle.TLabel", background=BG, foreground=MUTED, font=("Segoe UI", 10))
     style.configure("Value.TLabel", background=CARD, foreground=TEXT, font=("Segoe UI", 10))
     style.configure("TCombobox", padding=(8, 6))
-    style.configure("Side.TButton", font=("Segoe UI Semibold", 10), padding=(16, 12))
-    style.configure("SideActive.TButton", font=("Segoe UI Semibold", 10), padding=(16, 12))
-    style.configure("SideSub.TButton", font=("Segoe UI Semibold", 8), padding=(14, 8))
-    style.configure("SideSubActive.TButton", font=("Segoe UI Semibold", 8), padding=(14, 8))
-    style.configure("Primary.TButton", font=("Segoe UI Semibold", 10), padding=(16, 11), borderwidth=1)
-    style.configure("Ghost.TButton", font=("Segoe UI Semibold", 10), padding=(16, 11), borderwidth=1)
-    style.configure("Warn.TButton", foreground="white", font=("Segoe UI Semibold", 10), padding=(16, 11), borderwidth=1)
-    style.configure("Danger.TButton", font=("Segoe UI Semibold", 10), padding=(16, 11), borderwidth=1)
+    style.configure("Side.TButton", font=("Segoe UI Semibold", 10), padding=(16, 12), borderwidth=0)
+    style.configure("SideActive.TButton", font=("Segoe UI Semibold", 10), padding=(16, 12), borderwidth=0)
+    style.configure("SideSub.TButton", font=("Segoe UI Semibold", 8), padding=(14, 8), borderwidth=0)
+    style.configure("SideSubActive.TButton", font=("Segoe UI Semibold", 8), padding=(14, 8), borderwidth=0)
+    style.configure("Primary.TButton", font=("Segoe UI Semibold", 10), padding=(16, 11), borderwidth=0)
+    style.configure("Ghost.TButton", font=("Segoe UI Semibold", 10), padding=(16, 11), borderwidth=0)
+    style.configure("CompactGhost.TButton", font=("Segoe UI Semibold", 9), padding=(8, 6), borderwidth=0)
+    style.configure("Warn.TButton", foreground="white", font=("Segoe UI Semibold", 10), padding=(16, 11), borderwidth=0)
+    style.configure("Danger.TButton", font=("Segoe UI Semibold", 10), padding=(16, 11), borderwidth=0)
     style.configure("TNotebook", background=BG, borderwidth=0, tabmargins=(0, 0, 0, 0))
-    style.configure("TNotebook.Tab", background=GHOST, foreground=TEXT, padding=(16, 8), font=("Segoe UI Semibold", 9))
+    style.configure("TNotebook.Tab", background=GHOST, foreground=TEXT, padding=(16, 8), font=("Segoe UI Semibold", 9), borderwidth=0)
     style.map("TNotebook.Tab", background=[("selected", CARD), ("active", GHOST_HOVER)])
     style.configure(
         "Treeview",
@@ -2171,19 +2164,19 @@ def apply_style(root):
         foreground=TEXT,
         fieldbackground="white",
         rowheight=30,
-        bordercolor="#94A3B8",
-        lightcolor="#94A3B8",
-        darkcolor="#94A3B8",
-        borderwidth=1,
-        relief="solid",
+        bordercolor="#D7E2F1",
+        lightcolor="#D7E2F1",
+        darkcolor="#D7E2F1",
+        borderwidth=0,
+        relief="flat",
         font=("Segoe UI", 9),
     )
     style.configure(
         "Treeview.Heading",
-        background="#E8EEF7",
+        background="#EAF2FF",
         foreground=TEXT,
-        relief="solid",
-        borderwidth=1,
+        relief="flat",
+        borderwidth=0,
         font=("Segoe UI Semibold", 9),
         padding=(10, 8),
     )
@@ -9014,7 +9007,6 @@ class ProgramacaoPage(PageBase):
         # -------------------------
         card = ttk.Frame(self.body, style="Card.TFrame", padding=14)
         card.grid(row=0, column=0, sticky="ew")
-        # Distribui o espa?o entre os campos para evitar "sumir" o ?ltimo campo (C?digo)
         for col in range(0, 9):
             card.grid_columnconfigure(col, weight=1, uniform="prog_head")
 
@@ -9084,7 +9076,6 @@ class ProgramacaoPage(PageBase):
         self.ent_carregamento_prog = ttk.Entry(card, style="Field.TEntry", width=12)
         self.ent_carregamento_prog.grid(row=1, column=6, sticky="ew", padx=6)
         bind_entry_smart(self.ent_carregamento_prog, "text")
-
         ttk.Label(card, text="Adiantamento (R$)", style="CardLabel.TLabel").grid(row=0, column=7, sticky="w")
         self.ent_adiantamento_prog = ttk.Entry(card, style="Field.TEntry", width=12)
         self.ent_adiantamento_prog.grid(row=1, column=7, sticky="ew", padx=6)
@@ -9860,7 +9851,7 @@ class ProgramacaoPage(PageBase):
             self.btn_ajudantes.configure(text="\U0001F465 Selecionar ajudantes")
             self.lbl_ajudantes_sel.configure(text="Nenhum selecionado")
             return
-        self.btn_ajudantes.configure(text=f"{qtd} selecionado(s)")
+        self.btn_ajudantes.configure(text="\U0001F465 Selecionar ajudantes")
         self.lbl_ajudantes_sel.configure(text=" | ".join(labels[:2]) if qtd <= 2 else f"{qtd} selecionados")
 
     def _get_filtered_ajudantes_rows(self):
