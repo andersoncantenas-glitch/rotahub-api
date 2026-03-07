@@ -1,3 +1,8 @@
+2026-03-07 08:42:33 - v3.0.0
+- Release automatizada (major).
+- Versao anterior: v2.1.0.
+- Preparacao de deploy no Render e setup para Inno Setup.
+
 2026-03-07 08:42:30 - v2.1.0
 - Release automatizada (minor).
 - Versao anterior: v2.0.1.
