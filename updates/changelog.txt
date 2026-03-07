@@ -1,3 +1,8 @@
+2026-03-07 09:12:28 - v4.0.1
+- Release automatizada (patch).
+- Versao anterior: v4.0.0.
+- Preparacao de deploy no Render e setup para Inno Setup.
+
 2026-03-07 09:12:14 - v4.0.0
 - Release automatizada (major).
 - Versao anterior: v3.1.0.
