@@ -1,0 +1,26 @@
+{
+  "app_env": "staging",
+  "app_title": "ROTAHUB DESKTOP",
+  "tenant": {
+    "tenant_id": "staging-default",
+    "company_id": "staging-default"
+  },
+  "runtime": {
+    "sync_enabled": true,
+    "sql_mirror_api": true,
+    "require_server_binding": true
+  },
+  "api": {
+    "base_url": "https://staging.rotahub-api.example.com",
+    "timeout": 60
+  },
+  "update": {
+    "manifest_url": "https://staging.rotahub-api.example.com/updates/version.json",
+    "setup_url": "",
+    "changelog_url": ""
+  },
+  "support": {
+    "whatsapp": "",
+    "email": ""
+  }
+}

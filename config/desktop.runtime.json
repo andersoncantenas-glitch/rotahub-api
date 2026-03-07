@@ -1,0 +1,28 @@
+{
+  "app_env": "development",
+  "tenant": {
+    "tenant_id": "dev-local",
+    "company_id": "dev-local"
+  },
+  "runtime": {
+    "data_root": "C:\\pdc_rota\\.rotahub_runtime",
+    "db_path": "C:\\pdc_rota\\.rotahub_runtime\\desktop\\development\\dev-local\\rota_granja.db",
+    "sync_enabled": false,
+    "sql_mirror_api": false,
+    "require_server_binding": false,
+    "desktop_secret": ""
+  },
+  "api": {
+    "base_url": "http://127.0.0.1:8000",
+    "timeout": 60.0
+  },
+  "update": {
+    "manifest_url": "https://raw.githubusercontent.com/andersoncantenas-glitch/rotahub-api/main/updates/version.json",
+    "setup_url": "https://github.com/andersoncantenas-glitch/rotahub-api/releases/latest",
+    "changelog_url": "https://raw.githubusercontent.com/andersoncantenas-glitch/rotahub-api/main/updates/changelog.txt"
+  },
+  "support": {
+    "whatsapp": "",
+    "email": ""
+  }
+}

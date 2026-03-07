@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('assets', 'assets'), ('certificados', 'certificados'), ('rota_granja.db', '.')]
+datas = [('assets', 'assets'), ('certificados', 'certificados'), ('config', 'config')]
 binaries = []
 hiddenimports = ['pandas', 'openpyxl', 'xlrd']
 tmp_ret = collect_all('pandas')

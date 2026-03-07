@@ -38,56 +38,52 @@ import hmac
 import secrets
 import ctypes
 import time
+from database_runtime import enqueue_sql_statements, log_startup_diagnostics, process_sync_queue
+from runtime_config import apply_process_environment, ensure_runtime_files, load_app_config
 
 # =========================================================
 # CONSTANTES E CONFIGURAÇÕES
 # =========================================================
 APP_W, APP_H = 1360, 780
 DB_NAME = "rota_granja"
-APP_TITLE_DESKTOP = "ROTAHUB DESKTOP"
+APP_CONFIG = load_app_config("desktop")
+apply_process_environment(APP_CONFIG)
+ensure_runtime_files(APP_CONFIG)
 
-IS_FROZEN = getattr(sys, "frozen", False)
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
-RESOURCE_DIR = getattr(sys, "_MEIPASS", APP_DIR)
+APP_TITLE_DESKTOP = APP_CONFIG.app_title
+IS_FROZEN = APP_CONFIG.is_frozen
+APP_DIR = APP_CONFIG.app_dir
+RESOURCE_DIR = APP_CONFIG.resource_dir
+USER_DATA_DIR = APP_CONFIG.data_root
+DEFAULT_DB_PATH = APP_CONFIG.db_path
+DB_PATH = APP_CONFIG.db_path
+API_BASE_URL = APP_CONFIG.api_base_url
+API_SYNC_TIMEOUT = APP_CONFIG.api_sync_timeout
+APP_ENV = APP_CONFIG.app_env
+APP_VERSION = APP_CONFIG.app_version
+TENANT_ID = APP_CONFIG.tenant_id
+COMPANY_ID = APP_CONFIG.company_id
+SYNC_MODE = APP_CONFIG.sync_mode
+CONFIG_SOURCE = APP_CONFIG.config_file if os.path.exists(APP_CONFIG.config_file) else APP_CONFIG.config_source
+CONFIG_FILE = APP_CONFIG.config_file
+UPDATE_MANIFEST_URL = APP_CONFIG.update_manifest_url
+SETUP_DOWNLOAD_URL = APP_CONFIG.setup_download_url
+CHANGELOG_URL = APP_CONFIG.changelog_url
+SUPPORT_WHATSAPP = APP_CONFIG.support_whatsapp
+SUPPORT_EMAIL = APP_CONFIG.support_email
+LOG_LEVEL = APP_CONFIG.log_level
+ENABLE_API_SYNC = APP_CONFIG.sync_enabled
+ENABLE_SQL_MIRROR = APP_CONFIG.sql_mirror_api
+UPDATE_CHANNEL = APP_CONFIG.update_channel
+TENANT_MODE = APP_CONFIG.tenant_mode
+ALLOW_SEED_DB = APP_CONFIG.allow_seed_db
+ALLOW_REMOTE_WRITE = APP_CONFIG.allow_remote_write
+ALLOW_VERSION_UPDATE = APP_CONFIG.allow_version_update
+ALLOW_REMOTE_READ = APP_CONFIG.allow_remote_read
+SOURCE_OF_TRUTH = APP_CONFIG.source_of_truth
+SCHEMA_VERSION = APP_CONFIG.schema_version
 
-# Em dev (python main.py), mantem o banco local da pasta do projeto.
-# Em app instalado (PyInstaller), usa pasta persistente do usuario para nao perder dados em updates.
-if IS_FROZEN:
-    USER_DATA_DIR = os.path.join(
-        os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
-        "RotaHubDesktop",
-    )
-    os.makedirs(USER_DATA_DIR, exist_ok=True)
-    DEFAULT_DB_PATH = os.path.join(USER_DATA_DIR, "rota_granja.db")
-else:
-    DEFAULT_DB_PATH = os.path.join(APP_DIR, "rota_granja.db")
-
-DB_PATH = os.environ.get("ROTA_DB", DEFAULT_DB_PATH)
 os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
-
-# Primeira execucao do app instalado: copia o banco seed embutido, se existir.
-if IS_FROZEN and not os.path.exists(DB_PATH):
-    seed_candidates = [
-        os.path.join(RESOURCE_DIR, "rota_granja.db"),
-        os.path.join(os.path.dirname(sys.executable), "rota_granja.db"),
-    ]
-    for seed in seed_candidates:
-        try:
-            if os.path.exists(seed):
-                shutil.copy2(seed, DB_PATH)
-                break
-        except OSError:
-            logging.debug("Falha ignorada")
-
-_default_api_url = "https://rotahub-api.onrender.com" if IS_FROZEN else "http://127.0.0.1:8000"
-API_BASE_URL = os.environ.get("ROTA_SERVER_URL", _default_api_url).strip().rstrip("/")
-if not API_BASE_URL:
-    API_BASE_URL = "http://127.0.0.1:8000"
-try:
-    # Render free pode levar mais de 15s no cold-start.
-    API_SYNC_TIMEOUT = float(os.environ.get("ROTA_SYNC_TIMEOUT", "60"))
-except Exception:
-    API_SYNC_TIMEOUT = 60.0
 
 
 def is_desktop_api_sync_enabled() -> bool:
@@ -105,11 +101,14 @@ _API_BINDING_CACHE = {"ok": False, "checked_at": 0.0, "error": ""}
 def ensure_system_api_binding(context: str = "Operacao", parent=None, force_probe: bool = False) -> bool:
     """Garante vinculo obrigatorio Desktop <-> API para operacoes criticas."""
     if not is_desktop_api_sync_enabled():
+        if os.environ.get("ROTA_REQUIRE_SERVER_BINDING", "0").strip().lower() not in {"1", "true", "yes", "y", "sim", "on"}:
+            logging.info("Operacao liberada sem integracao obrigatoria | env=%s | contexto=%s", APP_ENV, context)
+            return True
         messagebox.showerror(
             "INTEGRACAO OBRIGATORIA",
-            "A integracao Desktop<->Servidor esta desativada (ROTA_DESKTOP_SYNC_API=0).\n\n"
+            "A integracao Desktop<->Servidor esta desativada para este ambiente.\n\n"
             f"Operacao bloqueada: {context}\n"
-            "Ative ROTA_DESKTOP_SYNC_API=1 para continuar.",
+            "Ative a sincronizacao externa apenas em staging/producao.",
             parent=parent,
         )
         return False
@@ -160,19 +159,22 @@ if is_desktop_api_sync_enabled() and not os.environ.get("ROTA_SECRET", "").strip
         "Operacoes protegidas da API podem falhar ate a configuracao da chave."
     )
 
-# Versao/update/suporte (customizavel via variaveis de ambiente no servidor/estacao)
-APP_VERSION = "1.1.6"
-DEFAULT_UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/andersoncantenas-glitch/rotahub-api/main/updates/version.json"
-UPDATE_MANIFEST_URL = os.environ.get("ROTA_UPDATE_MANIFEST_URL", DEFAULT_UPDATE_MANIFEST_URL).strip()
-SETUP_DOWNLOAD_URL = os.environ.get("ROTA_SETUP_URL", "").strip()
-CHANGELOG_URL = os.environ.get("ROTA_CHANGELOG_URL", "").strip()
-SUPPORT_WHATSAPP = os.environ.get("ROTA_SUPPORT_WHATSAPP", "").strip()
-SUPPORT_EMAIL = os.environ.get("ROTA_SUPPORT_EMAIL", "").strip()
-
 # Log global em DEBUG (pedido do usuario)
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=getattr(logging, str(LOG_LEVEL or "DEBUG").upper(), logging.DEBUG),
     format="%(asctime)s - %(levelname)s - %(message)s",
+)
+logging.info(
+    "Runtime carregado | env=%s | tenant=%s | company=%s | sync=%s | db=%s | api=%s | config=%s | source=%s | channel=%s",
+    APP_ENV,
+    TENANT_ID,
+    COMPANY_ID,
+    SYNC_MODE,
+    DB_PATH,
+    API_BASE_URL,
+    CONFIG_SOURCE,
+    SOURCE_OF_TRUTH,
+    UPDATE_CHANNEL,
 )
 
 
@@ -1012,7 +1014,12 @@ def _build_api_url(path: str) -> str:
 
 def _call_api(method: str, path: str, payload=None, token: str = None, extra_headers: dict = None):
     url = _build_api_url(path)
-    headers = {"Accept": "application/json"}
+    headers = {
+        "Accept": "application/json",
+        "X-App-Env": APP_ENV,
+        "X-Tenant-ID": TENANT_ID,
+        "X-Company-ID": COMPANY_ID,
+    }
     data = None
     if payload is not None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -1972,6 +1979,7 @@ def apply_style(root):
     style.configure("Sidebar.TFrame", background=PRIMARY)
     style.configure("Content.TFrame", background=BG)
     style.configure("Card.TFrame", background=CARD, relief="flat", borderwidth=0)
+    style.configure("CardInset.TFrame", background=CARD, relief="flat", borderwidth=0)
 
     # Labels
     style.configure("CardTitle.TLabel", background=CARD, foreground=TEXT, font=("Segoe UI", 15, "bold"))
@@ -2113,6 +2121,62 @@ def apply_style(root):
     )
     style.map("Treeview", background=[("selected", "#DDE7FF")], foreground=[("selected", TEXT)])
 
+    # Ajustes finais de padronizacao visual
+    style.configure(".", background=BG, foreground=TEXT)
+    style.configure("TFrame", background=BG)
+    style.configure("TLabel", background=BG, foreground=TEXT)
+    style.configure("Content.TFrame", background=BG)
+    style.configure(
+        "Card.TFrame",
+        background=CARD,
+        relief="solid",
+        borderwidth=1,
+        bordercolor="#CBD5E1",
+        lightcolor="#CBD5E1",
+        darkcolor="#CBD5E1",
+    )
+    style.configure("CardInset.TFrame", background=CARD, relief="flat", borderwidth=0)
+    style.configure("CardTitle.TLabel", background=CARD, foreground=TEXT, font=("Segoe UI Semibold", 16))
+    style.configure("CardLabel.TLabel", background=CARD, foreground=MUTED, font=("Segoe UI Semibold", 9))
+    style.configure("SidebarLogo.TLabel", background=PRIMARY, foreground="white", font=("Segoe UI Semibold", 17))
+    style.configure("Title.TLabel", background=BG, foreground=TEXT, font=("Segoe UI Semibold", 20))
+    style.configure("Subtitle.TLabel", background=BG, foreground=MUTED, font=("Segoe UI", 10))
+    style.configure("Value.TLabel", background=CARD, foreground=TEXT, font=("Segoe UI", 10))
+    style.configure("TCombobox", padding=(8, 6))
+    style.configure("Side.TButton", font=("Segoe UI Semibold", 10), padding=(16, 12))
+    style.configure("SideActive.TButton", font=("Segoe UI Semibold", 10), padding=(16, 12))
+    style.configure("SideSub.TButton", font=("Segoe UI Semibold", 8), padding=(14, 8))
+    style.configure("SideSubActive.TButton", font=("Segoe UI Semibold", 8), padding=(14, 8))
+    style.configure("Primary.TButton", font=("Segoe UI Semibold", 10), padding=(16, 11), borderwidth=1)
+    style.configure("Ghost.TButton", font=("Segoe UI Semibold", 10), padding=(16, 11), borderwidth=1)
+    style.configure("Warn.TButton", foreground="white", font=("Segoe UI Semibold", 10), padding=(16, 11), borderwidth=1)
+    style.configure("Danger.TButton", font=("Segoe UI Semibold", 10), padding=(16, 11), borderwidth=1)
+    style.configure("TNotebook", background=BG, borderwidth=0, tabmargins=(0, 0, 0, 0))
+    style.configure("TNotebook.Tab", background=GHOST, foreground=TEXT, padding=(16, 8), font=("Segoe UI Semibold", 9))
+    style.map("TNotebook.Tab", background=[("selected", CARD), ("active", GHOST_HOVER)])
+    style.configure(
+        "Treeview",
+        background="white",
+        foreground=TEXT,
+        fieldbackground="white",
+        rowheight=30,
+        bordercolor="#94A3B8",
+        lightcolor="#94A3B8",
+        darkcolor="#94A3B8",
+        borderwidth=1,
+        relief="solid",
+        font=("Segoe UI", 9),
+    )
+    style.configure(
+        "Treeview.Heading",
+        background="#E8EEF7",
+        foreground=TEXT,
+        relief="solid",
+        borderwidth=1,
+        font=("Segoe UI Semibold", 9),
+        padding=(10, 8),
+    )
+
 
 # =========================================================
 # BASE PARA PÃÆââ‚¬â„¢ÂGINAS (mesma lÃÆââ‚¬â„¢³gica, sÃÆââ‚¬â„¢³ ajuste visual/organizaÃÆââ‚¬â„¢§ÃÆââ‚¬â„¢£o)
@@ -2127,26 +2191,18 @@ class PageBase(ttk.Frame):
         self.grid_rowconfigure(2, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        header = ttk.Frame(self, style="Content.TFrame", padding=(18, 16))
+        header = ttk.Frame(self, style="Content.TFrame", padding=(22, 18))
         header.grid(row=0, column=0, sticky="ew")
         header.grid_columnconfigure(0, weight=1)
         header.grid_columnconfigure(1, weight=0)
         self.header = header
 
-        ttk.Label(
-            header,
-            text=title,
-            font=("Segoe UI", 18, "bold"),
-            background="#F4F6FB",
-            foreground="#111827"
-        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(header, text=title, style="Title.TLabel").grid(row=0, column=0, sticky="w")
 
         self.lbl_status = ttk.Label(
             header,
             text="STATUS: -",
-            background="#F4F6FB",
-            foreground="#6B7280",
-            font=("Segoe UI", 8, "bold")
+            style="Subtitle.TLabel"
         )
         self.lbl_status.grid(row=1, column=0, sticky="w", pady=(6, 0))
         self.header_right = ttk.Frame(header, style="Content.TFrame")
@@ -2154,14 +2210,14 @@ class PageBase(ttk.Frame):
 
         ttk.Separator(self).grid(row=1, column=0, sticky="ew")
 
-        self.body = ttk.Frame(self, style="Content.TFrame", padding=(18, 14))
+        self.body = ttk.Frame(self, style="Content.TFrame", padding=(22, 18))
         self.body.grid(row=2, column=0, sticky="nsew")
         self.body.grid_columnconfigure(0, weight=1)
         self.body.grid_rowconfigure(1, weight=1)
 
         ttk.Separator(self).grid(row=3, column=0, sticky="ew")
 
-        footer = ttk.Frame(self, style="Content.TFrame", padding=(18, 12))
+        footer = ttk.Frame(self, style="Content.TFrame", padding=(22, 14))
         footer.grid(row=4, column=0, sticky="ew")
         footer.grid_columnconfigure(0, weight=1)
 
@@ -2200,7 +2256,7 @@ class CadastroCRUD(ttk.Frame):
         self._has_status_field = any(col == "status" for col, _ in fields)
 
         # Card
-        card = ttk.Frame(self, style="Card.TFrame", padding=16)
+        card = ttk.Frame(self, style="Card.TFrame", padding=18)
         card.pack(fill="both", expand=True)
 
         card.grid_columnconfigure(0, weight=1)
@@ -2223,7 +2279,7 @@ class CadastroCRUD(ttk.Frame):
             form.grid_columnconfigure(c, weight=1, uniform="formcols")
 
             ttk.Label(form, text=label, style="CardLabel.TLabel").grid(
-                row=r, column=c, sticky="w", padx=6, pady=(0, 4)
+                row=r, column=c, sticky="w", padx=8, pady=(0, 6)
             )
 
             if col == "status" and self.table in {"ajudantes", "motoristas"}:
@@ -2234,7 +2290,7 @@ class CadastroCRUD(ttk.Frame):
                 ent.set("ATIVO")
             else:
                 ent = ttk.Entry(form, style="Field.TEntry")
-            ent.grid(row=r + 1, column=c, sticky="ew", padx=6, pady=(0, 10))
+            ent.grid(row=r + 1, column=c, sticky="ew", padx=8, pady=(0, 12))
             self.entries[col] = ent
             if isinstance(ent, ttk.Entry):
                 kind, precision = self._infer_entry_kind(col, label)
@@ -2242,15 +2298,17 @@ class CadastroCRUD(ttk.Frame):
 
         # BOTOES
         actions = ttk.Frame(card, style="Card.TFrame")
-        actions.grid(row=2, column=0, sticky="ew", pady=(4, 12))
+        actions.grid(row=2, column=0, sticky="ew", pady=(6, 14))
+        for idx in range(0, 8):
+            actions.grid_columnconfigure(idx, weight=1)
         actions.grid_columnconfigure(20, weight=1)
 
         self.btn_novo = ttk.Button(actions, text="NOVO", style="Ghost.TButton", command=self.novo)
-        self.btn_novo.grid(row=0, column=0, padx=6)
+        self.btn_novo.grid(row=0, column=0, padx=4, sticky="ew")
         self.btn_alterar = ttk.Button(actions, text="ALTERAR", style="Ghost.TButton", command=self.alterar)
-        self.btn_alterar.grid(row=0, column=1, padx=6)
+        self.btn_alterar.grid(row=0, column=1, padx=4, sticky="ew")
         self.btn_salvar = ttk.Button(actions, text="SALVAR", style="Primary.TButton", command=self.salvar)
-        self.btn_salvar.grid(row=0, column=2, padx=6)
+        self.btn_salvar.grid(row=0, column=2, padx=4, sticky="ew")
         cmd_liberar = (lambda: self._set_status_rapido(True))
         cmd_bloquear = (lambda: self._set_status_rapido(False))
         if self.table == "motoristas":
@@ -2258,9 +2316,9 @@ class CadastroCRUD(ttk.Frame):
             cmd_bloquear = (lambda: self._toggle_motorista_access(False))
 
         self.btn_liberar = ttk.Button(actions, text="LIBERAR", style="Primary.TButton", command=cmd_liberar)
-        self.btn_liberar.grid(row=0, column=3, padx=6)
+        self.btn_liberar.grid(row=0, column=3, padx=4, sticky="ew")
         self.btn_bloquear = ttk.Button(actions, text="BLOQUEAR", style="Danger.TButton", command=cmd_bloquear)
-        self.btn_bloquear.grid(row=0, column=4, padx=6)
+        self.btn_bloquear.grid(row=0, column=4, padx=4, sticky="ew")
 
         if self.table in {"usuarios", "motoristas"}:
             cmd_senha = self.alterar_senha_motorista if self.table == "motoristas" else self.alterar_senha
@@ -2270,7 +2328,7 @@ class CadastroCRUD(ttk.Frame):
                 style="Warn.TButton",
                 command=cmd_senha,
             )
-            self.btn_senha.grid(row=0, column=5, padx=6)
+            self.btn_senha.grid(row=0, column=5, padx=4, sticky="ew")
 
         if self.table == "ajudantes":
             self._ajudantes_status_filter = tk.StringVar(value="TODOS")
@@ -2296,18 +2354,27 @@ class CadastroCRUD(ttk.Frame):
 
         # Tabela
         cols = ["ID"] + [label for _, label in self.fields]
-        self.tree = ttk.Treeview(card, columns=cols, show="headings", height=12)
-        self.tree.grid(row=3, column=0, sticky="nsew", pady=(0, 6))
+        table_wrap = ttk.Frame(card, style="Card.TFrame")
+        table_wrap.grid(row=3, column=0, sticky="nsew", pady=(0, 6))
         card.grid_rowconfigure(3, weight=1)
+        table_wrap.grid_rowconfigure(0, weight=1)
+        table_wrap.grid_columnconfigure(0, weight=1)
 
-        vsb = ttk.Scrollbar(card, orient="vertical", command=self.tree.yview)
+        self.tree = ttk.Treeview(table_wrap, columns=cols, show="headings", height=12)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+
+        vsb = ttk.Scrollbar(table_wrap, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
-        vsb.grid(row=3, column=1, sticky="ns", pady=(0, 6))
+        vsb.grid(row=0, column=1, sticky="ns")
+
+        hsb = ttk.Scrollbar(table_wrap, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(xscrollcommand=hsb.set)
+        hsb.grid(row=1, column=0, sticky="ew", pady=(6, 0))
 
         for c in cols:
             self.tree.heading(c, text=c)
-            self.tree.column(c, width=160, anchor="w")
-        self.tree.column("ID", width=70, anchor="center")
+            self.tree.column(c, width=170, minwidth=110, anchor="w")
+        self.tree.column("ID", width=70, minwidth=60, anchor="center")
 
         enable_treeview_sorting(
             self.tree,
@@ -3821,20 +3888,20 @@ class CadastroCRUD(ttk.Frame):
 
 class Sidebar(ttk.Frame):
     def __init__(self, parent, app):
-        super().__init__(parent, style="Sidebar.TFrame", width=260)
+        super().__init__(parent, style="Sidebar.TFrame", width=280)
         self.app = app
         self.pack_propagate(False)
 
         self.buttons = {}
 
         # Topo
-        top = ttk.Frame(self, style="Sidebar.TFrame", padding=(14, 16))
+        top = ttk.Frame(self, style="Sidebar.TFrame", padding=(18, 20))
         top.pack(fill="x")
 
         ttk.Label(top, text="ROTAHUB DESKTOP", style="SidebarLogo.TLabel").pack(anchor="w")
         ttk.Label(top, text="Centralizando sua operacao do inicio ao fim.", style="SidebarSmall.TLabel").pack(anchor="w", pady=(2, 0))
 
-        ttk.Separator(self).pack(fill="x", padx=10, pady=(6, 10))
+        ttk.Separator(self).pack(fill="x", padx=14, pady=(8, 12))
 
         # âÅâ€œââ‚¬¦ Menu com scroll (evita quebra/sumir item em telas pequenas)
         wrap = ttk.Frame(self, style="Sidebar.TFrame")
@@ -3847,7 +3914,7 @@ class Sidebar(ttk.Frame):
         vsb.pack(side="right", fill="y")
         self.canvas.configure(yscrollcommand=vsb.set)
 
-        self.menu = ttk.Frame(self.canvas, style="Sidebar.TFrame", padding=(10, 6))
+        self.menu = ttk.Frame(self.canvas, style="Sidebar.TFrame", padding=(12, 8))
         self.menu_id = self.canvas.create_window((0, 0), window=self.menu, anchor="nw")
 
         def _on_frame_configure(event=None):
@@ -3873,7 +3940,7 @@ class Sidebar(ttk.Frame):
         self._add_btn("backup", "\U0001F4E6 Backup / Exportar", lambda: app.show_page("BackupExportar"))
 
         # Rodapé
-        bottom = ttk.Frame(self, style="Sidebar.TFrame", padding=(10, 12))
+        bottom = ttk.Frame(self, style="Sidebar.TFrame", padding=(12, 14))
         bottom.pack(fill="x")
 
         ttk.Button(bottom, text="\u23FB SAIR", style="Danger.TButton", command=self._safe_quit).pack(fill="x")
@@ -3921,7 +3988,7 @@ class App(tk.Tk):
         self.title(APP_TITLE_DESKTOP)
         apply_window_icon(self)
         self.geometry(f"{APP_W}x{APP_H}")
-        self.minsize(1200, 700)
+        self.minsize(1100, 680)
 
         try:
             self.state("zoomed")
@@ -4188,14 +4255,18 @@ class HomePage(PageBase):
         self._remote_setup_url = SETUP_DOWNLOAD_URL
         self._remote_changelog_url = CHANGELOG_URL
         self._alerts_text = ""
+        self.body.grid_rowconfigure(0, weight=1)
 
-        top = ttk.Frame(self.body, style="Content.TFrame")
-        top.grid(row=0, column=0, sticky="ew")
-        top.grid_columnconfigure(0, weight=3)
-        top.grid_columnconfigure(1, weight=2)
+        home_grid = ttk.Frame(self.body, style="Content.TFrame")
+        home_grid.grid(row=0, column=0, sticky="nsew")
+        home_grid.grid_columnconfigure(0, weight=3)
+        home_grid.grid_columnconfigure(1, weight=1)
+        home_grid.grid_rowconfigure(0, weight=0)
+        home_grid.grid_rowconfigure(1, weight=1)
+        home_grid.grid_rowconfigure(2, weight=0)
 
-        card = ttk.Frame(top, style="Card.TFrame", padding=18)
-        card.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        card = ttk.Frame(home_grid, style="Card.TFrame", padding=14)
+        card.grid(row=0, column=0, sticky="ew", padx=(0, 12), pady=(0, 12))
         card.grid_columnconfigure(0, weight=1)
         card.grid_columnconfigure(1, weight=0)
 
@@ -4206,7 +4277,7 @@ class HomePage(PageBase):
             text="--/--/---- --:--:--",
             bg="white",
             fg="#111827",
-            font=("Segoe UI", 11, "bold")
+            font=("Segoe UI", 10, "bold")
         )
         self.lbl_clock.grid(row=0, column=1, sticky="e")
 
@@ -4220,8 +4291,8 @@ class HomePage(PageBase):
             justify="left"
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
-        quick = ttk.Frame(card, style="Card.TFrame")
-        quick.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        quick = ttk.Frame(card, style="CardInset.TFrame")
+        quick.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         quick.grid_columnconfigure((0, 1, 2), weight=1)
         ttk.Button(quick, text="Cadastros", style="Ghost.TButton", command=lambda: self.app.show_page("Cadastros")).grid(
             row=0, column=0, sticky="ew"
@@ -4233,27 +4304,21 @@ class HomePage(PageBase):
             row=0, column=2, sticky="ew"
         )
 
-        self._build_system_info_panel(top)
+        resumo = ttk.Frame(card, style="CardInset.TFrame")
+        resumo.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        resumo.grid_columnconfigure((0, 1, 2), weight=1)
+        self.lbl_total_prog = self._build_summary_tile(resumo, 0, "Programações Ativas")
+        self.lbl_total_vendas = self._build_summary_tile(resumo, 1, "Vendas Importadas")
+        self.lbl_total_clientes_ativos = self._build_summary_tile(resumo, 2, "Clientes Ativos")
 
-        self.card_stats = ttk.Frame(self.body, style="Content.TFrame")
-        self.card_stats.grid(row=1, column=0, sticky="nsew", pady=(14, 0))
-        self.card_stats.grid_columnconfigure((0, 1, 2), weight=1)
+        self._build_system_info_panel(home_grid)
 
-        self.lbl_total_prog = self._build_stat(self.card_stats, 0, "Programações Ativas", "")
-        self.lbl_total_vendas = self._build_stat(self.card_stats, 1, "Vendas Importadas", "")
-        self.lbl_total_clientes_ativos = self._build_stat(self.card_stats, 2, "Clientes (Ativos)", "")
-
-        dash = ttk.Frame(self.body, style="Content.TFrame")
-        dash.grid(row=2, column=0, sticky="nsew", pady=(14, 0))
-        dash.grid_columnconfigure(0, weight=1)
-        dash.grid_rowconfigure(0, weight=1)
-
-        card_rotas = ttk.Frame(dash, style="Card.TFrame", padding=12)
-        card_rotas.grid(row=0, column=0, sticky="nsew")
+        card_rotas = ttk.Frame(home_grid, style="Card.TFrame", padding=(12, 12, 12, 10))
+        card_rotas.grid(row=1, column=0, sticky="nsew", padx=(0, 12))
         card_rotas.grid_rowconfigure(2, weight=1)
         card_rotas.grid_columnconfigure(0, weight=1)
 
-        top_rotas = ttk.Frame(card_rotas, style="Card.TFrame")
+        top_rotas = ttk.Frame(card_rotas, style="CardInset.TFrame")
         top_rotas.grid(row=0, column=0, columnspan=2, sticky="ew")
         top_rotas.grid_columnconfigure(0, weight=1)
         ttk.Label(top_rotas, text="Rotas Ativas", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
@@ -4265,19 +4330,25 @@ class HomePage(PageBase):
         ).grid(row=1, column=0, sticky="w", pady=(2, 0))
 
         cols = ["COD", "MOTORISTA", "VEICULO", "DATA"]
-        self.tree_rotas = ttk.Treeview(card_rotas, columns=cols, show="headings", height=10)
+        self.tree_rotas = ttk.Treeview(card_rotas, columns=cols, show="headings", height=12)
         self.tree_rotas.grid(row=2, column=0, sticky="nsew", pady=(6, 0))
 
         vsb = ttk.Scrollbar(card_rotas, orient="vertical", command=self.tree_rotas.yview)
         self.tree_rotas.configure(yscrollcommand=vsb.set)
         vsb.grid(row=2, column=1, sticky="ns", pady=(6, 0))
 
+        hsb = ttk.Scrollbar(card_rotas, orient="horizontal", command=self.tree_rotas.xview)
+        self.tree_rotas.configure(xscrollcommand=hsb.set)
+        hsb.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+
         for c in cols:
             self.tree_rotas.heading(c, text=c)
-            self.tree_rotas.column(c, width=160, anchor="w")
+            self.tree_rotas.column(c, width=150, minwidth=110, anchor="w", stretch=True)
 
-        self.tree_rotas.column("COD", width=170)
-        self.tree_rotas.column("DATA", width=160, anchor="center")
+        self.tree_rotas.column("COD", width=165, minwidth=150, stretch=False)
+        self.tree_rotas.column("MOTORISTA", width=230, minwidth=180, stretch=True)
+        self.tree_rotas.column("VEICULO", width=180, minwidth=150, stretch=True)
+        self.tree_rotas.column("DATA", width=120, minwidth=110, anchor="center", stretch=False)
 
         self.tree_rotas.bind("<Double-1>", self._open_rota_preview)
 
@@ -4288,36 +4359,14 @@ class HomePage(PageBase):
             date_cols={"DATA"}
         )
 
-        pend = ttk.Frame(self.body, style="Card.TFrame", padding=12)
-        pend.grid(row=3, column=0, sticky="ew", pady=(14, 0))
+        pend = ttk.Frame(home_grid, style="Card.TFrame", padding=10)
+        pend.grid(row=2, column=0, sticky="ew", padx=(0, 12))
         pend.grid_columnconfigure((0, 1, 2), weight=1)
-        ttk.Label(pend, text="Pendencias do dia", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(pend, text="Pendências do Dia", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
 
         self.lbl_pend_rotas = self._build_pending_stat(pend, 0, "Rotas em aberto")
-        self.lbl_pend_prest = self._build_pending_stat(pend, 1, "Prestacoes pendentes")
-        self.lbl_pend_desp = self._build_pending_stat(pend, 2, "Sem despesa lancada")
-
-        pend_btns = ttk.Frame(pend, style="Card.TFrame")
-        pend_btns.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(8, 0))
-        pend_btns.grid_columnconfigure((0, 1, 2), weight=1)
-        ttk.Button(
-            pend_btns,
-            text="Recebimentos",
-            style="Ghost.TButton",
-            command=lambda: self.app.show_page("Recebimentos"),
-        ).grid(row=0, column=0, sticky="ew")
-        ttk.Button(
-            pend_btns,
-            text="Despesas",
-            style="Ghost.TButton",
-            command=lambda: self.app.show_page("Despesas"),
-        ).grid(row=0, column=1, sticky="ew", padx=6)
-        ttk.Button(
-            pend_btns,
-            text="Atualizar Home",
-            style="Primary.TButton",
-            command=self.on_show,
-        ).grid(row=0, column=2, sticky="ew")
+        self.lbl_pend_prest = self._build_pending_stat(pend, 1, "Prestações pendentes")
+        self.lbl_pend_desp = self._build_pending_stat(pend, 2, "Sem despesa lançada")
 
         self.lbl_footer_sync = ttk.Label(
             self.footer_left,
@@ -4347,32 +4396,47 @@ class HomePage(PageBase):
         self.after(300, self._maybe_show_post_update_notifications)
 
     def _build_system_info_panel(self, parent):
-        panel = ttk.Frame(parent, style="Card.TFrame", padding=10)
-        panel.grid(row=0, column=1, sticky="nsew")
+        panel = ttk.Frame(parent, style="Card.TFrame", padding=(12, 12, 12, 10))
+        panel.grid(row=0, column=1, rowspan=3, sticky="nsew")
         panel.grid_columnconfigure(0, weight=1)
 
         ttk.Label(panel, text="Informações do Sistema", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
 
+        version_box = ttk.Frame(panel, style="CardInset.TFrame")
+        version_box.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        version_box.grid_columnconfigure(0, weight=1)
+
         self.lbl_version_local = ttk.Label(
-            panel,
+            version_box,
             text=f"Versão local: {APP_VERSION}",
             background="white",
             foreground="#111827",
             font=("Segoe UI", 9, "bold"),
         )
-        self.lbl_version_local.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.lbl_version_local.grid(row=0, column=0, sticky="w")
 
         self.lbl_version_remote = ttk.Label(
-            panel,
+            version_box,
             text="Versao disponivel: -",
             background="white",
             foreground="#6B7280",
             font=("Segoe UI", 9),
         )
-        self.lbl_version_remote.grid(row=2, column=0, sticky="w")
+        self.lbl_version_remote.grid(row=1, column=0, sticky="w", pady=(2, 0))
 
-        actions = ttk.Frame(panel, style="Card.TFrame")
-        actions.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        diag = ttk.Frame(panel, style="CardInset.TFrame")
+        diag.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        diag.grid_columnconfigure(1, weight=1)
+        ttk.Label(diag, text="Diagnóstico do Ambiente", style="CardLabel.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
+        self.lbl_runtime_env = self._build_info_row(diag, 1, "Ambiente")
+        self.lbl_runtime_db = self._build_info_row(diag, 2, "Banco")
+        self.lbl_runtime_persist = self._build_info_row(diag, 3, "Persistência")
+        self.lbl_runtime_api = self._build_info_row(diag, 4, "API")
+        self.lbl_runtime_cfg = self._build_info_row(diag, 5, "Config")
+        self._refresh_runtime_diagnostics()
+
+        actions = ttk.Frame(panel, style="CardInset.TFrame")
+        actions.grid(row=3, column=0, sticky="ew", pady=(10, 0))
         actions.grid_columnconfigure((0, 1), weight=1)
 
         ttk.Button(actions, text="Histórico", style="Ghost.TButton", command=self._open_changelog).grid(row=0, column=0, sticky="ew")
@@ -4380,7 +4444,7 @@ class HomePage(PageBase):
         ttk.Button(actions, text="Atualizar versão", style="Primary.TButton", command=self._check_updates).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         ttk.Button(actions, text="Publicar versao", style="Ghost.TButton", command=self._publish_version).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
 
-        support = ttk.Frame(panel, style="Card.TFrame")
+        support = ttk.Frame(panel, style="CardInset.TFrame")
         support.grid(row=4, column=0, sticky="ew", pady=(10, 0))
         ttk.Label(support, text="Suporte Técnico", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w")
 
@@ -4389,7 +4453,7 @@ class HomePage(PageBase):
         ttk.Label(support, text=wpp_txt, background="white", foreground="#2563EB", font=("Segoe UI", 9, "underline")).grid(row=1, column=0, sticky="w")
         ttk.Label(support, text=mail_txt, background="white", foreground="#111827", font=("Segoe UI", 9)).grid(row=2, column=0, sticky="w")
 
-        alerts = ttk.Frame(panel, style="Card.TFrame")
+        alerts = ttk.Frame(panel, style="CardInset.TFrame")
         alerts.grid(row=5, column=0, sticky="ew", pady=(10, 0))
         ttk.Label(alerts, text="Alertas", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w")
         self.lbl_alerts = ttk.Label(
@@ -4398,9 +4462,17 @@ class HomePage(PageBase):
             background="white",
             foreground="#6B7280",
             justify="left",
-            wraplength=280,
+            wraplength=255,
         )
         self.lbl_alerts.grid(row=1, column=0, sticky="w", pady=(2, 0))
+
+    def _refresh_runtime_diagnostics(self):
+        db_dir = os.path.dirname(DB_PATH) or "."
+        self.lbl_runtime_env.config(text=f"{APP_ENV} | tenant={TENANT_ID} | empresa={COMPANY_ID} | sync={SYNC_MODE}")
+        self.lbl_runtime_db.config(text=DB_PATH)
+        self.lbl_runtime_persist.config(text=db_dir)
+        self.lbl_runtime_api.config(text=API_BASE_URL or "-")
+        self.lbl_runtime_cfg.config(text=CONFIG_SOURCE)
 
     def _open_url_safe(self, url: str, label: str):
         if not url:
@@ -4529,10 +4601,10 @@ class HomePage(PageBase):
         return ".".join(str(x) for x in parts)
 
     def _publish_version(self):
-        if IS_FROZEN:
+        if IS_FROZEN or APP_ENV != "development":
             messagebox.showinfo(
                 "Publicar versao",
-                "Use esta funcao no ambiente de desenvolvimento (python main.py),\n"
+                "Use esta funcao somente no ambiente development (python main.py),\n"
                 "onde o repositorio Git esta disponivel.",
             )
             return
@@ -4930,6 +5002,16 @@ class HomePage(PageBase):
         self.lbl_api_status.pack(anchor="e")
 
     def _update_api_status(self):
+        if not is_desktop_api_sync_enabled():
+            self.lbl_api_status.config(text=f"API: LOCAL ONLY ({APP_ENV})", bg="#DBEAFE", fg="#1D4ED8")
+            if self._api_job:
+                try:
+                    self.after_cancel(self._api_job)
+                except Exception:
+                    logging.debug("Falha ignorada")
+            self._api_job = self.after(15000, self._update_api_status)
+            return
+
         online = False
         integracao_ok = None
         api_host = "-"
@@ -4989,11 +5071,32 @@ class HomePage(PageBase):
         lbl.pack(anchor="w", pady=(6, 0))
         return lbl
 
+    def _build_summary_tile(self, parent, col, title, value="0", value_font=("Segoe UI", 21, "bold"), top_pad=(0, 0)):
+        card = ttk.Frame(parent, style="CardInset.TFrame", padding=(10, 8))
+        card.grid(row=1, column=col, sticky="ew", padx=4, pady=top_pad)
+        ttk.Label(card, text=title, style="CardLabel.TLabel").pack(anchor="w")
+        lbl = ttk.Label(card, text=value, font=value_font, background="white", foreground="#111827")
+        lbl.pack(anchor="w", pady=(6, 0))
+        return lbl
+
+    def _build_info_row(self, parent, row, title):
+        ttk.Label(parent, text=f"{title}:", style="CardLabel.TLabel").grid(row=row, column=0, sticky="nw", pady=(5, 0), padx=(0, 8))
+        value = ttk.Label(
+            parent,
+            text="-",
+            background="white",
+            foreground="#111827",
+            justify="left",
+            wraplength=185,
+        )
+        value.grid(row=row, column=1, sticky="ew", pady=(4, 0))
+        return value
+
     def _build_pending_stat(self, parent, col, title):
-        c = ttk.Frame(parent, style="Card.TFrame", padding=10)
-        c.grid(row=1, column=col, sticky="ew", padx=6, pady=(8, 0))
+        c = ttk.Frame(parent, style="CardInset.TFrame", padding=(10, 8))
+        c.grid(row=1, column=col, sticky="ew", padx=4, pady=(8, 0))
         ttk.Label(c, text=title, style="CardLabel.TLabel").pack(anchor="w")
-        lbl = ttk.Label(c, text="0", font=("Segoe UI", 18, "bold"), background="white", foreground="#1D4ED8")
+        lbl = ttk.Label(c, text="0", font=("Segoe UI", 16, "bold"), background="white", foreground="#1D4ED8")
         lbl.pack(anchor="w", pady=(4, 0))
         return lbl
 
@@ -6300,23 +6403,26 @@ class HomePage(PageBase):
             except Exception:
                 logging.debug("Falha ignorada")
 
-            # 1.2) opcional: fonte central (API) para refletir status/carregamento do app
-            try:
-                desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-                if desktop_secret:
-                    resposta = _call_api(
-                        "GET",
-                        f"desktop/rotas/{codigo}",
-                        extra_headers={"X-Desktop-Secret": desktop_secret},
-                    )
-                    if isinstance(resposta, dict):
-                        api_rota = resposta.get("rota") if isinstance(resposta.get("rota"), dict) else None
-                        api_clientes = resposta.get("clientes") if isinstance(resposta.get("clientes"), list) else None
-                        if api_rota is not None:
-                            fonte_dados = "API CENTRAL"
-            except Exception:
-                api_erro = "API indisponivel"
-                logging.debug("Falha ao puxar preview da API central", exc_info=True)
+            # 1.2) opcional: fonte central (API) para refletir status/carregamento do app.
+            # Mantem a mesma regra da Home: so consulta API quando a integracao Desktop/API esta ativa.
+            api_mode = is_desktop_api_sync_enabled()
+            if api_mode:
+                try:
+                    desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+                    if desktop_secret:
+                        resposta = _call_api(
+                            "GET",
+                            f"desktop/rotas/{codigo}",
+                            extra_headers={"X-Desktop-Secret": desktop_secret},
+                        )
+                        if isinstance(resposta, dict):
+                            api_rota = resposta.get("rota") if isinstance(resposta.get("rota"), dict) else None
+                            api_clientes = resposta.get("clientes") if isinstance(resposta.get("clientes"), list) else None
+                            if api_rota is not None:
+                                fonte_dados = "API CENTRAL"
+                except Exception:
+                    api_erro = "API indisponivel"
+                    logging.debug("Falha ao puxar preview da API central", exc_info=True)
 
             if api_rota:
                 try:
@@ -7228,9 +7334,9 @@ def enable_treeview_sorting(tree: ttk.Treeview, numeric_cols=None, money_cols=No
 
         btns = ttk.Frame(frm)
         btns.grid(row=3, column=0, sticky="ew", pady=(8, 0))
-        ttk.Button(btns, text="âœ” Aplicar", style="Primary.TButton", command=_apply_and_close).grid(row=0, column=0, padx=(0, 6))
-        ttk.Button(btns, text="ðÅ¸§¹ Limpar coluna", style="Ghost.TButton", command=_clear_col_filter).grid(row=0, column=1, padx=6)
-        ttk.Button(btns, text="ðÅ¸§¹ LIMPAR TUDO", style="Ghost.TButton", command=_clear_all_filters).grid(row=0, column=2, padx=6)
+        ttk.Button(btns, text="Aplicar", style="Primary.TButton", command=_apply_and_close).grid(row=0, column=0, padx=(0, 6))
+        ttk.Button(btns, text="Limpar coluna", style="Ghost.TButton", command=_clear_col_filter).grid(row=0, column=1, padx=6)
+        ttk.Button(btns, text="Limpar tudo", style="Ghost.TButton", command=_clear_all_filters).grid(row=0, column=2, padx=6)
 
         search_var.trace_add("write", lambda *_: _fill_list())
         _fill_list()
@@ -7809,10 +7915,10 @@ class ClientesImportPage(ttk.Frame):
         actions.grid(row=1, column=0, sticky="ew", pady=(12, 10))
         actions.grid_columnconfigure(10, weight=1)
 
-        ttk.Button(actions, text="ðÅ¸â€œ¥ IMPORTAR CLIENTES (EXCEL)", style="Warn.TButton",
+        ttk.Button(actions, text="IMPORTAR CLIENTES (EXCEL)", style="Warn.TButton",
                    command=self.importar_clientes_excel).grid(row=0, column=0, padx=6)
 
-        ttk.Button(actions, text="ðŸ”„ ATUALIZAR", style="Ghost.TButton",
+        ttk.Button(actions, text="ATUALIZAR", style="Ghost.TButton",
                    command=self.carregar).grid(row=0, column=1, padx=6)
 
         ttk.Button(actions, text="\u2795 INSERIR LINHA", style="Ghost.TButton",
@@ -7836,7 +7942,7 @@ class ClientesImportPage(ttk.Frame):
         table_wrap.grid_columnconfigure(0, weight=1)
         table_wrap.grid_rowconfigure(0, weight=1)
 
-        self.tree = ttk.Treeview(table_wrap, columns=cols, show="headings")
+        self.tree = ttk.Treeview(table_wrap, columns=cols, show="headings", height=14)
         self.tree.grid(row=0, column=0, sticky="nsew")
 
         vsb = ttk.Scrollbar(table_wrap, orient="vertical", command=self.tree.yview)
@@ -8904,6 +9010,16 @@ class ProgramacaoPage(PageBase):
         ttk.Label(card, text="Motorista", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w")
         self.cb_motorista = ttk.Combobox(card, state="readonly", width=16)
         self.cb_motorista.grid(row=1, column=0, sticky="ew", padx=6)
+        self.lbl_motorista_rank = ttk.Label(
+            card,
+            text="Ranking de motoristas: carregando...",
+            background="white",
+            foreground="#6B7280",
+            font=("Segoe UI", 8, "bold"),
+            justify="left",
+            wraplength=280,
+        )
+        self.lbl_motorista_rank.grid(row=2, column=0, columnspan=2, sticky="w", padx=6, pady=(2, 0))
 
         ttk.Label(card, text="Veiculo", style="CardLabel.TLabel").grid(row=0, column=1, sticky="w")
         self.cb_veiculo = ttk.Combobox(card, state="readonly", width=12)
@@ -8914,6 +9030,16 @@ class ProgramacaoPage(PageBase):
         self.btn_ajudantes.grid(row=1, column=2, columnspan=2, sticky="ew", padx=6)
         self.lbl_ajudantes_sel = ttk.Label(card, text="Nenhum selecionado", style="CardLabel.TLabel")
         self.lbl_ajudantes_sel.grid(row=2, column=2, columnspan=2, sticky="w", padx=6, pady=(2, 0))
+        self.lbl_ajudantes_rank = ttk.Label(
+            card,
+            text="Ranking de ajudantes: carregando...",
+            background="white",
+            foreground="#6B7280",
+            font=("Segoe UI", 8, "bold"),
+            justify="left",
+            wraplength=320,
+        )
+        self.lbl_ajudantes_rank.grid(row=3, column=2, columnspan=3, sticky="w", padx=6, pady=(4, 0))
         self._ajudantes_rows = []
         self._ajudantes_selected_keys = []
         self._ajudantes_mode = "ajudantes"
@@ -8922,6 +9048,9 @@ class ProgramacaoPage(PageBase):
         self._ajudantes_tree_key_by_iid = {}
         self._ajudantes_tree_iid_by_key = {}
         self._ajudantes_filter_var = tk.StringVar(value="")
+        self._ranking_periodo_dias = 30
+        self._motoristas_ranking = []
+        self._ajudantes_ranking = []
 
         ttk.Label(card, text="Local da Rota", style="CardLabel.TLabel").grid(row=0, column=4, sticky="w")
         self.cb_local_rota = ttk.Combobox(card, state="readonly", values=["SERRA", "SERTAO"], width=10)
@@ -9069,16 +9198,16 @@ class ProgramacaoPage(PageBase):
 
         for c in cols:
             self.tree.heading(c, text=c)
-            self.tree.column(c, width=160, minwidth=90, anchor="w")
+            self.tree.column(c, width=165, minwidth=100, anchor="w", stretch=True)
 
-        self.tree.column("ENDERECO", width=260, minwidth=180)
-        self.tree.column("NOME CLIENTE", width=260, minwidth=160)
-        self.tree.column("PRODUTO", width=160, minwidth=120)
-        self.tree.column("PEDIDO", width=160, minwidth=120)
-        self.tree.column("OBS", width=260, minwidth=140)
-        self.tree.column("CAIXAS", width=90, anchor="center")
-        self.tree.column("KG", width=90, anchor="center")
-        self.tree.column("PRECO", width=110, anchor="e")
+        self.tree.column("ENDERECO", width=280, minwidth=190)
+        self.tree.column("NOME CLIENTE", width=260, minwidth=180)
+        self.tree.column("PRODUTO", width=170, minwidth=130)
+        self.tree.column("PEDIDO", width=150, minwidth=120)
+        self.tree.column("OBS", width=260, minwidth=160)
+        self.tree.column("CAIXAS", width=90, minwidth=80, anchor="center", stretch=False)
+        self.tree.column("KG", width=95, minwidth=85, anchor="center", stretch=False)
+        self.tree.column("PRECO", width=120, minwidth=100, anchor="e", stretch=False)
 
         self.tree.bind("<Double-1>", self._start_edit_cell)
         self.tree.bind("<MouseWheel>", self._on_tree_scroll, add=True)
@@ -9131,6 +9260,463 @@ class ProgramacaoPage(PageBase):
         if key.startswith("SERT"):
             return "SERTAO"
         return ""
+
+    def normalizar_indicador(self, lista_valores):
+        valores = [safe_float(v, 0.0) for v in (lista_valores or [])]
+        if not valores:
+            return []
+        minimo = min(valores)
+        maximo = max(valores)
+        if maximo == minimo:
+            return [0.0 for _ in valores]
+        return [(v - minimo) / (maximo - minimo) for v in valores]
+
+    def _ranking_status_normalizado(self, status_raw) -> str:
+        return upper(str(status_raw or "").strip())
+
+    def _ranking_is_ativa(self, status_raw: str) -> bool:
+        return self._ranking_status_normalizado(status_raw) in {"ATIVA", "EM_ROTA", "EM ROTA", "INICIADA", "CARREGADA"}
+
+    def _ranking_is_cancelada(self, status_raw: str) -> bool:
+        return self._ranking_status_normalizado(status_raw) in {"CANCELADA", "CANCELADO"}
+
+    def _ranking_parse_data_programacao(self, raw: str):
+        txt = str(raw or "").strip()
+        if not txt:
+            return None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y", "%d/%m/%y %H:%M:%S", "%d/%m/%y"):
+            try:
+                return datetime.strptime(txt[:19], fmt) if "H" in fmt else datetime.strptime(txt[:10], fmt)
+            except Exception:
+                pass
+        try:
+            return datetime.fromisoformat(txt.replace(" ", "T"))
+        except Exception:
+            return None
+
+    def _ranking_parse_data_hora(self, data_raw: str, hora_raw: str):
+        dt_data = self._ranking_parse_data_programacao(data_raw)
+        if dt_data is None:
+            return None
+        nt = normalize_time(str(hora_raw or "").strip()) if hora_raw else ""
+        hh = mm = ss = 0
+        if nt:
+            try:
+                p = (nt + ":00:00").split(":")
+                hh = safe_int(p[0], 0)
+                mm = safe_int(p[1], 0)
+                ss = safe_int(p[2], 0)
+            except Exception:
+                hh = mm = ss = 0
+        return dt_data.replace(hour=hh, minute=mm, second=ss, microsecond=0)
+
+    def _ranking_calc_horas_trabalhadas(self, data_saida: str, hora_saida: str, data_chegada: str, hora_chegada: str) -> float:
+        dt_saida = self._ranking_parse_data_hora(data_saida, hora_saida)
+        dt_chegada = self._ranking_parse_data_hora(data_chegada, hora_chegada)
+        if not dt_saida or not dt_chegada:
+            return 0.0
+        diff = (dt_chegada - dt_saida).total_seconds() / 3600.0
+        if diff <= 0:
+            return 0.0
+        return min(round(diff, 2), 72.0)
+
+    def _listar_programacoes_para_score(self, periodo_dias: int = 30):
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(programacoes)")
+            cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+            data_ref_expr = "COALESCE(data_saida,data_criacao,data,'')" if {"data_saida", "data_criacao", "data"} & cols else "''"
+            status_op_expr = "COALESCE(status_operacional,'')" if "status_operacional" in cols else "''"
+            finalizada_expr = "COALESCE(finalizada_no_app,0)" if "finalizada_no_app" in cols else "0"
+            motorista_codigo_expr = "COALESCE(motorista_codigo,'')" if "motorista_codigo" in cols else ("COALESCE(codigo_motorista,'')" if "codigo_motorista" in cols else "''")
+            km_expr = "COALESCE(km_rodado,0)" if "km_rodado" in cols else "0"
+            data_saida_expr = "COALESCE(data_saida,'')" if "data_saida" in cols else "''"
+            hora_saida_expr = "COALESCE(hora_saida,'')" if "hora_saida" in cols else "''"
+            data_chegada_expr = "COALESCE(data_chegada,'')" if "data_chegada" in cols else "''"
+            hora_chegada_expr = "COALESCE(hora_chegada,'')" if "hora_chegada" in cols else "''"
+            cur.execute(
+                f"""
+                SELECT
+                    COALESCE(codigo_programacao,'') AS codigo_programacao,
+                    {data_ref_expr} AS data_ref,
+                    COALESCE(motorista,'') AS motorista,
+                    {motorista_codigo_expr} AS motorista_codigo,
+                    COALESCE(equipe,'') AS equipe,
+                    COALESCE(status,'') AS status,
+                    {status_op_expr} AS status_operacional,
+                    {finalizada_expr} AS finalizada_no_app,
+                    {km_expr} AS km_rodado,
+                    {data_saida_expr} AS data_saida,
+                    {hora_saida_expr} AS hora_saida,
+                    {data_chegada_expr} AS data_chegada,
+                    {hora_chegada_expr} AS hora_chegada
+                FROM programacoes
+                ORDER BY id DESC
+                """
+            )
+            rows = cur.fetchall() or []
+
+        try:
+            cutoff = datetime.now() - timedelta(days=max(int(periodo_dias or 30), 1))
+        except Exception:
+            cutoff = datetime.now() - timedelta(days=30)
+
+        out = []
+        for row in rows:
+            data_ref = row["data_ref"] if hasattr(row, "keys") else row[1]
+            dt_ref = self._ranking_parse_data_programacao(data_ref)
+            if dt_ref is not None and dt_ref < cutoff:
+                continue
+            status = self._ranking_status_normalizado(
+                (row["status_operacional"] if hasattr(row, "keys") else row[6])
+                or (row["status"] if hasattr(row, "keys") else row[5])
+            )
+            if not status and safe_int(row["finalizada_no_app"] if hasattr(row, "keys") else row[7], 0) == 1:
+                status = "FINALIZADA"
+            if self._ranking_is_cancelada(status):
+                continue
+            out.append(
+                {
+                    "codigo_programacao": upper(row["codigo_programacao"] if hasattr(row, "keys") else row[0]),
+                    "data_ref": dt_ref,
+                    "motorista": upper(row["motorista"] if hasattr(row, "keys") else row[2]),
+                    "motorista_codigo": upper(row["motorista_codigo"] if hasattr(row, "keys") else row[3]),
+                    "equipe": str(row["equipe"] if hasattr(row, "keys") else row[4] or ""),
+                    "status": status,
+                    "km_rodado": safe_float(row["km_rodado"] if hasattr(row, "keys") else row[8], 0.0),
+                    "data_saida": str(row["data_saida"] if hasattr(row, "keys") else row[9] or ""),
+                    "hora_saida": str(row["hora_saida"] if hasattr(row, "keys") else row[10] or ""),
+                    "data_chegada": str(row["data_chegada"] if hasattr(row, "keys") else row[11] or ""),
+                    "hora_chegada": str(row["hora_chegada"] if hasattr(row, "keys") else row[12] or ""),
+                }
+            )
+        return out
+
+    def _listar_candidatos_motoristas(self):
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(motoristas)")
+            cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+            cur.execute(
+                "SELECT COALESCE(id,0), COALESCE(nome,''), COALESCE(codigo,''), COALESCE(status,'ATIVO'), "
+                + ("COALESCE(acesso_liberado,1)" if "acesso_liberado" in cols else "1")
+                + " FROM motoristas ORDER BY nome, codigo"
+            )
+            rows = cur.fetchall() or []
+        candidatos = []
+        for row in rows:
+            nome = upper(row[1])
+            codigo = upper(row[2])
+            status = self._ranking_status_normalizado(row[3]) or "ATIVO"
+            acesso_liberado = safe_int(row[4], 1)
+            bloqueado = acesso_liberado == 0 or status in {"INATIVO", "BLOQUEADO", "DESATIVADO"}
+            candidatos.append(
+                {
+                    "id": safe_int(row[0], 0),
+                    "nome": nome,
+                    "codigo": codigo,
+                    "display": self._motorista_display(nome, codigo),
+                    "status": status,
+                    "elegivel": bool(nome) and status == "ATIVO" and not bloqueado,
+                }
+            )
+        return candidatos
+
+    def _listar_candidatos_ajudantes(self):
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT id, COALESCE(nome,''), COALESCE(sobrenome,''), COALESCE(status,'ATIVO'), COALESCE(telefone,'') FROM ajudantes ORDER BY nome, sobrenome")
+            rows = cur.fetchall() or []
+        candidatos = []
+        for row in rows:
+            ajudante_id = str(safe_int(row[0], 0))
+            nome = upper(row[1])
+            sobrenome = upper(row[2])
+            status = self._ranking_status_normalizado(row[3]) or "ATIVO"
+            candidatos.append(
+                {
+                    "id": ajudante_id,
+                    "nome": nome,
+                    "display": format_ajudante_nome(nome, sobrenome, ajudante_id),
+                    "telefone": normalize_phone(row[4]),
+                    "status": status,
+                    "elegivel": bool(nome) and status == "ATIVO",
+                }
+            )
+        return candidatos
+
+    def _resolver_motorista_programacao_key(self, programacao: dict, por_codigo: dict, por_nome: dict):
+        codigo = upper(programacao.get("motorista_codigo") or "")
+        nome = upper(programacao.get("motorista") or "")
+        if codigo and codigo in por_codigo:
+            return por_codigo[codigo]
+        if nome and nome in por_nome:
+            return por_nome[nome]
+        return ""
+
+    def _resolver_ajudantes_programacao_keys(self, equipe_raw: str, por_id: dict, por_nome: dict):
+        partes = [p.strip() for p in re.split(r"[|,;/]+", str(equipe_raw or "")) if str(p or "").strip()]
+        out = []
+        vistos = set()
+        for parte in partes:
+            if parte in por_id and parte not in vistos:
+                vistos.add(parte)
+                out.append(parte)
+                continue
+            nome_resolvido = upper(resolve_equipe_nomes(parte) or parte)
+            ajudante_id = por_nome.get(nome_resolvido, "")
+            if ajudante_id and ajudante_id not in vistos:
+                vistos.add(ajudante_id)
+                out.append(ajudante_id)
+        return out
+
+    def calcular_metricas_motoristas(self, periodo_dias: int = 30):
+        candidatos = self._listar_candidatos_motoristas()
+        programacoes = self._listar_programacoes_para_score(periodo_dias=periodo_dias)
+        now = datetime.now()
+        por_codigo = {c["codigo"]: str(c["id"]) for c in candidatos if c.get("codigo")}
+        por_nome = {c["nome"]: str(c["id"]) for c in candidatos if c.get("nome")}
+        conflitos = set()
+        for prog in programacoes:
+            if self._ranking_is_ativa(prog.get("status")):
+                key = self._resolver_motorista_programacao_key(prog, por_codigo, por_nome)
+                if key:
+                    conflitos.add(key)
+        metricas = {}
+        for cand in candidatos:
+            if not cand.get("elegivel"):
+                continue
+            cand_id = str(cand["id"])
+            metricas[cand_id] = {
+                "id": cand["id"],
+                "nome": cand["nome"],
+                "codigo": cand.get("codigo", ""),
+                "display": cand.get("display") or cand["nome"],
+                "status": cand.get("status", "ATIVO"),
+                "total_horas_trabalhadas": 0.0,
+                "total_km_rodado": 0.0,
+                "total_viagens": 0,
+                "dias_desde_ultima_programacao": max(safe_int(periodo_dias, 30), 1),
+                "score_final": 0.0,
+                "motivo_resumido": "",
+                "disponivel": cand_id not in conflitos,
+                "sem_base_historica": True,
+                "_last_dt": None,
+            }
+        for prog in programacoes:
+            cand_id = self._resolver_motorista_programacao_key(prog, por_codigo, por_nome)
+            if not cand_id or cand_id not in metricas:
+                continue
+            horas = self._ranking_calc_horas_trabalhadas(prog.get("data_saida", ""), prog.get("hora_saida", ""), prog.get("data_chegada", ""), prog.get("hora_chegada", ""))
+            item = metricas[cand_id]
+            item["total_horas_trabalhadas"] += horas
+            item["total_km_rodado"] += safe_float(prog.get("km_rodado"), 0.0)
+            item["total_viagens"] += 1
+            dt_ref = prog.get("data_ref")
+            if isinstance(dt_ref, datetime) and (item["_last_dt"] is None or dt_ref > item["_last_dt"]):
+                item["_last_dt"] = dt_ref
+                item["dias_desde_ultima_programacao"] = max((now - dt_ref).days, 0)
+        for item in metricas.values():
+            item["total_horas_trabalhadas"] = round(float(item["total_horas_trabalhadas"]), 2)
+            item["total_km_rodado"] = round(float(item["total_km_rodado"]), 2)
+            item["sem_base_historica"] = item["total_horas_trabalhadas"] <= 0 and item["total_km_rodado"] <= 0 and item["total_viagens"] <= 0 and item["_last_dt"] is None
+        return metricas
+
+    def calcular_metricas_ajudantes(self, periodo_dias: int = 30):
+        candidatos = self._listar_candidatos_ajudantes()
+        programacoes = self._listar_programacoes_para_score(periodo_dias=periodo_dias)
+        now = datetime.now()
+        por_id = {str(c["id"]): str(c["id"]) for c in candidatos if c.get("id")}
+        por_nome = {upper(c.get("display") or ""): str(c["id"]) for c in candidatos if c.get("display")}
+        conflitos = set()
+        for prog in programacoes:
+            if self._ranking_is_ativa(prog.get("status")):
+                conflitos.update(self._resolver_ajudantes_programacao_keys(prog.get("equipe", ""), por_id, por_nome))
+        metricas = {}
+        for cand in candidatos:
+            if not cand.get("elegivel"):
+                continue
+            cand_id = str(cand["id"])
+            metricas[cand_id] = {
+                "id": cand_id,
+                "nome": cand.get("display") or cand.get("nome") or "",
+                "status": cand.get("status", "ATIVO"),
+                "total_horas_trabalhadas": 0.0,
+                "total_viagens": 0,
+                "dias_desde_ultima_programacao": max(safe_int(periodo_dias, 30), 1),
+                "score_final": 0.0,
+                "motivo_resumido": "",
+                "disponivel": cand_id not in conflitos,
+                "sem_base_historica": True,
+                "_last_dt": None,
+            }
+        for prog in programacoes:
+            ajudante_ids = self._resolver_ajudantes_programacao_keys(prog.get("equipe", ""), por_id, por_nome)
+            if not ajudante_ids:
+                continue
+            horas = self._ranking_calc_horas_trabalhadas(prog.get("data_saida", ""), prog.get("hora_saida", ""), prog.get("data_chegada", ""), prog.get("hora_chegada", ""))
+            dt_ref = prog.get("data_ref")
+            for cand_id in ajudante_ids:
+                if cand_id not in metricas:
+                    continue
+                item = metricas[cand_id]
+                item["total_horas_trabalhadas"] += horas
+                item["total_viagens"] += 1
+                if isinstance(dt_ref, datetime) and (item["_last_dt"] is None or dt_ref > item["_last_dt"]):
+                    item["_last_dt"] = dt_ref
+                    item["dias_desde_ultima_programacao"] = max((now - dt_ref).days, 0)
+        for item in metricas.values():
+            item["total_horas_trabalhadas"] = round(float(item["total_horas_trabalhadas"]), 2)
+            item["sem_base_historica"] = item["total_horas_trabalhadas"] <= 0 and item["total_viagens"] <= 0 and item["_last_dt"] is None
+        return metricas
+
+    def calcular_score_motorista(self, metricas: dict, contexto: dict):
+        horas_score = 1.0 - safe_float(contexto["horas_norm"].get(metricas["id"], 0.0), 0.0)
+        km_score = 1.0 - safe_float(contexto["km_norm"].get(metricas["id"], 0.0), 0.0)
+        viagens_score = 1.0 - safe_float(contexto["viagens_norm"].get(metricas["id"], 0.0), 0.0)
+        descanso_score = safe_float(contexto["dias_norm"].get(metricas["id"], 0.0), 0.0)
+        metricas["horas_score"] = horas_score
+        metricas["km_score"] = km_score
+        metricas["viagens_score"] = viagens_score
+        metricas["descanso_score"] = descanso_score
+        return round((horas_score * 0.35) + (km_score * 0.30) + (viagens_score * 0.20) + (descanso_score * 0.15), 6)
+
+    def calcular_score_ajudante(self, metricas: dict, contexto: dict):
+        horas_score = 1.0 - safe_float(contexto["horas_norm"].get(metricas["id"], 0.0), 0.0)
+        viagens_score = 1.0 - safe_float(contexto["viagens_norm"].get(metricas["id"], 0.0), 0.0)
+        descanso_score = safe_float(contexto["dias_norm"].get(metricas["id"], 0.0), 0.0)
+        metricas["horas_score"] = horas_score
+        metricas["viagens_score"] = viagens_score
+        metricas["descanso_score"] = descanso_score
+        return round((horas_score * 0.50) + (viagens_score * 0.30) + (descanso_score * 0.20), 6)
+
+    def _motivo_resumido_motorista(self, item: dict, periodo_dias: int):
+        if safe_float(item.get("descanso_score"), 0.0) >= max(safe_float(item.get("horas_score"), 0.0), safe_float(item.get("km_score"), 0.0), safe_float(item.get("viagens_score"), 0.0)):
+            return "Maior intervalo desde a última programação"
+        if safe_float(item.get("horas_score"), 0.0) >= 0.60 and safe_float(item.get("viagens_score"), 0.0) >= 0.60:
+            return "Menos horas e menos viagens no período"
+        return f"Menor carga acumulada nos últimos {safe_int(periodo_dias, 30)} dias"
+
+    def _motivo_resumido_ajudante(self, item: dict, periodo_dias: int):
+        if safe_float(item.get("descanso_score"), 0.0) >= max(safe_float(item.get("horas_score"), 0.0), safe_float(item.get("viagens_score"), 0.0)):
+            return "Maior intervalo desde a última programação"
+        if safe_float(item.get("horas_score"), 0.0) >= 0.60 and safe_float(item.get("viagens_score"), 0.0) >= 0.60:
+            return "Menos horas e menos viagens no período"
+        return f"Menor carga acumulada nos últimos {safe_int(periodo_dias, 30)} dias"
+
+    def ranquear_motoristas(self, periodo_dias: int = 30):
+        metricas = self.calcular_metricas_motoristas(periodo_dias=periodo_dias)
+        elegiveis = [dict(v) for v in metricas.values() if v.get("disponivel")]
+        if not elegiveis:
+            return []
+        todos_sem_historico = all(v.get("sem_base_historica") for v in elegiveis)
+        if not todos_sem_historico:
+            ids = [v["id"] for v in elegiveis]
+            contexto = {
+                "horas_norm": dict(zip(ids, self.normalizar_indicador([v["total_horas_trabalhadas"] for v in elegiveis]))),
+                "km_norm": dict(zip(ids, self.normalizar_indicador([v["total_km_rodado"] for v in elegiveis]))),
+                "viagens_norm": dict(zip(ids, self.normalizar_indicador([v["total_viagens"] for v in elegiveis]))),
+                "dias_norm": dict(zip(ids, self.normalizar_indicador([v["dias_desde_ultima_programacao"] for v in elegiveis]))),
+            }
+            for item in elegiveis:
+                item["score_final"] = self.calcular_score_motorista(item, contexto)
+                item["motivo_resumido"] = self._motivo_resumido_motorista(item, periodo_dias)
+        else:
+            for item in elegiveis:
+                item["score_final"] = 0.0
+                item["motivo_resumido"] = "Sem base histórica suficiente"
+        elegiveis.sort(key=lambda item: (-round(safe_float(item.get("score_final"), 0.0), 8), safe_float(item.get("total_horas_trabalhadas"), 0.0), safe_int(item.get("total_viagens"), 0), safe_float(item.get("total_km_rodado"), 0.0), -safe_int(item.get("dias_desde_ultima_programacao"), 0), upper(item.get("nome") or "")))
+        for pos, item in enumerate(elegiveis, start=1):
+            item["posicao_ranking"] = pos
+            item["score_exibicao"] = round(safe_float(item.get("score_final"), 0.0) * 100.0, 2)
+            item.pop("_last_dt", None)
+        return elegiveis
+
+    def ranquear_ajudantes(self, periodo_dias: int = 30):
+        metricas = self.calcular_metricas_ajudantes(periodo_dias=periodo_dias)
+        elegiveis = [dict(v) for v in metricas.values() if v.get("disponivel")]
+        if not elegiveis:
+            return []
+        todos_sem_historico = all(v.get("sem_base_historica") for v in elegiveis)
+        if not todos_sem_historico:
+            ids = [v["id"] for v in elegiveis]
+            contexto = {
+                "horas_norm": dict(zip(ids, self.normalizar_indicador([v["total_horas_trabalhadas"] for v in elegiveis]))),
+                "viagens_norm": dict(zip(ids, self.normalizar_indicador([v["total_viagens"] for v in elegiveis]))),
+                "dias_norm": dict(zip(ids, self.normalizar_indicador([v["dias_desde_ultima_programacao"] for v in elegiveis]))),
+            }
+            for item in elegiveis:
+                item["score_final"] = self.calcular_score_ajudante(item, contexto)
+                item["motivo_resumido"] = self._motivo_resumido_ajudante(item, periodo_dias)
+        else:
+            for item in elegiveis:
+                item["score_final"] = 0.0
+                item["motivo_resumido"] = "Sem base histórica suficiente"
+        elegiveis.sort(key=lambda item: (-round(safe_float(item.get("score_final"), 0.0), 8), safe_float(item.get("total_horas_trabalhadas"), 0.0), safe_int(item.get("total_viagens"), 0), -safe_int(item.get("dias_desde_ultima_programacao"), 0), upper(item.get("nome") or "")))
+        for pos, item in enumerate(elegiveis, start=1):
+            item["posicao_ranking"] = pos
+            item["score_exibicao"] = round(safe_float(item.get("score_final"), 0.0) * 100.0, 2)
+            item.pop("_last_dt", None)
+        return elegiveis
+
+    def _formatar_top_ranking(self, titulo: str, ranking: list, limite: int = 3):
+        if not ranking:
+            return f"{titulo}: sem candidatos elegíveis."
+        top = ranking[:max(safe_int(limite, 3), 1)]
+        partes = [f"{item['posicao_ranking']}. {item['nome']} ({item['score_exibicao']:.2f})" for item in top]
+        motivo = str(top[0].get("motivo_resumido") or "").strip()
+        return (f"{titulo}: " + " | ".join(partes) + (f" | Motivo: {motivo}" if motivo else ""))
+
+    def _apply_programacao_rankings(self):
+        periodo = max(safe_int(getattr(self, "_ranking_periodo_dias", 30), 30), 1)
+        try:
+            self._motoristas_ranking = self.ranquear_motoristas(periodo_dias=periodo)
+            por_nome = {upper(item.get("display") or item.get("nome") or ""): item for item in self._motoristas_ranking}
+            por_codigo = {upper(item.get("codigo") or ""): item for item in self._motoristas_ranking if item.get("codigo")}
+            atuais = [str(v or "").strip() for v in list(self.cb_motorista["values"] or []) if str(v or "").strip()]
+            ordenados = []
+            sobras = []
+            for valor in atuais:
+                nome, codigo = self._parse_motorista_display(valor)
+                item = por_codigo.get(upper(codigo)) if codigo else None
+                if not item:
+                    item = por_nome.get(upper(valor)) or por_nome.get(upper(nome))
+                if item:
+                    ordenados.append((safe_int(item.get("posicao_ranking"), 9999), valor))
+                else:
+                    sobras.append(valor)
+            ordenados.sort(key=lambda kv: (kv[0], upper(kv[1])))
+            self.cb_motorista["values"] = [v for _pos, v in ordenados] + sorted(sobras, key=upper)
+            self.lbl_motorista_rank.config(text=self._formatar_top_ranking("Top motoristas", self._motoristas_ranking))
+        except Exception:
+            logging.exception("Falha ao aplicar ranking de motoristas na programação")
+            self._motoristas_ranking = []
+            self.lbl_motorista_rank.config(text="Top motoristas: ranking indisponível.")
+
+        try:
+            self._ajudantes_ranking = self.ranquear_ajudantes(periodo_dias=periodo)
+            if self._ajudantes_mode != "ajudantes":
+                self.lbl_ajudantes_rank.config(text="Top ajudantes: ranking individual indisponível no modo equipes.")
+                return
+            por_id = {str(item.get("id") or ""): item for item in self._ajudantes_ranking}
+            ordenados = []
+            sobras = []
+            for row in list(self._ajudantes_rows or []):
+                key = str(row.get("key", "")).strip()
+                item = por_id.get(key)
+                if item:
+                    ordenados.append((safe_int(item.get("posicao_ranking"), 9999), row))
+                else:
+                    sobras.append(row)
+            ordenados.sort(key=lambda kv: (kv[0], upper(str(kv[1].get("label", "")))))
+            self._ajudantes_rows = [row for _pos, row in ordenados] + sorted(sobras, key=lambda r: upper(str(r.get("label", ""))))
+            self._rebuild_ajudantes_popup_list()
+            self._refresh_ajudantes_selected_label()
+            self.lbl_ajudantes_rank.config(text=self._formatar_top_ranking("Top ajudantes", self._ajudantes_ranking))
+        except Exception:
+            logging.exception("Falha ao aplicar ranking de ajudantes na programação")
+            self._ajudantes_ranking = []
+            self.lbl_ajudantes_rank.config(text="Top ajudantes: ranking indisponível.")
 
     def _format_money_from_digits(self, digits: str) -> str:
         digits = re.sub(r"\D", "", str(digits or ""))
@@ -9376,7 +9962,7 @@ class ProgramacaoPage(PageBase):
         search_row = ttk.Frame(frame, style="Card.TFrame")
         search_row.grid(row=1, column=0, sticky="ew", pady=(0, 8))
         search_row.grid_columnconfigure(1, weight=1)
-        ttk.Label(search_row, text="ðŸ”Ž BUSCAR", style="CardLabel.TLabel").pack(side="left", padx=(0, 8))
+        ttk.Label(search_row, text="BUSCAR", style="CardLabel.TLabel").pack(side="left", padx=(0, 8))
         ent_search = ttk.Entry(search_row, textvariable=self._ajudantes_filter_var, style="Field.TEntry")
         ent_search.pack(side="left", fill="x", expand=True)
         ent_search.bind("<KeyRelease>", lambda _e: self._rebuild_ajudantes_popup_list())
@@ -9407,8 +9993,8 @@ class ProgramacaoPage(PageBase):
         footer = ttk.Frame(frame, style="Card.TFrame")
         footer.grid(row=3, column=0, sticky="ew", pady=(12, 2))
         footer.grid_columnconfigure(0, weight=1)
-        ttk.Button(footer, text="ðÅ¸§¹ LIMPAR", style="Ghost.TButton", command=self._clear_ajudantes_selection).pack(side="left")
-        ttk.Button(footer, text="âœ” CONFIRMAR", style="Primary.TButton", command=self._confirm_ajudantes_popup).pack(side="right")
+        ttk.Button(footer, text="LIMPAR", style="Ghost.TButton", command=self._clear_ajudantes_selection).pack(side="left")
+        ttk.Button(footer, text="CONFIRMAR", style="Primary.TButton", command=self._confirm_ajudantes_popup).pack(side="right")
 
         # Centraliza para evitar popup abrindo "cortado" em telas menores.
         try:
@@ -9481,6 +10067,7 @@ class ProgramacaoPage(PageBase):
                     if ajudante_id:
                         self._equipe_display_map[upper(display)] = ajudante_id
                 self._set_ajudantes_options(rows_ajudantes, mode="ajudantes")
+                self._apply_programacao_rankings()
                 return
             except Exception:
                 logging.debug("Falha ao carregar comboboxes da Programacao via API", exc_info=True)
@@ -9566,6 +10153,8 @@ class ProgramacaoPage(PageBase):
                     self._set_ajudantes_options(rows_equipes, mode="equipes")
                 except Exception:
                     self._set_ajudantes_options([], mode="ajudantes")
+
+        self._apply_programacao_rankings()
 
     def on_show(self):
         self.set_status("STATUS: Carregue vendas e ajuste dados antes de salvar a programação.")
@@ -10423,6 +11012,7 @@ class ProgramacaoPage(PageBase):
         motorista_id = None
         api_saved = False
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        conn = None
 
         try:
             if desktop_secret and is_desktop_api_sync_enabled():
@@ -10520,8 +11110,9 @@ class ProgramacaoPage(PageBase):
                     )
 
             if not api_saved:
-                with get_db() as conn:
-                    cur = conn.cursor()
+                conn = db_connect()
+                conn.row_factory = sqlite3.Row
+                cur = conn.cursor()
 
                 if not self._prog_cols_checked:
                     self._ensure_prog_columns_for_api(cur)
@@ -10889,7 +11480,17 @@ class ProgramacaoPage(PageBase):
                 except Exception:
                     logging.debug("Falha ao marcar vendas importadas como usadas.", exc_info=True)
 
+                conn.commit()
+                conn.close()
+                conn = None
+
         except Exception as e:
+            if conn is not None:
+                try:
+                    conn.rollback()
+                    conn.close()
+                except Exception:
+                    logging.debug("Falha ao encerrar conexao de salvar_programacao", exc_info=True)
             messagebox.showerror("ERRO", f"Erro ao salvar programação: {str(e)}")
             return
 
@@ -11801,8 +12402,8 @@ def simple_input(title, prompt, master=None, initial="", allow_empty=True, max_l
     left = ttk.Frame(btns, style="Card.TFrame")
     left.grid(row=0, column=0, sticky="w")
 
-    ttk.Button(left, text="âœ” CONFIRMAR", style="Primary.TButton", command=ok).pack(side="left")
-    ttk.Button(left, text="âÅ“â€“ CANCELAR", style="Ghost.TButton", command=cancel).pack(side="left", padx=8)
+    ttk.Button(left, text="CONFIRMAR", style="Primary.TButton", command=ok).pack(side="left")
+    ttk.Button(left, text="CANCELAR", style="Ghost.TButton", command=cancel).pack(side="left", padx=8)
 
     # Atalhos
     win.bind("<Return>", lambda e: ok())
@@ -22314,7 +22915,7 @@ class BackupExportarPage(PageBase):
 
         ttk.Button(card, text="\U0001F4BE FAZER BACKUP DO BANCO", style="Primary.TButton", command=self.backup_db)\
             .grid(row=1, column=0, sticky="ew", pady=6)
-        ttk.Button(card, text="ââ„¢» RESTAURAR BANCO (IMPORTAR .DB)", style="Warn.TButton", command=self.restore_db)\
+        ttk.Button(card, text="RESTAURAR BANCO (IMPORTAR .DB)", style="Warn.TButton", command=self.restore_db)\
             .grid(row=2, column=0, sticky="ew", pady=6)
         ttk.Button(card, text="\U0001F4E4 EXPORTAR VENDAS IMPORTADAS (EXCEL)", style="Ghost.TButton", command=self.exportar_vendas)\
             .grid(row=3, column=0, sticky="ew", pady=6)

@@ -1,0 +1,26 @@
+{
+  "app_env": "development",
+  "app_title": "ROTAHUB DESKTOP",
+  "tenant": {
+    "tenant_id": "dev-local",
+    "company_id": "dev-local"
+  },
+  "runtime": {
+    "sync_enabled": false,
+    "sql_mirror_api": false,
+    "require_server_binding": false
+  },
+  "api": {
+    "base_url": "http://127.0.0.1:8000",
+    "timeout": 60
+  },
+  "update": {
+    "manifest_url": "https://raw.githubusercontent.com/andersoncantenas-glitch/rotahub-api/main/updates/version.json",
+    "setup_url": "",
+    "changelog_url": ""
+  },
+  "support": {
+    "whatsapp": "",
+    "email": ""
+  }
+}

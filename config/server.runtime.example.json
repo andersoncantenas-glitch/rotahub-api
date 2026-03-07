@@ -1,0 +1,27 @@
+{
+  "app_env": "production",
+  "tenant": {
+    "tenant_id": "empresa-001",
+    "company_id": "empresa-001"
+  },
+  "runtime": {
+    "data_root": "C:\\rotahub_server_data",
+    "db_path": "C:\\rotahub_server_data\\server\\production\\empresa-001\\rotahub_server.db",
+    "sync_enabled": true,
+    "sql_mirror_api": false,
+    "require_server_binding": false
+  },
+  "api": {
+    "base_url": "https://rotahub-api.onrender.com",
+    "timeout": 60
+  },
+  "update": {
+    "manifest_url": "https://raw.githubusercontent.com/andersoncantenas-glitch/rotahub-api/main/updates/version.json",
+    "setup_url": "",
+    "changelog_url": ""
+  },
+  "support": {
+    "whatsapp": "",
+    "email": ""
+  }
+}

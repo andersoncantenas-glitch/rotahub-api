@@ -17,6 +17,7 @@ from fastapi import FastAPI, HTTPException, Depends, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
+from version import APP_VERSION
 
 
 # =========================================================
@@ -34,7 +35,7 @@ if not SECRET_KEY:
     raise RuntimeError("ROTA_SECRET nao definido. Configure a variavel de ambiente para iniciar a API.")
 TOKEN_TTL_SECONDS = 60 * 60 * 24 * 7  # 7 dias
 
-app = FastAPI(title="Rota Granja API", version="1.1.5")
+app = FastAPI(title="Rota Granja API", version=APP_VERSION)
 
 def _cors_origins_from_env() -> List[str]:
     raw = os.environ.get("ROTA_CORS_ORIGINS", "").strip()

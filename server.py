@@ -6,6 +6,7 @@ import logging
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 import secrets
+from runtime_config import apply_process_environment, ensure_runtime_files, load_app_config
 
 # Configuração do logging
 logging.basicConfig(
@@ -13,15 +14,19 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 
-# Caminho do banco de dados
+SERVER_CONFIG = load_app_config("server")
+apply_process_environment(SERVER_CONFIG)
+ensure_runtime_files(SERVER_CONFIG)
+
+
 def get_db_path():
-    """Retorna o caminho do banco de dados"""
-    return os.environ.get("ROTA_DB", os.path.join(os.path.dirname(__file__), "rota_granja.db"))
+    """Retorna o caminho do banco de dados do tenant atual."""
+    return SERVER_CONFIG.db_path
 
 # Inicialização do FastAPI
 app = FastAPI(
     title="RotaHub API",
-    version="1.0.0",
+    version=SERVER_CONFIG.app_version,
     description="API para o sistema RotaHub",
 )
 
@@ -66,7 +71,13 @@ def reset_database_endpoint(username: str = Depends(get_current_username)):
 @app.get("/health", tags=["Health"])
 def health_check():
     """Verifica se a API está funcionando"""
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "environment": SERVER_CONFIG.app_env,
+        "tenant_id": SERVER_CONFIG.tenant_id,
+        "company_id": SERVER_CONFIG.company_id,
+        "db_path": SERVER_CONFIG.db_path,
+    }
 
 # Inicialização do servidor
 if __name__ == "__main__":

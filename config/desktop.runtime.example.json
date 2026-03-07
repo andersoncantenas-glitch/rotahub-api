@@ -1,0 +1,28 @@
+{
+  "app_env": "staging",
+  "tenant": {
+    "tenant_id": "empresa-homolog",
+    "company_id": "empresa-homolog"
+  },
+  "runtime": {
+    "data_root": "C:\\Users\\Public\\RotaHubDesktop",
+    "db_path": "C:\\Users\\Public\\RotaHubDesktop\\desktop\\staging\\empresa-homolog\\rota_granja.db",
+    "sync_enabled": true,
+    "sql_mirror_api": true,
+    "require_server_binding": true,
+    "desktop_secret": "defina-aqui"
+  },
+  "api": {
+    "base_url": "https://staging.rotahub-api.example.com",
+    "timeout": 60
+  },
+  "update": {
+    "manifest_url": "https://staging.rotahub-api.example.com/updates/version.json",
+    "setup_url": "https://staging.rotahub-api.example.com/downloads/RotaHubDesktop_Setup.exe",
+    "changelog_url": "https://staging.rotahub-api.example.com/updates/changelog.txt"
+  },
+  "support": {
+    "whatsapp": "",
+    "email": ""
+  }
+}

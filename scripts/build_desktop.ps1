@@ -68,7 +68,7 @@ Write-Host "==> Gerando EXE (PyInstaller)"
   --collect-all "xlrd" `
   --add-data "assets;assets" `
   --add-data "certificados;certificados" `
-  --add-data "rota_granja.db;." `
+  --add-data "config;config" `
   main.py
 
 Write-Host "==> Build concluido em: dist\RotaHubDesktop\RotaHubDesktop.exe"
