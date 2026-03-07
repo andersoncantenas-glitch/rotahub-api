@@ -1,3 +1,8 @@
+2026-03-07 08:50:49 - v3.0.2
+- Release automatizada (patch).
+- Versao anterior: v3.0.1.
+- Ajustes de layout da Home, unificacao de fonte LOCAL/API no preview e automacao de release.
+
 2026-03-07 08:42:33 - v3.0.0
 - Release automatizada (major).
 - Versao anterior: v2.1.0.
