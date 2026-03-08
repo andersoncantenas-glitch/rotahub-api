@@ -704,6 +704,11 @@ def ensure_tables():
                 preco_atual REAL DEFAULT NULL,
                 alterado_em TEXT DEFAULT NULL,
                 alterado_por TEXT DEFAULT NULL,
+                lat_evento REAL DEFAULT NULL,
+                lon_evento REAL DEFAULT NULL,
+                endereco_evento TEXT DEFAULT NULL,
+                cidade_evento TEXT DEFAULT NULL,
+                bairro_evento TEXT DEFAULT NULL,
 
                 updated_at TEXT DEFAULT (datetime('now')),
 
@@ -743,6 +748,11 @@ def ensure_tables():
                         preco_atual REAL DEFAULT NULL,
                         alterado_em TEXT DEFAULT NULL,
                         alterado_por TEXT DEFAULT NULL,
+                        lat_evento REAL DEFAULT NULL,
+                        lon_evento REAL DEFAULT NULL,
+                        endereco_evento TEXT DEFAULT NULL,
+                        cidade_evento TEXT DEFAULT NULL,
+                        bairro_evento TEXT DEFAULT NULL,
                         updated_at TEXT DEFAULT (datetime('now')),
                         UNIQUE(codigo_programacao, cod_cliente, pedido)
                     )
@@ -753,7 +763,8 @@ def ensure_tables():
                          mortalidade_aves, media_aplicada, aves_por_caixa, peso_previsto,
                          valor_recebido, forma_recebimento, obs_recebimento,
                          status_pedido, alteracao_tipo, alteracao_detalhe,
-                         caixas_atual, preco_atual, alterado_em, alterado_por, updated_at)
+                         caixas_atual, preco_atual, alterado_em, alterado_por,
+                         lat_evento, lon_evento, endereco_evento, cidade_evento, bairro_evento, updated_at)
                     SELECT
                         codigo_programacao,
                         cod_cliente,
@@ -772,6 +783,11 @@ def ensure_tables():
                         preco_atual,
                         alterado_em,
                         alterado_por,
+                        NULL,
+                        NULL,
+                        NULL,
+                        NULL,
+                        NULL,
                         COALESCE(updated_at, datetime('now'))
                     FROM programacao_itens_controle_old
                 """)
@@ -859,7 +875,37 @@ def ensure_tables():
             add_ctrl_col("preco_atual", "preco_atual REAL")
             add_ctrl_col("alterado_em", "alterado_em TEXT")
             add_ctrl_col("alterado_por", "alterado_por TEXT")
+            add_ctrl_col("lat_evento", "lat_evento REAL")
+            add_ctrl_col("lon_evento", "lon_evento REAL")
+            add_ctrl_col("endereco_evento", "endereco_evento TEXT")
+            add_ctrl_col("cidade_evento", "cidade_evento TEXT")
+            add_ctrl_col("bairro_evento", "bairro_evento TEXT")
             add_ctrl_col("updated_at", "updated_at TEXT")
+        except Exception:
+            pass
+
+        try:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS cliente_localizacao_amostras (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cod_cliente TEXT NOT NULL,
+                    codigo_programacao TEXT,
+                    pedido TEXT,
+                    latitude REAL,
+                    longitude REAL,
+                    endereco TEXT,
+                    cidade TEXT,
+                    bairro TEXT,
+                    status_pedido TEXT,
+                    motorista_codigo TEXT,
+                    motorista_nome TEXT,
+                    origem TEXT DEFAULT 'APP',
+                    registrado_em TEXT DEFAULT (datetime('now'))
+                )
+            """)
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_cli_loc_amostras_cliente ON cliente_localizacao_amostras(cod_cliente, registrado_em DESC)"
+            )
         except Exception:
             pass
 
@@ -1642,6 +1688,11 @@ class ClienteControleIn(BaseModel):
     alterado_por: Optional[str] = None
     alteracao_tipo: Optional[str] = None
     alteracao_detalhe: Optional[str] = None
+    lat_evento: Optional[float] = None
+    lon_evento: Optional[float] = None
+    endereco_evento: Optional[str] = None
+    cidade_evento: Optional[str] = None
+    bairro_evento: Optional[str] = None
     evento_em: Optional[str] = None
     idempotency_key: Optional[str] = None
 
@@ -3638,6 +3689,11 @@ def rota_detalhe(codigo_programacao: str, m=Depends(get_current_motorista)):
                 d["preco_atual"] = c.get("preco_atual")
                 d["alterado_em"] = c.get("alterado_em")
                 d["alterado_por"] = c.get("alterado_por")
+                d["lat_evento"] = c.get("lat_evento")
+                d["lon_evento"] = c.get("lon_evento")
+                d["endereco_evento"] = c.get("endereco_evento")
+                d["cidade_evento"] = c.get("cidade_evento")
+                d["bairro_evento"] = c.get("bairro_evento")
             clientes.append(d)
 
         return {"rota": rota, "clientes": clientes}
@@ -3772,6 +3828,11 @@ def rota_detalhe_desktop(codigo_programacao: str, _ok: bool = Depends(_require_d
                 d["preco_atual"] = c.get("preco_atual")
                 d["alterado_em"] = c.get("alterado_em") or c.get("updated_at")
                 d["alterado_por"] = c.get("alterado_por")
+                d["lat_evento"] = c.get("lat_evento")
+                d["lon_evento"] = c.get("lon_evento")
+                d["endereco_evento"] = c.get("endereco_evento")
+                d["cidade_evento"] = c.get("cidade_evento")
+                d["bairro_evento"] = c.get("bairro_evento")
 
             # Fallback por logs do item (quando controle não tiver horário/local completos)
             lg = log_map.get((cod, ped))
@@ -5189,6 +5250,11 @@ def salvar_controle_cliente(
         alterado_por = (payload.alterado_por or nome_motorista or None)
         alteracao_tipo = (payload.alteracao_tipo or None)
         alteracao_detalhe = (payload.alteracao_detalhe or None)
+        lat_evento = payload.lat_evento
+        lon_evento = payload.lon_evento
+        endereco_evento = (payload.endereco_evento or None)
+        cidade_evento = (payload.cidade_evento or None)
+        bairro_evento = (payload.bairro_evento or None)
 
         # busca item base (para status/valores), priorizando o pedido informado
         cur.execute("PRAGMA table_info(programacao_itens)")
@@ -5355,6 +5421,11 @@ def salvar_controle_cliente(
                    preco_atual=?,
                    alterado_em=COALESCE(?, alterado_em),
                    alterado_por=?,
+                   lat_evento=COALESCE(?, lat_evento),
+                   lon_evento=COALESCE(?, lon_evento),
+                   endereco_evento=COALESCE(NULLIF(?, ''), endereco_evento),
+                   cidade_evento=COALESCE(NULLIF(?, ''), cidade_evento),
+                   bairro_evento=COALESCE(NULLIF(?, ''), bairro_evento),
                    updated_at=datetime('now')
              WHERE codigo_programacao=? AND cod_cliente=? AND COALESCE(pedido, '')=COALESCE(?, '')
             """,
@@ -5373,6 +5444,11 @@ def salvar_controle_cliente(
                 preco_eff,
                 alterado_em,
                 alterado_por,
+                lat_evento,
+                lon_evento,
+                endereco_evento,
+                cidade_evento,
+                bairro_evento,
                 codigo_programacao,
                 cod_cliente,
                 pedido,
@@ -5386,8 +5462,9 @@ def salvar_controle_cliente(
                     (codigo_programacao, cod_cliente, mortalidade_aves, media_aplicada, peso_previsto,
                      valor_recebido, forma_recebimento, obs_recebimento,
                      status_pedido, alteracao_tipo, alteracao_detalhe, pedido,
-                     caixas_atual, preco_atual, alterado_em, alterado_por, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                     caixas_atual, preco_atual, alterado_em, alterado_por,
+                     lat_evento, lon_evento, endereco_evento, cidade_evento, bairro_evento, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                 """,
                 (
                     codigo_programacao,
@@ -5406,6 +5483,11 @@ def salvar_controle_cliente(
                     preco_eff,
                     alterado_em,
                     alterado_por,
+                    lat_evento,
+                    lon_evento,
+                    endereco_evento,
+                    cidade_evento,
+                    bairro_evento,
                 ),
             )
 
@@ -5535,6 +5617,25 @@ def salvar_controle_cliente(
                 VALUES (?, ?, ?, ?)
                 """,
                 (codigo_programacao, cod_cliente, "cliente_controle", payload_json),
+            )
+        except Exception:
+            pass
+
+        try:
+            _registrar_amostra_localizacao_cliente(
+                cur,
+                cod_cliente=cod_cliente,
+                codigo_programacao=codigo_programacao,
+                pedido=pedido,
+                lat_evento=lat_evento,
+                lon_evento=lon_evento,
+                endereco_evento=endereco_evento,
+                cidade_evento=cidade_evento,
+                bairro_evento=bairro_evento,
+                status_pedido=status,
+                motorista_codigo=codigo_motorista,
+                motorista_nome=nome_motorista,
+                origem="APP",
             )
         except Exception:
             pass
@@ -6601,6 +6702,50 @@ def _get_motorista_by_codigo(cur: sqlite3.Cursor, codigo: str) -> Optional[sqlit
     return cur.fetchone()
 
 
+def _registrar_amostra_localizacao_cliente(
+    cur: sqlite3.Cursor,
+    *,
+    cod_cliente: str,
+    codigo_programacao: str,
+    pedido: Optional[str],
+    lat_evento: Optional[float],
+    lon_evento: Optional[float],
+    endereco_evento: Optional[str],
+    cidade_evento: Optional[str],
+    bairro_evento: Optional[str],
+    status_pedido: Optional[str],
+    motorista_codigo: Optional[str],
+    motorista_nome: Optional[str],
+    origem: str = "APP",
+) -> None:
+    has_geo = lat_evento not in (None, "") and lon_evento not in (None, "")
+    has_addr = any(str(v or "").strip() for v in (endereco_evento, cidade_evento, bairro_evento))
+    if not has_geo and not has_addr:
+        return
+    cur.execute(
+        """
+        INSERT INTO cliente_localizacao_amostras
+            (cod_cliente, codigo_programacao, pedido, latitude, longitude, endereco, cidade, bairro,
+             status_pedido, motorista_codigo, motorista_nome, origem, registrado_em)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        """,
+        (
+            (cod_cliente or "").strip().upper(),
+            (codigo_programacao or "").strip().upper(),
+            (pedido or "").strip(),
+            float(lat_evento) if lat_evento not in (None, "") else None,
+            float(lon_evento) if lon_evento not in (None, "") else None,
+            str(endereco_evento or "").strip().upper(),
+            str(cidade_evento or "").strip().upper(),
+            str(bairro_evento or "").strip().upper(),
+            str(status_pedido or "").strip().upper(),
+            str(motorista_codigo or "").strip().upper(),
+            str(motorista_nome or "").strip().upper(),
+            str(origem or "APP").strip().upper(),
+        ),
+    )
+
+
 def _serialize_substituicao_row(row: sqlite3.Row) -> Dict[str, Any]:
     return {
         "id": row["id"],
@@ -7479,6 +7624,34 @@ def desktop_apagar_vendas_importadas(_ok: bool = Depends(_require_desktop_secret
         ensure_core_schema(conn)
         cur = conn.cursor()
         cur.execute("DELETE FROM vendas_importadas")
+        deleted = int(cur.rowcount or 0)
+    return {"ok": True, "deleted": deleted}
+
+
+@app.delete("/desktop/vendas-importadas/ids")
+def desktop_apagar_ids_vendas_importadas(
+    ids: str = Query("", description="CSV de ids"),
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    raw_ids = [x.strip() for x in str(ids or "").split(",") if x.strip()]
+    id_list: List[int] = []
+    for x in raw_ids:
+        try:
+            v = int(x)
+        except Exception:
+            continue
+        if v > 0:
+            id_list.append(v)
+    if not id_list:
+        return {"ok": True, "deleted": 0}
+
+    with get_conn() as conn:
+        ensure_core_schema(conn)
+        cur = conn.cursor()
+        cur.executemany(
+            "DELETE FROM vendas_importadas WHERE id=? AND IFNULL(usada,0)=0",
+            [(rid,) for rid in id_list],
+        )
         deleted = int(cur.rowcount or 0)
     return {"ok": True, "deleted": deleted}
 

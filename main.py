@@ -87,6 +87,51 @@ SCHEMA_VERSION = APP_CONFIG.schema_version
 os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
 
 
+def enable_high_dpi_awareness():
+    """Melhora consistencia visual no Windows com escalas 100/125/150%."""
+    if os.name != "nt":
+        return
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        return
+    except Exception:
+        logging.debug("Falha ignorada")
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        logging.debug("Falha ignorada")
+
+
+def compute_initial_window_size(win) -> tuple[int, int]:
+    """Define tamanho inicial proporcional ao monitor atual."""
+    try:
+        sw = int(win.winfo_screenwidth() or APP_W)
+        sh = int(win.winfo_screenheight() or APP_H)
+    except Exception:
+        return APP_W, APP_H
+
+    width = max(1180, min(int(sw * 0.92), 1760))
+    height = max(700, min(int(sh * 0.9), 1040))
+    return width, height
+
+
+def compute_sidebar_width(win) -> int:
+    try:
+        sw = int(win.winfo_screenwidth() or APP_W)
+    except Exception:
+        return 280
+    if sw <= 1366:
+        return 240
+    if sw <= 1600:
+        return 255
+    if sw <= 1920:
+        return 270
+    return 290
+
+
+enable_high_dpi_awareness()
+
+
 def is_desktop_api_sync_enabled() -> bool:
     """Controla sincronizacao automatica Desktop <-> API central.
     O runtime define o valor padrao por ambiente; a variavel de ambiente
@@ -1775,6 +1820,8 @@ def db_init():
         safe_add_column(cur, "clientes", "telefone", "TEXT")
         safe_add_column(cur, "clientes", "rota", "TEXT")
         safe_add_column(cur, "clientes", "vendedor", "TEXT")
+        safe_add_column(cur, "clientes", "latitude", "REAL")
+        safe_add_column(cur, "clientes", "longitude", "REAL")
 
         try:
             cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_clientes_cod ON clientes(cod_cliente)")
@@ -1939,10 +1986,20 @@ def db_init():
                 peso_previsto REAL DEFAULT 0,
                 valor_recebido REAL DEFAULT 0,
                 forma_recebimento TEXT,
-                obs_recebimento TEXT
+                obs_recebimento TEXT,
+                lat_evento REAL,
+                lon_evento REAL,
+                endereco_evento TEXT,
+                cidade_evento TEXT,
+                bairro_evento TEXT
             )
         """)
         safe_add_column(cur, "programacao_itens_controle", "peso_previsto", "REAL DEFAULT 0")
+        safe_add_column(cur, "programacao_itens_controle", "lat_evento", "REAL")
+        safe_add_column(cur, "programacao_itens_controle", "lon_evento", "REAL")
+        safe_add_column(cur, "programacao_itens_controle", "endereco_evento", "TEXT")
+        safe_add_column(cur, "programacao_itens_controle", "cidade_evento", "TEXT")
+        safe_add_column(cur, "programacao_itens_controle", "bairro_evento", "TEXT")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS programacao_itens_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1952,6 +2009,27 @@ def db_init():
                 registrado_em TEXT
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS cliente_localizacao_amostras (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cod_cliente TEXT NOT NULL,
+                codigo_programacao TEXT,
+                pedido TEXT,
+                latitude REAL,
+                longitude REAL,
+                endereco TEXT,
+                cidade TEXT,
+                bairro TEXT,
+                status_pedido TEXT,
+                motorista TEXT,
+                origem TEXT DEFAULT 'APP',
+                registrado_em TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        try:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_cli_loc_amostras_cliente ON cliente_localizacao_amostras(cod_cliente, registrado_em DESC)")
+        except Exception as e:
+            logging.exception("Falha ao criar indice cliente_localizacao_amostras(cod_cliente): %s", e)
 
         # RECEBIMENTOS
         cur.execute("""
@@ -2241,6 +2319,15 @@ def apply_style(root):
     style.configure("Primary.TButton", font=("Segoe UI Semibold", 10), padding=(16, 11), borderwidth=0)
     style.configure("Ghost.TButton", font=("Segoe UI Semibold", 10), padding=(16, 11), borderwidth=0)
     style.configure("CompactGhost.TButton", font=("Segoe UI Semibold", 9), padding=(8, 6), borderwidth=0)
+    style.configure(
+        "Toggle.TButton",
+        background="#DBEAFE",
+        foreground="#1D4ED8",
+        font=("Segoe UI Semibold", 9),
+        padding=(10, 6),
+        borderwidth=0,
+    )
+    style.map("Toggle.TButton", background=[("active", "#BFDBFE")], foreground=[("active", "#1E40AF")])
     style.configure("Warn.TButton", foreground="white", font=("Segoe UI Semibold", 10), padding=(16, 11), borderwidth=0)
     style.configure("Danger.TButton", font=("Segoe UI Semibold", 10), padding=(16, 11), borderwidth=0)
     style.configure("TNotebook", background=BG, borderwidth=0, tabmargins=(0, 0, 0, 0))
@@ -2302,10 +2389,46 @@ class PageBase(ttk.Frame):
 
         ttk.Separator(self).grid(row=1, column=0, sticky="ew")
 
-        self.body = ttk.Frame(self, style="Content.TFrame", padding=(22, 18))
-        self.body.grid(row=2, column=0, sticky="nsew")
+        body_shell = ttk.Frame(self, style="Content.TFrame")
+        body_shell.grid(row=2, column=0, sticky="nsew")
+        body_shell.grid_rowconfigure(0, weight=1)
+        body_shell.grid_columnconfigure(0, weight=1)
+        self.body_shell = body_shell
+
+        body_bg = ttk.Style(self).lookup("Content.TFrame", "background") or "#F4F6FB"
+        self.body_canvas = tk.Canvas(
+            body_shell,
+            highlightthickness=0,
+            bd=0,
+            relief="flat",
+            background=body_bg,
+        )
+        self.body_canvas.grid(row=0, column=0, sticky="nsew")
+
+        self.body_scrollbar = ttk.Scrollbar(body_shell, orient="vertical", command=self.body_canvas.yview)
+        self.body_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.body_canvas.configure(yscrollcommand=self.body_scrollbar.set)
+
+        self.body = ttk.Frame(self.body_canvas, style="Content.TFrame", padding=(22, 18))
         self.body.grid_columnconfigure(0, weight=1)
         self.body.grid_rowconfigure(1, weight=1)
+        self._body_window = self.body_canvas.create_window((0, 0), window=self.body, anchor="nw")
+
+        def _sync_body_scrollregion(_event=None):
+            try:
+                self.body_canvas.configure(scrollregion=self.body_canvas.bbox("all"))
+            except Exception:
+                logging.debug("Falha ignorada")
+
+        def _fit_body_size(event):
+            try:
+                req_h = max(self.body.winfo_reqheight(), event.height)
+                self.body_canvas.itemconfigure(self._body_window, width=event.width, height=req_h)
+            except Exception:
+                logging.debug("Falha ignorada")
+
+        self.body.bind("<Configure>", _sync_body_scrollregion, add="+")
+        self.body_canvas.bind("<Configure>", _fit_body_size, add="+")
 
         ttk.Separator(self).grid(row=3, column=0, sticky="ew")
 
@@ -2342,6 +2465,7 @@ class CadastroCRUD(ttk.Frame):
         self.table = table
         self.fields = fields
         self.app = app
+        self._body_window = None
         self.selected_id = None
         self._is_admin = bool(getattr(self.app, "user", {}).get("is_admin")) if self.app else False
         self._edit_mode = "view"  # view | novo | status
@@ -2349,10 +2473,11 @@ class CadastroCRUD(ttk.Frame):
         self._load_seq = 0
 
         # Card
-        card = ttk.Frame(self, style="Card.TFrame", padding=18)
+        card = ttk.Frame(self, style="Card.TFrame", padding=20)
         card.pack(fill="both", expand=True)
 
         card.grid_columnconfigure(0, weight=1)
+        card.grid_rowconfigure(3, weight=1)
         card.grid_rowconfigure(6, weight=1)
 
         ttk.Label(card, text=titulo, style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
@@ -4074,9 +4199,11 @@ class CadastroCRUD(ttk.Frame):
 
 class Sidebar(ttk.Frame):
     def __init__(self, parent, app):
-        super().__init__(parent, style="Sidebar.TFrame", width=280)
+        sidebar_width = compute_sidebar_width(parent)
+        super().__init__(parent, style="Sidebar.TFrame", width=sidebar_width)
         self.app = app
         self.pack_propagate(False)
+        self.configure(width=sidebar_width)
 
         self.buttons = {}
 
@@ -4173,8 +4300,9 @@ class App(tk.Tk):
 
         self.title(APP_TITLE_DESKTOP)
         apply_window_icon(self)
-        self.geometry(f"{APP_W}x{APP_H}")
-        self.minsize(1100, 680)
+        init_w, init_h = compute_initial_window_size(self)
+        self.geometry(f"{init_w}x{init_h}")
+        self.minsize(1080, 680)
 
         try:
             self.state("zoomed")
@@ -4190,9 +4318,10 @@ class App(tk.Tk):
 
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(1, weight=1)
+        self.grid_columnconfigure(0, minsize=compute_sidebar_width(self))
 
         self.sidebar = Sidebar(self, self)
-        self.sidebar.grid(row=0, column=0, sticky="ns")
+        self.sidebar.grid(row=0, column=0, sticky="nsew")
 
         self.container = ttk.Frame(self, style="Content.TFrame")
         self.container.grid(row=0, column=1, sticky="nsew")
@@ -5927,34 +6056,112 @@ class HomePage(PageBase):
             return ctx
 
         def _collect_cliente_location(cod_cli: str):
-            loc = {"latitude": "", "longitude": "", "endereco": "", "cidade": "", "bairro": ""}
+            loc = {
+                "latitude": "",
+                "longitude": "",
+                "endereco": "",
+                "cidade": "",
+                "bairro": "",
+                "amostras": 0,
+                "ultima_coleta_em": "",
+                "ultima_status": "",
+                "ultima_origem": "",
+                "lat_recorrente": "",
+                "lon_recorrente": "",
+                "endereco_recorrente": "",
+                "cidade_recorrente": "",
+                "bairro_recorrente": "",
+                "recorrencia_qtd": 0,
+            }
             try:
                 with get_db() as conn:
                     cur = conn.cursor()
                     cols = _table_cols(cur, "clientes")
-                    if not cols:
-                        return loc
-                    lat_col = "latitude" if "latitude" in cols else ("lat" if "lat" in cols else "")
-                    lon_col = "longitude" if "longitude" in cols else ("lon" if "lon" in cols else "")
-                    end_col = "endereco" if "endereco" in cols else ""
-                    cid_col = "cidade" if "cidade" in cols else ""
-                    bai_col = "bairro" if "bairro" in cols else ""
-                    sel = [
-                        (lat_col if lat_col else "''") + " as latitude",
-                        (lon_col if lon_col else "''") + " as longitude",
-                        (end_col if end_col else "''") + " as endereco",
-                        (cid_col if cid_col else "''") + " as cidade",
-                        (bai_col if bai_col else "''") + " as bairro",
-                    ]
-                    cur.execute(
-                        f"SELECT {', '.join(sel)} FROM clientes WHERE UPPER(COALESCE(cod_cliente,''))=UPPER(?) LIMIT 1",
-                        (cod_cli,),
-                    )
-                    r = cur.fetchone()
-                    if r:
-                        rr = dict(r) if hasattr(r, "keys") else {}
-                        for k in loc.keys():
-                            loc[k] = str(rr.get(k) or "")
+                    if cols:
+                        lat_col = "latitude" if "latitude" in cols else ("lat" if "lat" in cols else "")
+                        lon_col = "longitude" if "longitude" in cols else ("lon" if "lon" in cols else "")
+                        end_col = "endereco" if "endereco" in cols else ""
+                        cid_col = "cidade" if "cidade" in cols else ""
+                        bai_col = "bairro" if "bairro" in cols else ""
+                        sel = [
+                            (lat_col if lat_col else "''") + " as latitude",
+                            (lon_col if lon_col else "''") + " as longitude",
+                            (end_col if end_col else "''") + " as endereco",
+                            (cid_col if cid_col else "''") + " as cidade",
+                            (bai_col if bai_col else "''") + " as bairro",
+                        ]
+                        cur.execute(
+                            f"SELECT {', '.join(sel)} FROM clientes WHERE UPPER(COALESCE(cod_cliente,''))=UPPER(?) LIMIT 1",
+                            (cod_cli,),
+                        )
+                        r = cur.fetchone()
+                        if r:
+                            rr = dict(r) if hasattr(r, "keys") else {}
+                            for k in ("latitude", "longitude", "endereco", "cidade", "bairro"):
+                                loc[k] = str(rr.get(k) or "")
+
+                    if _has_table("cliente_localizacao_amostras"):
+                        cur.execute(
+                            """
+                            SELECT COUNT(*) AS qtd, MAX(COALESCE(registrado_em, '')) AS ultima
+                            FROM cliente_localizacao_amostras
+                            WHERE UPPER(COALESCE(cod_cliente,''))=UPPER(?)
+                            """,
+                            (cod_cli,),
+                        )
+                        r_count = cur.fetchone()
+                        if r_count:
+                            loc["amostras"] = safe_int(r_count["qtd"], 0)
+                            loc["ultima_coleta_em"] = str(r_count["ultima"] or "")
+
+                        cur.execute(
+                            """
+                            SELECT latitude, longitude, endereco, cidade, bairro, status_pedido, origem, registrado_em
+                            FROM cliente_localizacao_amostras
+                            WHERE UPPER(COALESCE(cod_cliente,''))=UPPER(?)
+                            ORDER BY COALESCE(registrado_em, '') DESC, id DESC
+                            LIMIT 1
+                            """,
+                            (cod_cli,),
+                        )
+                        r_last = cur.fetchone()
+                        if r_last:
+                            rr_last = dict(r_last) if hasattr(r_last, "keys") else {}
+                            loc["ultima_status"] = str(rr_last.get("status_pedido") or "")
+                            loc["ultima_origem"] = str(rr_last.get("origem") or "")
+                            if rr_last.get("registrado_em"):
+                                loc["ultima_coleta_em"] = str(rr_last.get("registrado_em") or "")
+                            for k in ("latitude", "longitude", "endereco", "cidade", "bairro"):
+                                if not str(loc.get(k) or "").strip() and rr_last.get(k) not in (None, ""):
+                                    loc[k] = str(rr_last.get(k) or "")
+
+                        cur.execute(
+                            """
+                            SELECT latitude, longitude, endereco, cidade, bairro, COUNT(*) AS freq
+                            FROM cliente_localizacao_amostras
+                            WHERE UPPER(COALESCE(cod_cliente,''))=UPPER(?)
+                              AND (
+                                    latitude IS NOT NULL
+                                 OR longitude IS NOT NULL
+                                 OR TRIM(COALESCE(endereco, '')) <> ''
+                                 OR TRIM(COALESCE(cidade, '')) <> ''
+                                 OR TRIM(COALESCE(bairro, '')) <> ''
+                              )
+                            GROUP BY latitude, longitude, endereco, cidade, bairro
+                            ORDER BY freq DESC, MAX(COALESCE(registrado_em, '')) DESC
+                            LIMIT 1
+                            """,
+                            (cod_cli,),
+                        )
+                        r_best = cur.fetchone()
+                        if r_best:
+                            rr_best = dict(r_best) if hasattr(r_best, "keys") else {}
+                            loc["lat_recorrente"] = str(rr_best.get("latitude") or "")
+                            loc["lon_recorrente"] = str(rr_best.get("longitude") or "")
+                            loc["endereco_recorrente"] = str(rr_best.get("endereco") or "")
+                            loc["cidade_recorrente"] = str(rr_best.get("cidade") or "")
+                            loc["bairro_recorrente"] = str(rr_best.get("bairro") or "")
+                            loc["recorrencia_qtd"] = safe_int(rr_best.get("freq"), 0)
             except Exception:
                 logging.debug("Falha ao coletar localização do cliente", exc_info=True)
             return loc
@@ -6004,6 +6211,27 @@ class HomePage(PageBase):
                 local["cidade"] = str(item_data.get("cidade_evento") or "").strip()
             if not str(local.get("bairro") or "").strip():
                 local["bairro"] = str(item_data.get("bairro_evento") or "").strip()
+            checklist = [
+                ("Status recebido do APK", bool(status_item)),
+                ("Hora da alteracao", bool(alterado_em)),
+                (
+                    "Alteracao do pedido",
+                    bool(alteracao_tipo or alteracao_detalhe or delta_cx != 0 or abs(delta_preco) > 0.0001),
+                ),
+                (
+                    "Coordenadas do evento",
+                    bool(str(local.get("latitude") or "").strip() and str(local.get("longitude") or "").strip()),
+                ),
+                (
+                    "Endereco do evento",
+                    bool(
+                        str(local.get("endereco") or "").strip()
+                        or str(local.get("cidade") or "").strip()
+                        or str(local.get("bairro") or "").strip()
+                    ),
+                ),
+                ("Amostras armazenadas", safe_int(local.get("amostras"), 0) > 0),
+            ]
 
             linhas = []
             linhas.append(f"PROGRAMAÇÃO: {cabecalho_ctx.get('codigo') or codigo}")
@@ -6044,6 +6272,17 @@ class HomePage(PageBase):
             linhas.append(f"LONGITUDE: {local.get('longitude') or '-'}")
             linhas.append(f"ENDEREÇO: {local.get('endereco') or '-'}")
             linhas.append(f"CIDADE: {local.get('cidade') or '-'}    BAIRRO: {local.get('bairro') or '-'}")
+            linhas.append(
+                f"AMOSTRAS COLETADAS: {safe_int(local.get('amostras'), 0)}    ULTIMA LEITURA: {local.get('ultima_coleta_em') or '-'}"
+            )
+            linhas.append(
+                "LOCAL MAIS RECORRENTE: "
+                f"{local.get('endereco_recorrente') or '-'} / {local.get('cidade_recorrente') or '-'} / {local.get('bairro_recorrente') or '-'} "
+                f"(freq. {safe_int(local.get('recorrencia_qtd'), 0)})"
+            )
+            linhas.append("[CHECKLIST APK / SINCRONIA]")
+            for rotulo, ok in checklist:
+                linhas.append(f"{rotulo}: {'OK' if ok else 'PENDENTE'}")
             linhas.append("-" * 110)
             linhas.append("[TRANSFERÊNCIAS / DIRECIONAMENTO]")
             if not transferencias:
@@ -6216,7 +6455,9 @@ class HomePage(PageBase):
             grp_rst = ttk.LabelFrame(tab_resumo, text="Rastreabilidade", padding=10)
             grp_rst.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=(0, 8))
             grp_geo = ttk.LabelFrame(tab_resumo, text="Localização do Cliente", padding=10)
-            grp_geo.grid(row=1, column=0, columnspan=2, sticky="nsew")
+            grp_geo.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
+            grp_check = ttk.LabelFrame(tab_resumo, text="Checklist APK / Sincronia", padding=10)
+            grp_check.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
 
             l_ent = [
                 f"Caixas origem: {cx_orig}",
@@ -6254,6 +6495,57 @@ class HomePage(PageBase):
             ttk.Label(grp_geo, text=f"Endereço: {local.get('endereco') or '-'}").grid(row=1, column=0, columnspan=2, sticky="w")
             ttk.Label(grp_geo, text=f"Cidade: {local.get('cidade') or '-'}").grid(row=2, column=0, sticky="w")
             ttk.Label(grp_geo, text=f"Bairro: {local.get('bairro') or '-'}").grid(row=2, column=1, sticky="w")
+            ttk.Label(grp_geo, text=f"Amostras coletadas: {safe_int(local.get('amostras'), 0)}").grid(row=3, column=0, sticky="w", pady=(6, 0))
+            ttk.Label(grp_geo, text=f"Ultima leitura: {local.get('ultima_coleta_em') or '-'}").grid(row=3, column=1, sticky="w", pady=(6, 0))
+            ttk.Label(grp_geo, text=f"Origem mais recente: {local.get('ultima_origem') or '-'}").grid(row=4, column=0, sticky="w")
+            ttk.Label(grp_geo, text=f"Status mais recente: {local.get('ultima_status') or '-'}").grid(row=4, column=1, sticky="w")
+            ttk.Label(
+                grp_geo,
+                text=(
+                    f"Ponto recorrente: {local.get('endereco_recorrente') or '-'}"
+                    f" | {local.get('cidade_recorrente') or '-'}"
+                    f" | {local.get('bairro_recorrente') or '-'}"
+                ),
+                wraplength=430,
+                justify="left",
+            ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(6, 0))
+            ttk.Label(
+                grp_geo,
+                text=(
+                    f"Coordenadas recorrentes: {local.get('lat_recorrente') or '-'} / {local.get('lon_recorrente') or '-'}"
+                    f"  | Frequencia: {safe_int(local.get('recorrencia_qtd'), 0)}"
+                ),
+            ).grid(row=6, column=0, columnspan=2, sticky="w")
+
+            checklist = [
+                ("Status recebido do APK", bool(status_pedido)),
+                ("Hora da alteracao", bool(alterado_em)),
+                (
+                    "Alteracao do pedido capturada",
+                    bool(alteracao_tipo or alteracao_detalhe or delta_cx != 0 or abs(delta_preco) > 0.0001),
+                ),
+                (
+                    "Latitude / Longitude salvas",
+                    bool(str(local.get("latitude") or "").strip() and str(local.get("longitude") or "").strip()),
+                ),
+                (
+                    "Endereco / cidade / bairro salvos",
+                    bool(
+                        str(local.get("endereco") or "").strip()
+                        or str(local.get("cidade") or "").strip()
+                        or str(local.get("bairro") or "").strip()
+                    ),
+                ),
+                ("Amostras historicas registradas", safe_int(local.get("amostras"), 0) > 0),
+            ]
+            for i, (label, ok) in enumerate(checklist):
+                ttk.Label(grp_check, text=label + ":").grid(row=i, column=0, sticky="w", pady=2)
+                ttk.Label(
+                    grp_check,
+                    text="OK" if ok else "PENDENTE",
+                    foreground="#16A34A" if ok else "#B45309",
+                    font=("Segoe UI", 9, "bold"),
+                ).grid(row=i, column=1, sticky="w", padx=(8, 0), pady=2)
 
             # TAB HISTORICO
             tab_hist.grid_rowconfigure(1, weight=1)
@@ -8163,7 +8455,7 @@ class ClientesImportPage(ttk.Frame):
 
         actions = ttk.Frame(card, style="Card.TFrame")
         actions.grid(row=1, column=0, sticky="ew", pady=(12, 10))
-        actions.grid_columnconfigure(10, weight=1)
+        actions.grid_columnconfigure(4, weight=1)
 
         self.btn_importar = ttk.Button(actions, text="IMPORTAR CLIENTES (EXCEL)", style="Warn.TButton",
                                        command=self.importar_clientes_excel)
@@ -8188,10 +8480,10 @@ class ClientesImportPage(ttk.Frame):
             foreground="#6B7280",
             font=("Segoe UI", 8, "bold")
         )
-        self.lbl_info.grid(row=0, column=4, padx=12, sticky="w")
+        self.lbl_info.grid(row=0, column=4, padx=(12, 0), sticky="e")
 
         self.pb_loading = ttk.Progressbar(actions, mode="indeterminate", length=150)
-        self.pb_loading.grid(row=0, column=5, padx=(12, 8), sticky="w")
+        self.pb_loading.grid(row=1, column=0, columnspan=2, padx=6, pady=(8, 0), sticky="w")
         self.lbl_loading = ttk.Label(
             actions,
             text="",
@@ -8199,7 +8491,7 @@ class ClientesImportPage(ttk.Frame):
             foreground="#2563EB",
             font=("Segoe UI", 8, "bold")
         )
-        self.lbl_loading.grid(row=0, column=6, padx=(0, 6), sticky="w")
+        self.lbl_loading.grid(row=1, column=2, columnspan=3, padx=(8, 6), pady=(8, 0), sticky="w")
 
         cols = ["CÓD CLIENTE", "NOME CLIENTE", "ENDEREÇO", "TELEFONE", "VENDEDOR"]
         table_wrap = ttk.Frame(card, style="Card.TFrame")
@@ -8918,6 +9210,10 @@ class ImportarVendasPage(PageBase):
 
         self.tree.bind("<Double-1>", self.toggle_selected)
         self.tree.bind("<Button-1>", self._on_tree_click_toggle_sel, add="+")
+        self.tree.bind("<Control-a>", self._shortcut_select_all_tree)
+        self.tree.bind("<Control-A>", self._shortcut_select_all_tree)
+        self.tree.bind("<space>", self._shortcut_toggle_selected_rows)
+        self.tree.bind("<Delete>", self._shortcut_delete_selected_rows)
 
         enable_treeview_sorting(
             self.tree,
@@ -9385,6 +9681,86 @@ class ImportarVendasPage(PageBase):
 
         self.carregar()
 
+    def _shortcut_select_all_tree(self, event=None):
+        try:
+            items = self.tree.get_children()
+            if items:
+                self.tree.selection_set(items)
+                self.tree.focus(items[0])
+        except Exception:
+            logging.debug("Falha ao selecionar todas as vendas importadas.", exc_info=True)
+        return "break"
+
+    def _shortcut_toggle_selected_rows(self, event=None):
+        itens = tuple(self.tree.selection() or ())
+        if not itens:
+            focus = self.tree.focus()
+            if focus:
+                itens = (focus,)
+        if not itens:
+            return "break"
+
+        for iid in itens:
+            self._toggle_selected_iid(iid)
+        self.carregar()
+        self.set_status(f"STATUS: Marcacao atualizada para {len(itens)} venda(s).")
+        return "break"
+
+    def _shortcut_delete_selected_rows(self, event=None):
+        itens = tuple(self.tree.selection() or ())
+        if not itens:
+            focus = self.tree.focus()
+            if focus:
+                itens = (focus,)
+        if not itens:
+            return "break"
+
+        ids = []
+        seen = set()
+        for iid in itens:
+            vals = self.tree.item(iid, "values") or ()
+            if not vals:
+                continue
+            rid = safe_int(vals[0], 0)
+            if rid > 0 and rid not in seen:
+                seen.add(rid)
+                ids.append(rid)
+
+        if not ids:
+            return "break"
+
+        if not messagebox.askyesno(
+            "CONFIRMAR",
+            f"Deseja excluir {len(ids)} venda(s) importada(s) selecionada(s)?",
+        ):
+            return "break"
+
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                ids_csv = ",".join(str(x) for x in ids)
+                _call_api(
+                    "DELETE",
+                    f"desktop/vendas-importadas/ids?ids={urllib.parse.quote(ids_csv)}",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                self.carregar()
+                self.set_status(f"STATUS: {len(ids)} venda(s) importada(s) excluida(s).")
+                return "break"
+            except Exception:
+                logging.debug("Falha ao excluir vendas importadas via API; usando fallback local.", exc_info=True)
+
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.executemany(
+                "DELETE FROM vendas_importadas WHERE id=? AND IFNULL(usada,0)=0",
+                [(rid,) for rid in ids],
+            )
+
+        self.carregar()
+        self.set_status(f"STATUS: {len(ids)} venda(s) importada(s) excluida(s).")
+        return "break"
+
     def _toggle_selected_iid(self, iid):
         vals = self.tree.item(iid, "values") or ()
         if not vals:
@@ -9550,42 +9926,136 @@ class ProgramacaoPage(PageBase):
         # -------------------------
         card = ttk.Frame(self.body, style="Card.TFrame", padding=14)
         card.grid(row=0, column=0, sticky="ew")
-        for col in range(0, 9):
-            card.grid_columnconfigure(col, weight=1, uniform="prog_head")
+        card.grid_columnconfigure(0, weight=5, minsize=480)
+        card.grid_columnconfigure(1, weight=6, minsize=500)
+        card.grid_columnconfigure(2, weight=3, minsize=260)
 
-        ttk.Label(card, text="Motorista", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w")
-        self.cb_motorista = ttk.Combobox(card, state="readonly", width=16)
-        self.cb_motorista.grid(row=1, column=0, sticky="ew", padx=6)
+        team = ttk.Frame(card, style="CardInset.TFrame", padding=(12, 10))
+        team.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        team.grid_columnconfigure(0, weight=3, minsize=140)
+        team.grid_columnconfigure(1, weight=3, minsize=140)
+        team.grid_columnconfigure(2, weight=5, minsize=260)
+
+        route = ttk.Frame(card, style="CardInset.TFrame", padding=(12, 10))
+        route.grid(row=0, column=1, sticky="nsew", padx=(0, 10))
+        route.grid_columnconfigure(0, weight=3, minsize=120)
+        route.grid_columnconfigure(1, weight=3, minsize=160)
+        route.grid_columnconfigure(2, weight=3, minsize=140)
+        route.grid_columnconfigure(3, weight=2, minsize=120)
+
+        control = ttk.Frame(card, style="CardInset.TFrame", padding=(12, 10))
+        control.grid(row=0, column=2, sticky="nsew")
+        control.grid_columnconfigure(0, weight=1, minsize=130)
+        control.grid_columnconfigure(1, weight=1, minsize=120)
+
+        ttk.Label(team, text="Motorista", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w")
+        self.cb_motorista = ttk.Combobox(team, state="readonly")
+        self.cb_motorista.grid(row=1, column=0, sticky="ew", padx=(0, 8))
+
+        ttk.Label(team, text="Veiculo", style="CardLabel.TLabel").grid(row=0, column=1, sticky="w")
+        self.cb_veiculo = ttk.Combobox(team, state="readonly")
+        self.cb_veiculo.grid(row=1, column=1, sticky="ew", padx=(0, 8))
+
+        ttk.Label(team, text="Ajudantes", style="CardLabel.TLabel").grid(row=0, column=2, sticky="w")
+        self.btn_ajudantes = ttk.Button(
+            team,
+            text="\U0001F465 Selecionar ajudantes",
+            style="Ghost.TButton",
+            command=self._open_ajudantes_selector,
+        )
+        self.btn_ajudantes.grid(row=1, column=2, sticky="ew")
+        self.lbl_ajudantes_sel = ttk.Label(
+            team,
+            text="Nenhum selecionado",
+            style="CardLabel.TLabel",
+            wraplength=250,
+        )
+        self.lbl_ajudantes_sel.grid(row=2, column=2, sticky="w", pady=(6, 0))
+
+        ttk.Label(route, text="Local da Rota", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w")
+        self.cb_local_rota = ttk.Combobox(route, state="readonly", values=["SERRA", "SERTAO"])
+        self.cb_local_rota.grid(row=1, column=0, sticky="ew", padx=(0, 10))
+
+        ttk.Label(route, text="Estimativa (KG/CX)", style="CardLabel.TLabel").grid(row=0, column=1, sticky="w")
+        frm_estim = ttk.Frame(route, style="CardInset.TFrame")
+        frm_estim.grid(row=1, column=1, sticky="ew", padx=(0, 10))
+        frm_estim.grid_columnconfigure(1, weight=1)
+        self.cb_estimativa_tipo = ttk.Combobox(frm_estim, state="readonly", values=["KG", "CX"], width=5)
+        self.cb_estimativa_tipo.grid(row=0, column=0, sticky="w")
+        self.cb_estimativa_tipo.set("KG")
+        self.cb_estimativa_tipo.bind("<<ComboboxSelected>>", lambda _e: self._on_estimativa_tipo_change())
+        self.ent_kg = ttk.Entry(frm_estim, style="Field.TEntry")
+        self.ent_kg.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        self.lbl_estimado_hint = ttk.Label(route, text="KG estimado", style="CardLabel.TLabel")
+        self.lbl_estimado_hint.grid(row=2, column=1, sticky="w", pady=(6, 0))
+
+        ttk.Label(route, text="Carregamento", style="CardLabel.TLabel").grid(row=0, column=2, sticky="w")
+        self.ent_carregamento_prog = ttk.Entry(route, style="Field.TEntry")
+        self.ent_carregamento_prog.grid(row=1, column=2, sticky="ew", padx=(0, 10))
+        bind_entry_smart(self.ent_carregamento_prog, "text")
+
+        ttk.Label(route, text="Total Caixas", style="CardLabel.TLabel").grid(row=0, column=3, sticky="w")
+        self.ent_total_caixas_prog = ttk.Entry(route, style="Field.TEntry", state="readonly")
+        self.ent_total_caixas_prog.grid(row=1, column=3, sticky="ew")
+
+        ttk.Label(control, text="Adiantamento (R$)", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w")
+        self.ent_adiantamento_prog = ttk.Entry(control, style="Field.TEntry")
+        self.ent_adiantamento_prog.grid(row=1, column=0, sticky="ew", padx=(0, 10))
+        self.ent_adiantamento_prog.insert(0, "0,00")
+        self._bind_money_entry(self.ent_adiantamento_prog)
+
+        ttk.Label(control, text="Codigo", style="CardLabel.TLabel").grid(row=0, column=1, sticky="w")
+        self.ent_codigo = ttk.Entry(control, style="Field.TEntry", state="readonly")
+        self.ent_codigo.grid(row=1, column=1, sticky="ew")
+        self.lbl_prog_status_badge = ttk.Label(
+            control,
+            text="Status atual: -",
+            background="#F5F8FE",
+            foreground="#6B7280",
+            font=("Segoe UI", 9, "bold"),
+        )
+        self.lbl_prog_status_badge.grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
+        rank_wrap = ttk.Frame(card, style="Card.TFrame")
+        rank_wrap.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        rank_wrap.grid_columnconfigure(0, weight=1)
+        rank_wrap.grid_columnconfigure(1, weight=0)
+
+        ttk.Label(rank_wrap, text="Recomendacoes da equipe", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w")
+        self.btn_toggle_rankings = ttk.Button(
+            rank_wrap,
+            text="Ocultar",
+            style="Toggle.TButton",
+            command=self._toggle_programacao_rankings,
+        )
+        self.btn_toggle_rankings.grid(row=0, column=1, sticky="e")
+
+        self.rankings_content = ttk.Frame(rank_wrap, style="CardInset.TFrame", padding=(12, 8))
+        self.rankings_content.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        self.rankings_content.grid_columnconfigure(0, weight=1)
+
         self.lbl_motorista_rank = ttk.Label(
-            card,
+            self.rankings_content,
             text="Ranking de motoristas: carregando...",
-            background="white",
+            background="#F5F8FE",
             foreground="#6B7280",
             font=("Segoe UI", 8, "bold"),
             justify="left",
-            wraplength=280,
+            anchor="w",
         )
-        self.lbl_motorista_rank.grid(row=2, column=0, columnspan=2, sticky="w", padx=6, pady=(2, 0))
+        self.lbl_motorista_rank.grid(row=0, column=0, sticky="ew")
 
-        ttk.Label(card, text="Veiculo", style="CardLabel.TLabel").grid(row=0, column=1, sticky="w")
-        self.cb_veiculo = ttk.Combobox(card, state="readonly", width=12)
-        self.cb_veiculo.grid(row=1, column=1, sticky="ew", padx=6)
-
-        ttk.Label(card, text="Ajudantes (multipla escolha)", style="CardLabel.TLabel").grid(row=0, column=2, sticky="w")
-        self.btn_ajudantes = ttk.Button(card, text="\U0001F465 Selecionar ajudantes", style="Ghost.TButton", command=self._open_ajudantes_selector)
-        self.btn_ajudantes.grid(row=1, column=2, columnspan=2, sticky="ew", padx=6)
-        self.lbl_ajudantes_sel = ttk.Label(card, text="Nenhum selecionado", style="CardLabel.TLabel")
-        self.lbl_ajudantes_sel.grid(row=2, column=2, columnspan=2, sticky="w", padx=6, pady=(2, 0))
         self.lbl_ajudantes_rank = ttk.Label(
-            card,
+            self.rankings_content,
             text="Ranking de ajudantes: carregando...",
-            background="white",
+            background="#F5F8FE",
             foreground="#6B7280",
             font=("Segoe UI", 8, "bold"),
             justify="left",
-            wraplength=320,
+            anchor="w",
         )
-        self.lbl_ajudantes_rank.grid(row=3, column=2, columnspan=3, sticky="w", padx=6, pady=(4, 0))
+        self.lbl_ajudantes_rank.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        self._rankings_collapsed = False
         self._ajudantes_rows = []
         self._ajudantes_selected_keys = []
         self._ajudantes_mode = "ajudantes"
@@ -9597,49 +10067,6 @@ class ProgramacaoPage(PageBase):
         self._ranking_periodo_dias = 30
         self._motoristas_ranking = []
         self._ajudantes_ranking = []
-
-        ttk.Label(card, text="Local da Rota", style="CardLabel.TLabel").grid(row=0, column=4, sticky="w")
-        self.cb_local_rota = ttk.Combobox(card, state="readonly", values=["SERRA", "SERTAO"], width=10)
-        self.cb_local_rota.grid(row=1, column=4, sticky="ew", padx=6)
-
-        ttk.Label(card, text="Estimativa (KG/CX)", style="CardLabel.TLabel").grid(row=0, column=5, sticky="w")
-        frm_estim = ttk.Frame(card, style="Card.TFrame")
-        frm_estim.grid(row=1, column=5, sticky="ew", padx=6)
-        frm_estim.grid_columnconfigure(1, weight=1)
-        self.cb_estimativa_tipo = ttk.Combobox(frm_estim, state="readonly", values=["KG", "CX"], width=5)
-        self.cb_estimativa_tipo.grid(row=0, column=0, sticky="w")
-        self.cb_estimativa_tipo.set("KG")
-        self.cb_estimativa_tipo.bind("<<ComboboxSelected>>", lambda _e: self._on_estimativa_tipo_change())
-        self.ent_kg = ttk.Entry(frm_estim, style="Field.TEntry", width=10)
-        self.ent_kg.grid(row=0, column=1, sticky="ew", padx=(6, 0))
-        self.lbl_estimado_hint = ttk.Label(card, text="KG estimado", style="CardLabel.TLabel")
-        self.lbl_estimado_hint.grid(row=2, column=5, sticky="w", padx=6, pady=(2, 0))
-
-        ttk.Label(card, text="Carregamento", style="CardLabel.TLabel").grid(row=0, column=6, sticky="w")
-        self.ent_carregamento_prog = ttk.Entry(card, style="Field.TEntry", width=12)
-        self.ent_carregamento_prog.grid(row=1, column=6, sticky="ew", padx=6)
-        bind_entry_smart(self.ent_carregamento_prog, "text")
-        ttk.Label(card, text="Adiantamento (R$)", style="CardLabel.TLabel").grid(row=0, column=7, sticky="w")
-        self.ent_adiantamento_prog = ttk.Entry(card, style="Field.TEntry", width=12)
-        self.ent_adiantamento_prog.grid(row=1, column=7, sticky="ew", padx=6)
-        self.ent_adiantamento_prog.insert(0, "0,00")
-        self._bind_money_entry(self.ent_adiantamento_prog)
-
-        ttk.Label(card, text="Codigo", style="CardLabel.TLabel").grid(row=0, column=8, sticky="w")
-        ttk.Label(card, text="Total Caixas", style="CardLabel.TLabel").grid(row=2, column=6, sticky="w")
-        self.ent_total_caixas_prog = ttk.Entry(card, style="Field.TEntry", state="readonly", width=12)
-        self.ent_total_caixas_prog.grid(row=2, column=7, sticky="ew", padx=6, pady=(2, 0))
-
-        self.ent_codigo = ttk.Entry(card, style="Field.TEntry", state="readonly", width=10)
-        self.ent_codigo.grid(row=1, column=8, sticky="ew", padx=6)
-        self.lbl_prog_status_badge = ttk.Label(
-            card,
-            text="Status atual: -",
-            background="white",
-            foreground="#6B7280",
-            font=("Segoe UI", 9, "bold"),
-        )
-        self.lbl_prog_status_badge.grid(row=2, column=8, sticky="w", padx=6, pady=(2, 0))
 
         # -------------------------
         # Itens (vendas / edição)
@@ -10210,7 +10637,18 @@ class ProgramacaoPage(PageBase):
         top = ranking[:max(safe_int(limite, 3), 1)]
         partes = [f"{item['posicao_ranking']}. {item['nome']} ({item['score_exibicao']:.2f})" for item in top]
         motivo = str(top[0].get("motivo_resumido") or "").strip()
-        return (f"{titulo}: " + " | ".join(partes) + (f" | Motivo: {motivo}" if motivo else ""))
+        if len(motivo) > 44:
+            motivo = motivo[:41].rstrip() + "..."
+        return (f"{titulo}: " + " • ".join(partes) + (f"  |  Motivo lider: {motivo}" if motivo else ""))
+
+    def _toggle_programacao_rankings(self):
+        self._rankings_collapsed = not bool(getattr(self, "_rankings_collapsed", False))
+        if self._rankings_collapsed:
+            self.rankings_content.grid_remove()
+            self.btn_toggle_rankings.configure(text="Mostrar")
+        else:
+            self.rankings_content.grid()
+            self.btn_toggle_rankings.configure(text="Ocultar")
 
     def _apply_programacao_rankings(self):
         periodo = max(safe_int(getattr(self, "_ranking_periodo_dias", 30), 30), 1)
@@ -13140,38 +13578,38 @@ class RecebimentosPage(PageBase):
 
         resumo = ttk.Frame(self.card, style="Card.TFrame")
         resumo.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(10, 0))
-        for i in range(6):
+        for i in range(3):
             resumo.grid_columnconfigure(i, weight=1)
 
         self.lbl_resumo_diaria = ttk.Label(
             resumo, text="VALOR DIARIA: R$ 0,00", background="white", foreground="#111827", font=("Segoe UI", 9, "bold")
         )
-        self.lbl_resumo_diaria.grid(row=0, column=0, sticky="w", padx=(0, 12))
+        self.lbl_resumo_diaria.grid(row=0, column=0, sticky="w", padx=(0, 16), pady=(0, 4))
 
         self.lbl_resumo_qtd = ttk.Label(
             resumo, text="QTD DIARIAS: 0", background="white", foreground="#111827", font=("Segoe UI", 9, "bold")
         )
-        self.lbl_resumo_qtd.grid(row=0, column=1, sticky="w", padx=(0, 12))
+        self.lbl_resumo_qtd.grid(row=0, column=1, sticky="w", padx=(0, 16), pady=(0, 4))
 
         self.lbl_resumo_mot = ttk.Label(
             resumo, text="MOTORISTA: R$ 0,00", background="white", foreground="#111827", font=("Segoe UI", 9, "bold")
         )
-        self.lbl_resumo_mot.grid(row=0, column=2, sticky="w", padx=(0, 12))
+        self.lbl_resumo_mot.grid(row=0, column=2, sticky="w", padx=(0, 16), pady=(0, 4))
 
         self.lbl_resumo_eqp = ttk.Label(
             resumo, text="EQUIPE: R$ 0,00", background="white", foreground="#111827", font=("Segoe UI", 9, "bold")
         )
-        self.lbl_resumo_eqp.grid(row=0, column=3, sticky="w", padx=(0, 12))
+        self.lbl_resumo_eqp.grid(row=1, column=0, sticky="w", padx=(0, 16))
 
         self.lbl_resumo_total = ttk.Label(
             resumo, text="TOTAL: R$ 0,00", background="white", foreground="#111827", font=("Segoe UI", 9, "bold")
         )
-        self.lbl_resumo_total.grid(row=0, column=4, sticky="w", padx=(0, 12))
+        self.lbl_resumo_total.grid(row=1, column=1, sticky="w", padx=(0, 16))
 
         self.lbl_resumo_pagar = ttk.Label(
             resumo, text="VALOR A PAGAR: R$ 0,00", background="white", foreground="#111827", font=("Segoe UI", 9, "bold")
         )
-        self.lbl_resumo_pagar.grid(row=0, column=5, sticky="w")
+        self.lbl_resumo_pagar.grid(row=1, column=2, sticky="w")
 
         self._bind_diarias_preview()
 
@@ -14148,11 +14586,13 @@ class RecebimentosPage(PageBase):
             total = round(total_mot + total_eqp, 2)
 
             if hasattr(self, "lbl_resumo_diaria"):
-                self.lbl_resumo_diaria.config(text=f"VALOR DIARIA: {fmt_money(diaria_motorista)}")
-            self.lbl_resumo_qtd.config(text=f"QTD DIARIAS: {qtd:g}")
-            self.lbl_resumo_mot.config(text=f"MOTORISTA: {fmt_money(total_mot)}")
-            self.lbl_resumo_eqp.config(text=f"EQUIPE: {fmt_money(total_eqp)}")
-            self.lbl_resumo_total.config(text=f"TOTAL: {fmt_money(total)}")
+                self.lbl_resumo_diaria.config(text=f"BASE MOTORISTA: {fmt_money(diaria_motorista)}")
+            self.lbl_resumo_qtd.config(text=f"QTD DIARIAS: {qtd:g} | AJUDANTES: {qtd_ajudantes}")
+            self.lbl_resumo_mot.config(text=f"MOTORISTA: {qtd:g} x {fmt_money(diaria_motorista)} = {fmt_money(total_mot)}")
+            self.lbl_resumo_eqp.config(
+                text=f"AJUDANTES: {qtd_ajudantes} x {fmt_money(diaria_ajudante)} = {fmt_money(total_eqp)}"
+            )
+            self.lbl_resumo_total.config(text=f"TOTAL DIARIAS: {fmt_money(total)}")
             if hasattr(self, "lbl_resumo_pagar"):
                 self.lbl_resumo_pagar.config(text=f"VALOR A PAGAR: {fmt_money(total)}")
         except Exception:
@@ -14482,11 +14922,11 @@ class RecebimentosPage(PageBase):
         # Fallback: nomes resolvidos da equipe.
         nomes = str(resolve_equipe_nomes(raw) or "").strip()
         if not nomes:
-            return 1
+            return 2
         parts_nome = [p.strip() for p in re.split(r"[|,;/]+", nomes) if p.strip()]
-        if parts_nome:
+        if len(parts_nome) >= 2:
             return len(parts_nome)
-        return 1
+        return 2
 
     def _sync_diarias_despesas(self, prog: str, rota: str, equipe_raw: str, data_saida: str, hora_saida: str, data_chegada: str, hora_chegada: str, diaria_motorista: float):
         qtd = self._calc_qtd_diarias_regra(data_saida, hora_saida, data_chegada, hora_chegada)
@@ -15618,7 +16058,7 @@ class DespesasPage(PageBase):
         # =========================================================
 
         calc_frame = ttk.Frame(tab_nf)
-        calc_frame.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 10))
+        calc_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
         ttk.Button(
             calc_frame,
             text="Calcular Saldo Automático",
@@ -15627,8 +16067,8 @@ class DespesasPage(PageBase):
             command=self._calcular_saldo_auto
         ).pack(anchor="w")
 
-        tab_nf.grid_columnconfigure(0, weight=3)
-        tab_nf.grid_columnconfigure(1, weight=2)
+        tab_nf.grid_columnconfigure(0, weight=5)
+        tab_nf.grid_columnconfigure(1, weight=4)
         tab_nf.grid_rowconfigure(1, weight=1)
 
         nf_form_wrap = ttk.Frame(tab_nf, style="Card.TFrame")
@@ -15638,27 +16078,39 @@ class DespesasPage(PageBase):
 
         nf_base = ttk.LabelFrame(nf_form_wrap, text="NF Base", padding=8)
         nf_base.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 6))
+        nf_base.grid_columnconfigure(1, weight=1)
 
         row_nf = 0
-        self.ent_nf_numero = self._create_field(nf_base, "Nº NOTA FISCAL:", row_nf, 14); row_nf += 1
-        self.ent_nf_kg = self._create_field(nf_base, "KG NOTA FISCAL:", row_nf, 14); row_nf += 1
-        self.ent_nf_preco = self._create_field(nf_base, "PRECO NF (R$/KG):", row_nf, 14); row_nf += 1
-        self.ent_nf_caixas = self._create_field(nf_base, "CAIXAS:", row_nf, 14)
+        self.ent_nf_numero = self._create_field(nf_base, "Nº NOTA FISCAL:", row_nf, 12); row_nf += 1
+        self.ent_nf_kg = self._create_field(nf_base, "KG NOTA FISCAL:", row_nf, 12); row_nf += 1
+        self.ent_nf_preco = self._create_field(nf_base, "PRECO NF (R$/KG):", row_nf, 12); row_nf += 1
+        self.ent_nf_caixas = self._create_field(nf_base, "CAIXAS:", row_nf, 12)
 
         nf_mov = ttk.LabelFrame(nf_form_wrap, text="Movimento", padding=8)
         nf_mov.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=(0, 6))
+        nf_mov.grid_columnconfigure(1, weight=1)
 
         row_nf = 0
-        self.ent_nf_kg_carregado = self._create_field(nf_mov, "KG CARREGADO:", row_nf, 14); row_nf += 1
-        self.ent_nf_kg_vendido = self._create_field(nf_mov, "KG VENDIDO:", row_nf, 14); row_nf += 1
-        self.ent_nf_saldo = self._create_field(nf_mov, "SALDO (KG):", row_nf, 14)
+        self.ent_nf_kg_carregado = self._create_field(nf_mov, "KG CARREGADO:", row_nf, 12); row_nf += 1
+        self.ent_nf_kg_vendido = self._create_field(nf_mov, "KG VENDIDO:", row_nf, 12); row_nf += 1
+        self.ent_nf_saldo = self._create_field(nf_mov, "SALDO (KG):", row_nf, 12)
 
         nf_params = ttk.LabelFrame(nf_form_wrap, text="Parametros e Sincronismo", padding=8)
         nf_params.grid(row=1, column=0, columnspan=2, sticky="ew")
+        for idx, minsize in enumerate((120, 120, 105, 120, 180)):
+            nf_params.grid_columnconfigure(idx, weight=1 if idx in (1, 3) else 0, minsize=minsize)
 
-        row_nf = 0
-        self.ent_nf_media_carregada = self._create_field(nf_params, "MEDIA CARREGADA:", row_nf, 14); row_nf += 1
-        self.ent_nf_caixa_final = self._create_field(nf_params, "CAIXA FINAL:", row_nf, 14)
+        ttk.Label(nf_params, text="MEDIA CARREGADA:", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w", pady=2)
+        self.ent_nf_media_carregada = ttk.Entry(nf_params, style="Field.TEntry", width=12)
+        self.ent_nf_media_carregada.grid(row=0, column=1, sticky="ew", padx=(10, 12), pady=2)
+        bind_entry_smart(self.ent_nf_media_carregada, "decimal", precision=2)
+        self._bind_focus_scroll(self.ent_nf_media_carregada)
+
+        ttk.Label(nf_params, text="CAIXA FINAL:", style="CardLabel.TLabel").grid(row=0, column=2, sticky="w", pady=2)
+        self.ent_nf_caixa_final = ttk.Entry(nf_params, style="Field.TEntry", width=12)
+        self.ent_nf_caixa_final.grid(row=0, column=3, sticky="ew", padx=(10, 12), pady=2)
+        bind_entry_smart(self.ent_nf_caixa_final, "int")
+        self._bind_focus_scroll(self.ent_nf_caixa_final)
         try:
             self.ent_nf_caixas.configure(state="readonly")
             self.ent_nf_kg_carregado.configure(state="readonly")
@@ -15670,9 +16122,9 @@ class DespesasPage(PageBase):
             nf_params,
             text="Sincronizar com App",
             style="Warn.TButton",
-            width=24,
+            width=20,
             command=self._sincronizar_com_app
-        ).grid(row=row_nf + 1, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        ).grid(row=0, column=4, sticky="e", padx=(10, 0), pady=2)
 
         nf_resumo = ttk.LabelFrame(tab_nf, text="Resumo Compra x Venda", padding=12)
         nf_resumo.grid(row=1, column=1, sticky="nsew")
@@ -15708,15 +16160,31 @@ class DespesasPage(PageBase):
         self.lbl_nf_margem = ttk.Label(nf_resumo, text="Margem liquida: 0,00%")
         self.lbl_nf_margem.grid(row=14, column=0, sticky="w", pady=(0, 4))
         ttk.Separator(nf_resumo, orient="horizontal").grid(row=15, column=0, sticky="ew", pady=(2, 8))
-        ttk.Label(nf_resumo, text="OCORRÊNCIAS (TRANSBORDO)", font=("Segoe UI", 10, "bold")).grid(row=16, column=0, sticky="w", pady=(0, 6))
-        self.lbl_nf_mort_aves = ttk.Label(nf_resumo, text="Mortalidade (aves): 0")
-        self.lbl_nf_mort_aves.grid(row=17, column=0, sticky="w")
-        self.lbl_nf_mort_kg = ttk.Label(nf_resumo, text="Mortalidade (KG): 0,00")
-        self.lbl_nf_mort_kg.grid(row=18, column=0, sticky="w")
-        self.lbl_nf_kg_util = ttk.Label(nf_resumo, text="KG útil NF (NF - mortalidade): 0,00", font=("Segoe UI", 10, "bold"))
-        self.lbl_nf_kg_util.grid(row=19, column=0, sticky="w")
-        self.lbl_nf_obs_transb = ttk.Label(nf_resumo, text="Obs transbordo: -", wraplength=320, justify="left")
-        self.lbl_nf_obs_transb.grid(row=20, column=0, sticky="w", pady=(2, 0))
+        ocorr_wrap = ttk.Frame(nf_resumo, style="CardInset.TFrame", padding=(8, 6))
+        ocorr_wrap.grid(row=16, column=0, sticky="ew")
+        ocorr_wrap.grid_columnconfigure(0, weight=1)
+        ocorr_wrap.grid_columnconfigure(1, weight=0)
+        ttk.Label(ocorr_wrap, text="OCORRÊNCIAS (TRANSBORDO)", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w")
+        self.btn_toggle_nf_ocorrencias = ttk.Button(
+            ocorr_wrap,
+            text="Expandir",
+            style="Toggle.TButton",
+            command=self._toggle_nf_ocorrencias,
+        )
+        self.btn_toggle_nf_ocorrencias.grid(row=0, column=1, sticky="e")
+        self.nf_ocorrencias_content = ttk.Frame(ocorr_wrap, style="CardInset.TFrame")
+        self.nf_ocorrencias_content.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        self.nf_ocorrencias_content.grid_columnconfigure(0, weight=1)
+        self.lbl_nf_mort_aves = ttk.Label(self.nf_ocorrencias_content, text="Mortalidade (aves): 0")
+        self.lbl_nf_mort_aves.grid(row=0, column=0, sticky="w")
+        self.lbl_nf_mort_kg = ttk.Label(self.nf_ocorrencias_content, text="Mortalidade (KG): 0,00")
+        self.lbl_nf_mort_kg.grid(row=1, column=0, sticky="w")
+        self.lbl_nf_kg_util = ttk.Label(self.nf_ocorrencias_content, text="KG útil NF (NF - mortalidade): 0,00", font=("Segoe UI", 10, "bold"))
+        self.lbl_nf_kg_util.grid(row=2, column=0, sticky="w")
+        self.lbl_nf_obs_transb = ttk.Label(self.nf_ocorrencias_content, text="Obs transbordo: -", wraplength=280, justify="left")
+        self.lbl_nf_obs_transb.grid(row=3, column=0, sticky="w", pady=(2, 0))
+        self._nf_ocorrencias_collapsed = True
+        self.nf_ocorrencias_content.grid_remove()
 
         self._bind_nf_summary_auto_calc()
         self._refresh_nf_trade_summary()
@@ -15982,8 +16450,8 @@ class DespesasPage(PageBase):
         botoes_frame = ttk.Frame(page_card, style="Card.TFrame")
         botoes_frame.grid(row=4, column=0, sticky="ew")
 
-        for i in range(6):
-            botoes_frame.grid_columnconfigure(i, weight=1)
+        for i in range(3):
+            botoes_frame.grid_columnconfigure(i, weight=1, uniform="desp_btns")
 
         botoes = [
             ("\u2B05 VOLTAR", "Ghost.TButton", self._voltar_recebimentos),
@@ -15995,12 +16463,23 @@ class DespesasPage(PageBase):
         ]
 
         for i, (texto, estilo, comando) in enumerate(botoes):
-            btn = ttk.Button(botoes_frame, text=texto, style=estilo, command=comando, width=12)
-            btn.grid(row=0, column=i, sticky="ew", padx=1, ipady=2)
+            row = i // 3
+            col = i % 3
+            btn = ttk.Button(botoes_frame, text=texto, style=estilo, command=comando)
+            btn.grid(row=row, column=col, sticky="ew", padx=2, pady=2, ipady=1)
 
         # carrega dados
         self.refresh_comboboxes()
         self._refresh_all()
+
+    def _toggle_nf_ocorrencias(self):
+        self._nf_ocorrencias_collapsed = not bool(getattr(self, "_nf_ocorrencias_collapsed", True))
+        if self._nf_ocorrencias_collapsed:
+            self.nf_ocorrencias_content.grid_remove()
+            self.btn_toggle_nf_ocorrencias.configure(text="Expandir")
+        else:
+            self.nf_ocorrencias_content.grid()
+            self.btn_toggle_nf_ocorrencias.configure(text="Ocultar")
 
 # ==========================
 # ===== FIM DA PARTE 7 (ATUALIZADA) =====
@@ -17882,6 +18361,68 @@ class DespesasPage(PageBase):
         cols_itens = _table_cols("programacao_itens")
         cols_receb = _table_cols("recebimentos")
 
+        def _registrar_amostra_local(cliente_row: dict, pedido_norm_local: str, cod_cliente_local: str):
+            cols_amostras = _table_cols("cliente_localizacao_amostras")
+            if not cols_amostras:
+                return
+            lat_evento = cliente_row.get("lat_evento")
+            lon_evento = cliente_row.get("lon_evento")
+            endereco_evento = str(cliente_row.get("endereco_evento") or "").strip()
+            cidade_evento = str(cliente_row.get("cidade_evento") or "").strip()
+            bairro_evento = str(cliente_row.get("bairro_evento") or "").strip()
+            has_geo = lat_evento not in (None, "") and lon_evento not in (None, "")
+            has_addr = any((endereco_evento, cidade_evento, bairro_evento))
+            if not has_geo and not has_addr:
+                return
+            try:
+                cur.execute(
+                    """
+                    SELECT latitude, longitude, endereco, cidade, bairro, status_pedido
+                    FROM cliente_localizacao_amostras
+                    WHERE UPPER(COALESCE(cod_cliente,''))=UPPER(?)
+                      AND UPPER(COALESCE(codigo_programacao,''))=UPPER(?)
+                      AND COALESCE(TRIM(pedido), '')=COALESCE(TRIM(?), '')
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (cod_cliente_local, prog, pedido_norm_local),
+                )
+                last = cur.fetchone()
+                if last:
+                    same_geo = str(last["latitude"] or "") == str(lat_evento or "") and str(last["longitude"] or "") == str(lon_evento or "")
+                    same_addr = (
+                        str(last["endereco"] or "").strip() == endereco_evento
+                        and str(last["cidade"] or "").strip() == cidade_evento
+                        and str(last["bairro"] or "").strip() == bairro_evento
+                    )
+                    same_status = str(last["status_pedido"] or "").strip() == str(cliente_row.get("status_pedido") or "").strip()
+                    if same_geo and same_addr and same_status:
+                        return
+                cur.execute(
+                    """
+                    INSERT INTO cliente_localizacao_amostras
+                        (cod_cliente, codigo_programacao, pedido, latitude, longitude, endereco, cidade, bairro,
+                         status_pedido, motorista, origem, registrado_em)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        cod_cliente_local.upper(),
+                        upper(prog),
+                        pedido_norm_local,
+                        float(lat_evento) if lat_evento not in (None, "") else None,
+                        float(lon_evento) if lon_evento not in (None, "") else None,
+                        endereco_evento,
+                        cidade_evento,
+                        bairro_evento,
+                        str(cliente_row.get("status_pedido") or "").strip(),
+                        str(cliente_row.get("alterado_por") or "").strip(),
+                        "API",
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    ),
+                )
+            except Exception:
+                logging.debug("Falha ao registrar amostra localizacao do cliente", exc_info=True)
+
         for cliente in clientes:
             cod_cliente = str(cliente.get("cod_cliente") or "").strip()
             if not cod_cliente:
@@ -17903,6 +18444,11 @@ class DespesasPage(PageBase):
                 "preco_atual": cliente.get("preco_atual"),
                 "alterado_em": cliente.get("alterado_em"),
                 "alterado_por": cliente.get("alterado_por"),
+                "lat_evento": cliente.get("lat_evento"),
+                "lon_evento": cliente.get("lon_evento"),
+                "endereco_evento": cliente.get("endereco_evento"),
+                "cidade_evento": cliente.get("cidade_evento"),
+                "bairro_evento": cliente.get("bairro_evento"),
             }
 
             # UPSERT robusto no controle (compatÃÂvel com bancos antigos e novos)
@@ -17936,6 +18482,7 @@ class DespesasPage(PageBase):
                         f"INSERT INTO programacao_itens_controle ({', '.join(ins_cols)}) VALUES ({ph})",
                         ins_vals,
                     )
+                _registrar_amostra_local(ctrl_map, pedido_norm, cod_cliente)
 
             # Espelha também em programacao_itens para a UI do desktop refletir imediatamente.
             if cols_itens:
@@ -19998,6 +20545,12 @@ class EscalaPage(PageBase):
         ttk.Button(filtros, text="\U0001F504 ATUALIZAR", style="Ghost.TButton", command=self.refresh_data).grid(
             row=1, column=2, sticky="w"
         )
+        ttk.Button(
+            filtros,
+            text="\U0001F4D1 GERAR PDF",
+            style="Primary.TButton",
+            command=self.gerar_pdf_escala,
+        ).grid(row=1, column=3, sticky="w", padx=(8, 0))
 
         resumo = ttk.Frame(self.body, style="Card.TFrame", padding=12)
         resumo.grid(row=1, column=0, sticky="ew", pady=(10, 10))
@@ -20034,24 +20587,55 @@ class EscalaPage(PageBase):
         txt_row.grid_columnconfigure(0, weight=1)
         txt_row.grid_columnconfigure(1, weight=1)
 
-        box_resumo = ttk.LabelFrame(txt_row, text=" Resumo Operacional ", padding=(10, 8))
+        box_resumo = ttk.Frame(txt_row, style="CardInset.TFrame", padding=(10, 8))
         box_resumo.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         box_resumo.grid_columnconfigure(0, weight=1)
+        box_resumo.grid_columnconfigure(1, weight=0)
+        self.box_resumo = box_resumo
 
-        box_reco = ttk.LabelFrame(txt_row, text=" Recomendacoes ", padding=(10, 8))
-        box_reco.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
-        box_reco.grid_columnconfigure(0, weight=1)
+        ttk.Label(box_resumo, text="Resumo Operacional", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w")
+        self.btn_toggle_resumo_escala = ttk.Button(
+            box_resumo,
+            text="Expandir",
+            style="Toggle.TButton",
+            command=self._toggle_resumo_operacional,
+        )
+        self.btn_toggle_resumo_escala.grid(row=0, column=1, sticky="e")
+
+        self.resumo_content = ttk.Frame(box_resumo, style="CardInset.TFrame")
+        self.resumo_content.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        self.resumo_content.grid_columnconfigure(0, weight=1)
 
         self.lbl_resumo = ttk.Label(
-            box_resumo,
+            self.resumo_content,
             text="-",
             style="CardLabel.TLabel",
             justify="left",
             wraplength=480,
         )
         self.lbl_resumo.grid(row=0, column=0, sticky="nw")
-        self.lbl_recomendacoes = ttk.Label(
+
+        box_reco = ttk.Frame(txt_row, style="CardInset.TFrame", padding=(10, 8))
+        box_reco.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        box_reco.grid_columnconfigure(0, weight=1)
+        box_reco.grid_columnconfigure(1, weight=0)
+        self.box_reco = box_reco
+
+        ttk.Label(box_reco, text="Recomendacoes", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w")
+        self.btn_toggle_reco_escala = ttk.Button(
             box_reco,
+            text="Expandir",
+            style="Toggle.TButton",
+            command=self._toggle_recomendacoes_escala,
+        )
+        self.btn_toggle_reco_escala.grid(row=0, column=1, sticky="e")
+
+        self.reco_content = ttk.Frame(box_reco, style="CardInset.TFrame")
+        self.reco_content.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        self.reco_content.grid_columnconfigure(0, weight=1)
+
+        self.lbl_recomendacoes = ttk.Label(
+            self.reco_content,
             text="-",
             style="CardLabel.TLabel",
             justify="left",
@@ -20059,6 +20643,10 @@ class EscalaPage(PageBase):
             foreground="#1E3A8A",
         )
         self.lbl_recomendacoes.grid(row=0, column=0, sticky="nw")
+        self._escala_resumo_collapsed = True
+        self._escala_reco_collapsed = True
+        self.resumo_content.grid_remove()
+        self.reco_content.grid_remove()
 
         chart_wrap = ttk.Frame(resumo, style="Card.TFrame")
         chart_wrap.grid(row=3, column=0, sticky="ew", pady=(10, 0))
@@ -20185,6 +20773,24 @@ class EscalaPage(PageBase):
             self.lbl_esc_kpi_horas.config(text=f"{safe_float(horas_medias, 0.0):.2f}".replace(".", ","))
         except Exception:
             logging.debug("Falha ignorada")
+
+    def _toggle_resumo_operacional(self):
+        self._escala_resumo_collapsed = not bool(getattr(self, "_escala_resumo_collapsed", True))
+        if self._escala_resumo_collapsed:
+            self.resumo_content.grid_remove()
+            self.btn_toggle_resumo_escala.configure(text="Expandir")
+        else:
+            self.resumo_content.grid()
+            self.btn_toggle_resumo_escala.configure(text="Ocultar")
+
+    def _toggle_recomendacoes_escala(self):
+        self._escala_reco_collapsed = not bool(getattr(self, "_escala_reco_collapsed", True))
+        if self._escala_reco_collapsed:
+            self.reco_content.grid_remove()
+            self.btn_toggle_reco_escala.configure(text="Expandir")
+        else:
+            self.reco_content.grid()
+            self.btn_toggle_reco_escala.configure(text="Ocultar")
 
     def _on_escala_resize(self, event=None):
         try:
@@ -20851,6 +21457,279 @@ class EscalaPage(PageBase):
             )
         except Exception as e:
             messagebox.showerror("ERRO", f"Falha ao atualizar escala:\n\n{e}")
+
+    def _escala_tree_rows(self, tree):
+        rows = []
+        try:
+            for iid in tree.get_children():
+                vals = tuple(tree.item(iid, "values") or ())
+                if vals:
+                    rows.append(vals)
+        except Exception:
+            logging.debug("Falha ignorada")
+        return rows
+
+    def _wrap_pdf_lines(self, text, max_width, font_name="Helvetica", font_size=9):
+        from reportlab.pdfbase.pdfmetrics import stringWidth
+
+        lines = []
+        for raw in str(text or "").splitlines():
+            words = raw.split()
+            if not words:
+                lines.append("")
+                continue
+            current = ""
+            for word in words:
+                candidate = word if not current else f"{current} {word}"
+                if stringWidth(candidate, font_name, font_size) <= max_width:
+                    current = candidate
+                else:
+                    if current:
+                        lines.append(current)
+                    current = word
+            if current:
+                lines.append(current)
+        return lines
+
+    def _fit_pdf_lines(self, text, max_width, max_height, line_height=4.6, font_name="Helvetica", font_size=9):
+        from reportlab.lib.units import mm
+
+        lines = self._wrap_pdf_lines(text, max_width, font_name=font_name, font_size=font_size)
+        max_count = max(1, int(max_height // (line_height * mm)))
+        if len(lines) > max_count:
+            lines = lines[:max_count]
+            if lines:
+                last = lines[-1].rstrip()
+                lines[-1] = (last[: max(0, len(last) - 3)] + "...") if len(last) > 3 else "..."
+        return lines
+
+    def _draw_pdf_wrapped_text(self, c, text, x, y, max_width, line_height=4.6, max_lines=None, font_name="Helvetica", font_size=9):
+        from reportlab.lib.units import mm
+        lines = self._wrap_pdf_lines(text, max_width, font_name=font_name, font_size=font_size)
+
+        if max_lines is not None and len(lines) > max_lines:
+            lines = lines[:max_lines]
+            if lines:
+                last = lines[-1]
+                lines[-1] = (last[: max(0, len(last) - 3)] + "...") if len(last) > 3 else "..."
+
+        c.setFont(font_name, font_size)
+        for line in lines:
+            c.drawString(x, y, line)
+            y -= line_height * mm
+        return y
+
+    def _compact_pdf_text(self, text, max_lines=6):
+        cleaned = []
+        for raw in str(text or "").splitlines():
+            line = " ".join(str(raw).strip().split())
+            if not line:
+                continue
+            if line.startswith("- "):
+                line = "• " + line[2:]
+            cleaned.append(line)
+        if len(cleaned) > max_lines:
+            cleaned = cleaned[:max_lines]
+            cleaned[-1] = cleaned[-1][: max(0, len(cleaned[-1]) - 3)] + "..."
+        return "\n".join(cleaned)
+
+    def _draw_escala_pdf_table(self, c, title, headers, rows, x, y, col_widths, page_width, page_height, bottom_margin):
+        from reportlab.lib.units import mm
+
+        row_h = 5.6 * mm
+
+        def _new_page():
+            c.showPage()
+            c.setFont("Helvetica-Bold", 16)
+            c.drawString(14 * mm, page_height - 16 * mm, "RELATORIO DE ESCALA")
+            c.setFont("Helvetica", 8)
+            c.drawRightString(page_width - 14 * mm, page_height - 16 * mm, datetime.now().strftime("%d/%m/%Y %H:%M"))
+            return page_height - 25 * mm
+
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(x, y, title)
+        y -= 5.5 * mm
+
+        if y < bottom_margin + 25 * mm:
+            y = _new_page()
+
+        def _draw_header(current_y):
+            c.setFont("Helvetica-Bold", 7)
+            cx = x
+            for head, w in zip(headers, col_widths):
+                c.rect(cx, current_y - row_h, w, row_h, stroke=1, fill=0)
+                c.drawString(cx + 2, current_y - row_h + 4, str(head))
+                cx += w
+            return current_y - row_h
+
+        y = _draw_header(y)
+        c.setFont("Helvetica", 7)
+
+        for row in rows:
+            if y < bottom_margin + 16 * mm:
+                y = _new_page()
+                y = _draw_header(y)
+                c.setFont("Helvetica", 7)
+            cx = x
+            for value, w in zip(row, col_widths):
+                c.rect(cx, y - row_h, w, row_h, stroke=1, fill=0)
+                txt = str(value or "")
+                limit = max(8, int((w / mm) // 2.7))
+                if len(txt) > limit:
+                    txt = txt[: max(0, limit - 3)] + "..."
+                c.drawString(cx + 2, y - row_h + 4, txt)
+                cx += w
+            y -= row_h
+
+        return y - 3 * mm
+
+    def gerar_pdf_escala(self):
+        if not require_reportlab():
+            return
+
+        path = filedialog.asksaveasfilename(
+            title="Salvar PDF da Escala",
+            defaultextension=".pdf",
+            filetypes=[("PDF", "*.pdf")],
+            initialfile=f"Escala_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
+        )
+        if not path:
+            return
+
+        try:
+            from reportlab.lib.pagesizes import A4
+            from reportlab.lib.units import mm
+
+            mot_rows = self._escala_tree_rows(self.tree_m)
+            aj_rows = self._escala_tree_rows(self.tree_a)
+            periodo = str(self.var_periodo.get() or "-")
+            status = str(self.var_status.get() or "-")
+
+            page_w, page_h = A4
+            left = 14 * mm
+            right = 14 * mm
+            top = page_h - 16 * mm
+            bottom = 14 * mm
+            usable_w = page_w - left - right
+
+            c = canvas.Canvas(path, pagesize=A4)
+            c.setTitle("Relatorio de Escala")
+            y = top
+
+            c.setFont("Helvetica-Bold", 16)
+            c.drawString(left, y, "RELATORIO DE ESCALA")
+            y -= 8 * mm
+
+            c.setFont("Helvetica", 9)
+            c.drawString(left, y, f"Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+            c.drawRightString(page_w - right, y, f"Periodo: {periodo} dia(s)  |  Status: {status}")
+            y -= 8 * mm
+
+            c.setFont("Helvetica-Bold", 10)
+            c.drawString(left, y, "Resumo Executivo")
+            y -= 6 * mm
+
+            card_gap = 4 * mm
+            card_w = (usable_w - card_gap) / 2.0
+            card_h = 12 * mm
+            kpi_cards = [
+                ("Rotas no periodo", self.lbl_esc_kpi_rotas.cget("text")),
+                ("Motoristas", self.lbl_esc_kpi_mot.cget("text")),
+                ("KM medio/motorista", self.lbl_esc_kpi_km.cget("text")),
+                ("Horas medias/motorista", self.lbl_esc_kpi_horas.cget("text")),
+            ]
+            for idx, (label, value) in enumerate(kpi_cards):
+                row = idx // 2
+                col = idx % 2
+                bx = left + col * (card_w + card_gap)
+                by = y - row * (card_h + 3 * mm)
+                c.rect(bx, by - card_h, card_w, card_h, stroke=1, fill=0)
+                c.setFont("Helvetica", 8)
+                c.drawString(bx + 3, by - 4 * mm, label)
+                c.setFont("Helvetica-Bold", 11)
+                c.drawString(bx + 3, by - 9 * mm, str(value))
+            y -= (2 * card_h) + (3 * mm) + 2 * mm
+
+            half_w = (usable_w - 6 * mm) / 2.0
+            box_h = 40 * mm
+            text_top_gap = 11 * mm
+            text_bottom_gap = 4 * mm
+            text_line_h = 4.3
+            text_font = 8
+            usable_box_h = box_h - text_top_gap - text_bottom_gap
+
+            resumo_txt = self._compact_pdf_text(self.lbl_resumo.cget("text"), max_lines=8)
+            reco_txt = self._compact_pdf_text(self.lbl_recomendacoes.cget("text"), max_lines=8)
+            resumo_lines = self._fit_pdf_lines(
+                resumo_txt,
+                half_w - 8,
+                usable_box_h,
+                line_height=text_line_h,
+                font_size=text_font,
+            )
+            reco_lines = self._fit_pdf_lines(
+                reco_txt,
+                half_w - 8,
+                usable_box_h,
+                line_height=text_line_h,
+                font_size=text_font,
+            )
+            resumo_txt = "\n".join(resumo_lines)
+            reco_txt = "\n".join(reco_lines)
+
+            c.rect(left, y - box_h, half_w, box_h, stroke=1, fill=0)
+            c.rect(left + half_w + 6 * mm, y - box_h, half_w, box_h, stroke=1, fill=0)
+
+            c.setFont("Helvetica-Bold", 10)
+            c.drawString(left + 3, y - 5 * mm, "Resumo Operacional")
+            c.drawString(left + half_w + 6 * mm + 3, y - 5 * mm, "Recomendacoes")
+
+            self._draw_pdf_wrapped_text(
+                c,
+                resumo_txt,
+                left + 3,
+                y - text_top_gap,
+                half_w - 8,
+                line_height=text_line_h,
+                font_size=text_font,
+            )
+            self._draw_pdf_wrapped_text(
+                c,
+                reco_txt,
+                left + half_w + 6 * mm + 3,
+                y - text_top_gap,
+                half_w - 8,
+                line_height=text_line_h,
+                font_size=text_font,
+            )
+            y = y - box_h - 4 * mm
+
+            headers_m = ["Motorista", "Rotas", "Em rota", "Ativas", "Final.", "Canc.", "Local", "KM", "Horas"]
+            rows_m = [tuple(r[:9]) for r in mot_rows[:12]]
+            widths_m = [40 * mm, 13 * mm, 13 * mm, 13 * mm, 13 * mm, 13 * mm, 22 * mm, 17 * mm, 17 * mm]
+            y = self._draw_escala_pdf_table(c, "Distribuicao por Motorista", headers_m, rows_m, left, y, widths_m, page_w, page_h, bottom)
+            if len(mot_rows) > 12:
+                c.setFont("Helvetica-Oblique", 8)
+                c.drawString(left, y, f"* Exibindo os 12 primeiros motoristas de {len(mot_rows)} registros.")
+                y -= 5 * mm
+
+            headers_a = ["Ajudante", "Rotas", "Em rota", "Ativas", "Final.", "Canc.", "KM", "Horas"]
+            rows_a = [tuple(r[:8]) for r in aj_rows[:12]]
+            widths_a = [54 * mm, 15 * mm, 15 * mm, 15 * mm, 15 * mm, 15 * mm, 20 * mm, 20 * mm]
+            y = self._draw_escala_pdf_table(c, "Distribuicao por Ajudante", headers_a, rows_a, left, y, widths_a, page_w, page_h, bottom)
+            if len(aj_rows) > 12:
+                c.setFont("Helvetica-Oblique", 8)
+                c.drawString(left, y, f"* Exibindo os 12 primeiros ajudantes de {len(aj_rows)} registros.")
+                y -= 5 * mm
+
+            c.setFont("Helvetica", 8)
+            c.drawRightString(page_w - right, bottom - 2 * mm, "RotaHub Desktop - Escala")
+            c.save()
+
+            messagebox.showinfo("OK", f"PDF da escala gerado com sucesso!\n\nArquivo:\n{os.path.basename(path)}")
+            self.set_status(f"STATUS: PDF da escala gerado: {os.path.basename(path)}")
+        except Exception as e:
+            messagebox.showerror("ERRO", f"Erro ao gerar PDF da escala:\n\n{e}")
 
 
 class CentroCustosPage(PageBase):
@@ -23723,7 +24602,7 @@ class LoginWindow(tk.Tk):
 
         # ---- Centraliza
         self.update_idletasks()
-        w, h = 440, 280
+        w, h = 520, 320
         x = (self.winfo_screenwidth() // 2) - (w // 2)
         y = (self.winfo_screenheight() // 2) - (h // 2)
         self.geometry(f"{w}x{h}+{x}+{y}")
@@ -23780,10 +24659,10 @@ class LoginWindow(tk.Tk):
 
         # âÅâ€œââ‚¬¦ padding e sticky garantem que apareçam e tenham tamanho
         self.btn_entrar = ttk.Button(btns, text="🔐 ENTRAR", style="Primary.TButton", command=self.try_login)
-        self.btn_entrar.grid(row=0, column=0, sticky="ew", padx=(0, 6), ipady=6)
+        self.btn_entrar.grid(row=0, column=0, sticky="ew", padx=(0, 6), ipady=8)
 
         self.btn_sair = ttk.Button(btns, text="SAIR", style="Danger.TButton", command=self._request_close)
-        self.btn_sair.grid(row=0, column=1, sticky="ew", padx=(6, 0), ipady=6)
+        self.btn_sair.grid(row=0, column=1, sticky="ew", padx=(6, 0), ipady=8)
 
         self.ent_codigo.focus_set()
         self.bind("<Return>", lambda e: self.try_login())

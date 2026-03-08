@@ -1,3 +1,8 @@
+2026-03-08 19:22:18 - v4.0.14
+- Release automatizada (patch).
+- Versao anterior: v4.0.13.
+- Preparacao de deploy no Render e setup para Inno Setup.
+
 2026-03-08 14:39:36 - v4.0.13
 - Release automatizada (patch).
 - Versao anterior: v4.0.12.
