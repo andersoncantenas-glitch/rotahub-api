@@ -8486,6 +8486,87 @@ class ClientesImportPage(ttk.Frame):
 
         self.carregar()
 
+    def _importar_clientes_worker(self, path):
+        df = pd.read_excel(path, engine=excel_engine_for(path))
+
+        col_cod = guess_col(df.columns, ["cod", "cÃ³d", "codigo", "cliente", "cod cliente"])
+        col_nome = guess_col(df.columns, ["nome", "cliente"])
+        col_end = guess_col(df.columns, ["endereco", "endereÃ§o", "rua", "logradouro"])
+        col_tel = guess_col(df.columns, ["telefone", "fone", "celular", "contato"])
+        col_vendedor = guess_col(df.columns, ["vendedor", "vend", "representante"])
+
+        if not col_cod or not col_nome:
+            cols = list(df.columns or [])
+            if len(cols) >= 2:
+                col_cod = col_cod or cols[0]
+                col_nome = col_nome or cols[1]
+            else:
+                raise ValueError("NÃƒO IDENTIFIQUEI AS COLUNAS DE CÃ“DIGO E NOME DO CLIENTE NO EXCEL.")
+
+        total = 0
+        sync_falhas = 0
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        api_mode = bool(desktop_secret and is_desktop_api_sync_enabled())
+        if api_mode:
+            for _, r in df.iterrows():
+                cod = str(r.get(col_cod, "")).strip()
+                nome = str(r.get(col_nome, "")).strip()
+                if not cod or not nome:
+                    continue
+
+                endereco = str(r.get(col_end, "")).strip() if col_end else ""
+                telefone = str(r.get(col_tel, "")).strip() if col_tel else ""
+                vendedor = str(r.get(col_vendedor, "")).strip() if col_vendedor else ""
+                try:
+                    self._sync_cliente_upsert_api(cod, nome, endereco, telefone, vendedor)
+                    total += 1
+                except Exception:
+                    sync_falhas += 1
+        else:
+            with get_db() as conn:
+                cur = conn.cursor()
+                for _, r in df.iterrows():
+                    cod = str(r.get(col_cod, "")).strip()
+                    nome = str(r.get(col_nome, "")).strip()
+                    if not cod or not nome:
+                        continue
+
+                    endereco = str(r.get(col_end, "")).strip() if col_end else ""
+                    telefone = str(r.get(col_tel, "")).strip() if col_tel else ""
+                    vendedor = str(r.get(col_vendedor, "")).strip() if col_vendedor else ""
+
+                    cur.execute("""
+                        INSERT INTO clientes (cod_cliente, nome_cliente, endereco, telefone, vendedor)
+                        VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT(cod_cliente) DO UPDATE SET
+                            nome_cliente=excluded.nome_cliente,
+                            endereco=excluded.endereco,
+                            telefone=excluded.telefone,
+                            vendedor=excluded.vendedor
+                    """, (upper(cod), upper(nome), upper(endereco), upper(telefone), upper(vendedor)))
+                    total += 1
+                    try:
+                        self._sync_cliente_upsert_api(cod, nome, endereco, telefone, vendedor)
+                    except Exception:
+                        sync_falhas += 1
+
+        msg = f"CLIENTES IMPORTADOS/ATUALIZADOS: {total}"
+        if sync_falhas:
+            msg += f"\nFalhas de sincronizaÃ§Ã£o API: {sync_falhas}"
+        return msg
+
+    def _on_importar_clientes_done(self, seq, msg):
+        if seq != self._import_seq or not self.winfo_exists():
+            return
+        messagebox.showinfo("OK", msg)
+        self.carregar()
+
+    def _on_importar_clientes_error(self, seq, exc):
+        if seq != self._import_seq or not self.winfo_exists():
+            return
+        logging.error("Falha ao importar clientes via Excel", exc_info=(type(exc), exc, exc.__traceback__))
+        messagebox.showerror("ERRO", str(exc))
+
     def importar_clientes_excel(self):
         if not ensure_system_api_binding(context="Importar clientes via planilha", parent=self):
             return
