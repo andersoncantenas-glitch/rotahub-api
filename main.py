@@ -2404,10 +2404,16 @@ class PageBase(ttk.Frame):
             background=body_bg,
         )
         self.body_canvas.grid(row=0, column=0, sticky="nsew")
+        self.body_canvas._wheel_scroll_target = True
 
         self.body_scrollbar = ttk.Scrollbar(body_shell, orient="vertical", command=self.body_canvas.yview)
         self.body_scrollbar.grid(row=0, column=1, sticky="ns")
-        self.body_canvas.configure(yscrollcommand=self.body_scrollbar.set)
+        self.body_xscrollbar = ttk.Scrollbar(body_shell, orient="horizontal", command=self.body_canvas.xview)
+        self.body_xscrollbar.grid(row=1, column=0, sticky="ew")
+        self.body_canvas.configure(
+            yscrollcommand=self.body_scrollbar.set,
+            xscrollcommand=self.body_xscrollbar.set,
+        )
 
         self.body = ttk.Frame(self.body_canvas, style="Content.TFrame", padding=(22, 18))
         self.body.grid_columnconfigure(0, weight=1)
@@ -2422,8 +2428,9 @@ class PageBase(ttk.Frame):
 
         def _fit_body_size(event):
             try:
+                req_w = max(self.body.winfo_reqwidth(), event.width)
                 req_h = max(self.body.winfo_reqheight(), event.height)
-                self.body_canvas.itemconfigure(self._body_window, width=event.width, height=req_h)
+                self.body_canvas.itemconfigure(self._body_window, width=req_w, height=req_h)
             except Exception:
                 logging.debug("Falha ignorada")
 
@@ -4310,6 +4317,11 @@ class App(tk.Tk):
             logging.debug("Falha ignorada")
 
         apply_style(self)
+        try:
+            self._base_tk_scaling = float(self.tk.call("tk", "scaling"))
+        except Exception:
+            self._base_tk_scaling = 1.0
+        self._ui_zoom = 1.0
         db_init()
 
         if not self.ensure_integracao_sistema("Inicializacao do sistema", force_probe=True):
@@ -4322,6 +4334,10 @@ class App(tk.Tk):
 
         self.sidebar = Sidebar(self, self)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
+        try:
+            self.sidebar.canvas._wheel_scroll_target = True
+        except Exception:
+            logging.debug("Falha ignorada")
 
         self.container = ttk.Frame(self, style="Content.TFrame")
         self.container.grid(row=0, column=1, sticky="nsew")
@@ -4463,6 +4479,147 @@ class App(tk.Tk):
         self.bind("<Control-P>", self._shortcut_print)
         self.bind("<Escape>", self._shortcut_escape)
         self.bind("<Return>", self._shortcut_enter)
+        self.bind("<Control-0>", self._shortcut_reset_zoom)
+        self.bind("<Control-Key-0>", self._shortcut_reset_zoom)
+        self.bind_all("<MouseWheel>", self._on_global_mousewheel, add="+")
+        self.bind_all("<Shift-MouseWheel>", self._on_global_shift_mousewheel, add="+")
+        self.bind_all("<Control-MouseWheel>", self._on_global_zoom_mousewheel, add="+")
+        self.bind_all("<Button-4>", self._on_global_mousewheel_linux, add="+")
+        self.bind_all("<Button-5>", self._on_global_mousewheel_linux, add="+")
+        self.bind_all("<Shift-Button-4>", self._on_global_shift_mousewheel_linux, add="+")
+        self.bind_all("<Shift-Button-5>", self._on_global_shift_mousewheel_linux, add="+")
+        self.bind_all("<Control-Button-4>", self._on_global_zoom_mousewheel_linux, add="+")
+        self.bind_all("<Control-Button-5>", self._on_global_zoom_mousewheel_linux, add="+")
+
+    def _is_descendant_of(self, widget, ancestor):
+        try:
+            w = widget
+            while w is not None:
+                if w == ancestor:
+                    return True
+                w = getattr(w, "master", None)
+        except Exception:
+            return False
+        return False
+
+    def _find_canvas_scroll_target(self, widget):
+        try:
+            w = widget
+            while w is not None:
+                if isinstance(w, (ttk.Treeview, tk.Text, tk.Listbox)):
+                    return None
+                if getattr(w, "_wheel_scroll_target", False):
+                    return w
+                w = getattr(w, "master", None)
+        except Exception:
+            return None
+        page = self._active_page()
+        if page and hasattr(page, "body_canvas") and self._is_descendant_of(widget, page):
+            return page.body_canvas
+        if hasattr(self, "sidebar") and self._is_descendant_of(widget, self.sidebar):
+            return getattr(self.sidebar, "canvas", None)
+        return None
+
+    def _mousewheel_units(self, event):
+        try:
+            if getattr(event, "num", None) == 4:
+                return -3
+            if getattr(event, "num", None) == 5:
+                return 3
+            delta = int(getattr(event, "delta", 0) or 0)
+            if delta == 0:
+                return 0
+            base = max(1, int(abs(delta) / 120))
+            return -base if delta > 0 else base
+        except Exception:
+            return 0
+
+    def _scroll_canvas(self, event, axis="y"):
+        target = self._find_canvas_scroll_target(getattr(event, "widget", None))
+        if not target:
+            return None
+        units = self._mousewheel_units(event)
+        if units == 0:
+            return None
+        try:
+            if axis == "x":
+                target.xview_scroll(units, "units")
+            else:
+                target.yview_scroll(units, "units")
+            return "break"
+        except Exception:
+            return None
+
+    def _refresh_zoom_layout(self):
+        try:
+            sidebar_width = compute_sidebar_width(self)
+            self.grid_columnconfigure(0, minsize=sidebar_width)
+            self.sidebar.configure(width=sidebar_width)
+            self.sidebar.update_idletasks()
+            for page in self.pages.values():
+                if hasattr(page, "body_canvas"):
+                    page.body_canvas.update_idletasks()
+                    try:
+                        page.body_canvas.configure(scrollregion=page.body_canvas.bbox("all"))
+                    except Exception:
+                        logging.debug("Falha ignorada")
+            self.update_idletasks()
+        except Exception:
+            logging.debug("Falha ignorada")
+
+    def _set_ui_zoom(self, zoom_value):
+        zoom_clamped = min(1.35, max(0.85, float(zoom_value)))
+        if abs(zoom_clamped - self._ui_zoom) < 0.001:
+            return
+        self._ui_zoom = zoom_clamped
+        try:
+            self.tk.call("tk", "scaling", self._base_tk_scaling * self._ui_zoom)
+        except Exception:
+            logging.debug("Falha ignorada")
+            return
+        self.after_idle(self._refresh_zoom_layout)
+
+    def _shortcut_reset_zoom(self, _e=None):
+        self._set_ui_zoom(1.0)
+        return "break"
+
+    def _on_global_mousewheel(self, event):
+        state = int(getattr(event, "state", 0) or 0)
+        if state & 0x4 or state & 0x1:
+            return None
+        return self._scroll_canvas(event, axis="y")
+
+    def _on_global_shift_mousewheel(self, event):
+        state = int(getattr(event, "state", 0) or 0)
+        if state & 0x4:
+            return None
+        return self._scroll_canvas(event, axis="x")
+
+    def _on_global_zoom_mousewheel(self, event):
+        units = self._mousewheel_units(event)
+        if units == 0:
+            return None
+        self._set_ui_zoom(self._ui_zoom + (-0.05 * units))
+        return "break"
+
+    def _on_global_mousewheel_linux(self, event):
+        state = int(getattr(event, "state", 0) or 0)
+        if state & 0x4 or state & 0x1:
+            return None
+        return self._scroll_canvas(event, axis="y")
+
+    def _on_global_shift_mousewheel_linux(self, event):
+        state = int(getattr(event, "state", 0) or 0)
+        if state & 0x4:
+            return None
+        return self._scroll_canvas(event, axis="x")
+
+    def _on_global_zoom_mousewheel_linux(self, event):
+        units = self._mousewheel_units(event)
+        if units == 0:
+            return None
+        self._set_ui_zoom(self._ui_zoom + (-0.05 * units))
+        return "break"
 
     def _active_page(self):
         return self.pages.get(self.current_page_name) if self.current_page_name else None
@@ -9926,27 +10083,29 @@ class ProgramacaoPage(PageBase):
         # -------------------------
         card = ttk.Frame(self.body, style="Card.TFrame", padding=14)
         card.grid(row=0, column=0, sticky="ew")
-        card.grid_columnconfigure(0, weight=5, minsize=480)
+        card.grid_columnconfigure(0, weight=5, minsize=420)
         card.grid_columnconfigure(1, weight=6, minsize=500)
-        card.grid_columnconfigure(2, weight=3, minsize=260)
 
         team = ttk.Frame(card, style="CardInset.TFrame", padding=(12, 10))
         team.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
-        team.grid_columnconfigure(0, weight=3, minsize=140)
-        team.grid_columnconfigure(1, weight=3, minsize=140)
-        team.grid_columnconfigure(2, weight=5, minsize=260)
+        team.grid_columnconfigure(0, weight=3, minsize=120)
+        team.grid_columnconfigure(1, weight=3, minsize=120)
+        team.grid_columnconfigure(2, weight=4, minsize=210)
 
         route = ttk.Frame(card, style="CardInset.TFrame", padding=(12, 10))
         route.grid(row=0, column=1, sticky="nsew", padx=(0, 10))
-        route.grid_columnconfigure(0, weight=3, minsize=120)
-        route.grid_columnconfigure(1, weight=3, minsize=160)
-        route.grid_columnconfigure(2, weight=3, minsize=140)
-        route.grid_columnconfigure(3, weight=2, minsize=120)
+        route.grid_columnconfigure(0, weight=3, minsize=110)
+        route.grid_columnconfigure(1, weight=3, minsize=150)
+        route.grid_columnconfigure(2, weight=3, minsize=130)
+        route.grid_columnconfigure(3, weight=2, minsize=110)
 
         control = ttk.Frame(card, style="CardInset.TFrame", padding=(12, 10))
-        control.grid(row=0, column=2, sticky="nsew")
-        control.grid_columnconfigure(0, weight=1, minsize=130)
-        control.grid_columnconfigure(1, weight=1, minsize=120)
+        control.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        control.grid_columnconfigure(0, weight=0, minsize=95)
+        control.grid_columnconfigure(1, weight=0, minsize=95)
+        control.grid_columnconfigure(2, weight=2, minsize=170)
+        control.grid_columnconfigure(3, weight=2, minsize=180)
+        control.grid_columnconfigure(4, weight=2, minsize=180)
 
         ttk.Label(team, text="Motorista", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w")
         self.cb_motorista = ttk.Combobox(team, state="readonly")
@@ -9968,7 +10127,7 @@ class ProgramacaoPage(PageBase):
             team,
             text="Nenhum selecionado",
             style="CardLabel.TLabel",
-            wraplength=250,
+            wraplength=190,
         )
         self.lbl_ajudantes_sel.grid(row=2, column=2, sticky="w", pady=(6, 0))
 
@@ -10006,7 +10165,8 @@ class ProgramacaoPage(PageBase):
 
         ttk.Label(control, text="Codigo", style="CardLabel.TLabel").grid(row=0, column=1, sticky="w")
         self.ent_codigo = ttk.Entry(control, style="Field.TEntry", state="readonly")
-        self.ent_codigo.grid(row=1, column=1, sticky="ew")
+        self.ent_codigo.grid(row=1, column=1, sticky="ew", padx=(0, 10))
+        ttk.Label(control, text="Status", style="CardLabel.TLabel").grid(row=0, column=2, sticky="w")
         self.lbl_prog_status_badge = ttk.Label(
             control,
             text="Status atual: -",
@@ -10014,10 +10174,24 @@ class ProgramacaoPage(PageBase):
             foreground="#6B7280",
             font=("Segoe UI", 9, "bold"),
         )
-        self.lbl_prog_status_badge.grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.lbl_prog_status_badge.grid(row=1, column=2, sticky="ew")
+        self.btn_salvar_prog = ttk.Button(
+            control,
+            text="SALVAR PROGRAMAÇÃO",
+            style="Primary.TButton",
+            command=self.salvar_programacao
+        )
+        self.btn_salvar_prog.grid(row=1, column=3, sticky="ew", padx=(10, 8))
+        self.btn_editar_prog = ttk.Button(
+            control,
+            text="EDITAR PROGRAMAÇÃO",
+            style="Ghost.TButton",
+            command=self.carregar_programacao_para_edicao
+        )
+        self.btn_editar_prog.grid(row=1, column=4, sticky="ew")
 
         rank_wrap = ttk.Frame(card, style="Card.TFrame")
-        rank_wrap.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        rank_wrap.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         rank_wrap.grid_columnconfigure(0, weight=1)
         rank_wrap.grid_columnconfigure(1, weight=0)
 
@@ -10089,7 +10263,7 @@ class ProgramacaoPage(PageBase):
 
         ttk.Button(
             acoes_linha_1,
-            text="CARREGAR VENDAS SELECIONADAS",
+            text="CARREGAR VENDAS",
             style="Warn.TButton",
             command=self.carregar_vendas_selecionadas
         ).grid(row=0, column=0, padx=4, sticky="ew")
@@ -10105,29 +10279,13 @@ class ProgramacaoPage(PageBase):
 
         acoes_linha_2 = ttk.Frame(top2, style="Card.TFrame")
         acoes_linha_2.grid(row=1, column=0, sticky="ew", pady=(8, 0))
-        for i in range(3):
-            acoes_linha_2.grid_columnconfigure(i, weight=1, uniform="prog_actions_2")
-
-        ttk.Button(
-            acoes_linha_2,
-            text="SALVAR PROGRAMACAO",
-            style="Primary.TButton",
-            command=self.salvar_programacao
-        ).grid(row=0, column=0, padx=4, sticky="ew")
-
-        ttk.Button(
-            acoes_linha_2,
-            text="EDITAR PROGRAMACAO",
-            style="Ghost.TButton",
-            command=self.carregar_programacao_para_edicao
-        ).grid(row=0, column=1, padx=4, sticky="ew")
-
+        acoes_linha_2.grid_columnconfigure(0, weight=1)
         ttk.Button(
             acoes_linha_2,
             text="IMPRIMIR ROMANEIOS",
             style="Ghost.TButton",
             command=self.imprimir_romaneios_programacao
-        ).grid(row=0, column=2, padx=4, sticky="ew")
+        ).grid(row=0, column=0, padx=4, sticky="ew")
 
         ttk.Label(
             top2,
@@ -10170,16 +10328,18 @@ class ProgramacaoPage(PageBase):
 
         for c in cols:
             self.tree.heading(c, text=c)
-            self.tree.column(c, width=165, minwidth=100, anchor="w", stretch=True)
+            self.tree.column(c, width=135, minwidth=90, anchor="w", stretch=True)
 
-        self.tree.column("ENDERECO", width=280, minwidth=190)
-        self.tree.column("NOME CLIENTE", width=260, minwidth=180)
-        self.tree.column("PRODUTO", width=170, minwidth=130)
-        self.tree.column("PEDIDO", width=150, minwidth=120)
-        self.tree.column("OBS", width=260, minwidth=160)
-        self.tree.column("CAIXAS", width=90, minwidth=80, anchor="center", stretch=False)
-        self.tree.column("KG", width=95, minwidth=85, anchor="center", stretch=False)
-        self.tree.column("PRECO", width=120, minwidth=100, anchor="e", stretch=False)
+        self.tree.column("COD CLIENTE", width=110, minwidth=90, stretch=False)
+        self.tree.column("ENDERECO", width=220, minwidth=150)
+        self.tree.column("NOME CLIENTE", width=210, minwidth=150)
+        self.tree.column("PRODUTO", width=140, minwidth=110)
+        self.tree.column("VENDEDOR", width=130, minwidth=100)
+        self.tree.column("PEDIDO", width=110, minwidth=90, stretch=False)
+        self.tree.column("OBS", width=180, minwidth=120)
+        self.tree.column("CAIXAS", width=75, minwidth=70, anchor="center", stretch=False)
+        self.tree.column("KG", width=85, minwidth=75, anchor="center", stretch=False)
+        self.tree.column("PRECO", width=90, minwidth=80, anchor="e", stretch=False)
 
         self.tree.bind("<Double-1>", self._start_edit_cell)
         self.tree.bind("<MouseWheel>", self._on_tree_scroll, add=True)
@@ -11000,6 +11160,34 @@ class ProgramacaoPage(PageBase):
         vals = list(vals) + [""] * (10 - len(vals))
         return [str(v or "").strip() for v in vals[:10]]
 
+    def _collect_tree_item_rows(self):
+        rows = []
+        try:
+            for iid in self.tree.get_children():
+                rows.append(self._get_row_values(iid))
+        except Exception:
+            logging.debug("Falha ao coletar itens da programacao", exc_info=True)
+        return rows
+
+    def _load_existing_programacao_item_rows(self, codigo: str):
+        rows = []
+        for it in (fetch_programacao_itens(codigo) or []):
+            if not isinstance(it, dict):
+                continue
+            rows.append([
+                upper(it.get("cod_cliente", "")),
+                upper(it.get("nome_cliente", "")),
+                upper(it.get("produto", "")),
+                upper(it.get("endereco", "")),
+                str(safe_int(it.get("qnt_caixas"), 0)),
+                f"{safe_float(it.get('kg'), 0.0):.2f}",
+                f"{safe_float(it.get('preco'), 0.0):.2f}",
+                upper(it.get("vendedor", "")),
+                upper(it.get("pedido", "")),
+                upper(it.get("obs", "")),
+            ])
+        return rows
+
     def _on_tree_scroll(self, event=None):
         if self._editing:
             self._commit_edit()
@@ -11638,6 +11826,7 @@ class ProgramacaoPage(PageBase):
                 return upper(s)
 
         vendas = []
+        codigo_vinculo = upper((self.ent_codigo.get() or "").strip())
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
         if desktop_secret and is_desktop_api_sync_enabled():
             try:
@@ -11771,7 +11960,14 @@ class ProgramacaoPage(PageBase):
             ))
 
         self._refresh_total_caixas_field()
-        msg = f"STATUS: Itens carregados: {len(self.tree.get_children())} vendas selecionadas (nao usadas). (edite antes de salvar)"
+        qtd_itens = len(self.tree.get_children())
+        if codigo_vinculo:
+            msg = (
+                f"STATUS: {qtd_itens} vendas carregadas para a programacao {codigo_vinculo}. "
+                f"Clique em SALVAR PROGRAMACAO para vincular os itens."
+            )
+        else:
+            msg = f"STATUS: Itens carregados: {qtd_itens} vendas selecionadas (nao usadas). (edite antes de salvar)"
         if ignorados_invalidos:
             msg += f" Ignoradas invalidas: {ignorados_invalidos}."
         self.set_status(msg)
@@ -11983,34 +12179,41 @@ class ProgramacaoPage(PageBase):
             messagebox.showwarning("ATENCAO", "Informe o local de Carregamento.")
             return
 
+        codigo = None
+        codigo_atual = upper((self.ent_codigo.get() or "").strip())
+        explicit_edit_mode = upper(str(self._editing_programacao_codigo or "").strip()) == codigo_atual
+
         itens = []
         for iid in self.tree.get_children():
             itens.append(self._get_row_values(iid))
 
-        if not itens:
-            messagebox.showwarning("ATENÇÃO", "Carregue itens (vendas selecionadas) antes de salvar.")
-            return
+        itens_salvar = list(itens)
+        preserving_existing_items = False
+        if not itens_salvar and codigo_atual and explicit_edit_mode:
+            itens_existentes = self._load_existing_programacao_item_rows(codigo_atual)
+            if itens_existentes:
+                itens_salvar = itens_existentes
+                preserving_existing_items = True
 
         # âÅâ€œââ‚¬¦ validação mÃÂÂnima por linha (segurança)
-        for v in itens:
+        for v in itens_salvar:
             cod_cliente = v[0]
             nome_cliente = v[1]
             if not str(cod_cliente).strip() or not str(nome_cliente).strip():
                 messagebox.showwarning("ATENÇÃO", "Há linhas sem COD CLIENTE ou NOME CLIENTE. Corrija antes de salvar.")
                 return
 
-        codigo = None
-        codigo_atual = upper((self.ent_codigo.get() or "").strip())
         is_update_existing = False
         data_criacao = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        creating_base_programacao = not itens and not preserving_existing_items and not codigo_atual
 
         # Totais (compatibilidade API)
         try:
-            total_caixas = sum(safe_int(v[4], 0) for v in itens)
+            total_caixas = sum(safe_int(v[4], 0) for v in itens_salvar)
         except Exception:
             total_caixas = 0
         try:
-            total_quilos = round(sum(safe_float(v[5], 0.0) for v in itens), 2)
+            total_quilos = round(sum(safe_float(v[5], 0.0) for v in itens_salvar), 2)
         except Exception:
             total_quilos = 0.0
 
@@ -12050,7 +12253,7 @@ class ProgramacaoPage(PageBase):
         try:
             if desktop_secret and is_desktop_api_sync_enabled():
                 itens_payload = []
-                for (cod_cliente, nome_cliente, produto, endereco, caixas, kg, preco, vendedor, pedido, obs) in itens:
+                for (cod_cliente, nome_cliente, produto, endereco, caixas, kg, preco, vendedor, pedido, obs) in itens_salvar:
                     itens_payload.append({
                         "cod_cliente": upper(cod_cliente),
                         "nome_cliente": upper(nome_cliente),
@@ -12438,7 +12641,8 @@ class ProgramacaoPage(PageBase):
                     logging.debug("Falha ignorada")
 
                 # Itens
-                if is_update_existing:
+                replace_existing_items = bool(itens)
+                if is_update_existing and replace_existing_items:
                     cur.execute("DELETE FROM programacao_itens WHERE codigo_programacao=?", (codigo,))
                     # Limpa estado operacional antigo para evitar herdar "finalizada/entregue"
                     # de execucoes anteriores ao replanejar a mesma programacao.
@@ -12449,45 +12653,46 @@ class ProgramacaoPage(PageBase):
                                 cur.execute(f"DELETE FROM {tbl} WHERE codigo_programacao=?", (codigo,))
                         except Exception:
                             logging.debug("Falha ignorada")
-                for (cod_cliente, nome_cliente, produto, endereco, caixas, kg, preco, vendedor, pedido, obs) in itens:
-                    cur.execute("""
-                        INSERT INTO programacao_itens (
-                            codigo_programacao, cod_cliente, nome_cliente,
-                            qnt_caixas, kg, preco, endereco, vendedor, pedido, produto
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        codigo,
-                        upper(cod_cliente),
-                        upper(nome_cliente),
-                        safe_int(caixas, 0),
-                        safe_float(kg, 0.0),
-                        safe_float(preco, 0.0),
-                        upper(endereco),
-                        upper(vendedor),
-                        upper(pedido),
-                        upper(produto)
-                    ))
+                if (not is_update_existing) or replace_existing_items:
+                    for (cod_cliente, nome_cliente, produto, endereco, caixas, kg, preco, vendedor, pedido, obs) in itens_salvar:
+                        cur.execute("""
+                            INSERT INTO programacao_itens (
+                                codigo_programacao, cod_cliente, nome_cliente,
+                                qnt_caixas, kg, preco, endereco, vendedor, pedido, produto
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            codigo,
+                            upper(cod_cliente),
+                            upper(nome_cliente),
+                            safe_int(caixas, 0),
+                            safe_float(kg, 0.0),
+                            safe_float(preco, 0.0),
+                            upper(endereco),
+                            upper(vendedor),
+                            upper(pedido),
+                            upper(produto)
+                        ))
 
-                    # Mantém clientes atualizados (compatÃÂÂvel com bases antigas)
-                    if cod_cliente and nome_cliente:
-                        try:
-                            cur.execute("""
-                                INSERT INTO clientes (cod_cliente, nome_cliente, endereco, telefone, vendedor)
-                                VALUES (?, ?, ?, '', ?)
-                                ON CONFLICT(cod_cliente) DO UPDATE SET
-                                    nome_cliente=excluded.nome_cliente,
-                                    endereco=excluded.endereco,
-                                    vendedor=excluded.vendedor
-                            """, (upper(cod_cliente), upper(nome_cliente), upper(endereco), upper(vendedor)))
-                        except Exception:
-                            cur.execute("""
-                                INSERT INTO clientes (cod_cliente, nome_cliente, endereco, telefone)
-                                VALUES (?, ?, ?, '')
-                                ON CONFLICT(cod_cliente) DO UPDATE SET
-                                    nome_cliente=excluded.nome_cliente,
-                                    endereco=excluded.endereco
-                            """, (upper(cod_cliente), upper(nome_cliente), upper(endereco)))
+                        # Mantém clientes atualizados (compatÃÂÂvel com bases antigas)
+                        if cod_cliente and nome_cliente:
+                            try:
+                                cur.execute("""
+                                    INSERT INTO clientes (cod_cliente, nome_cliente, endereco, telefone, vendedor)
+                                    VALUES (?, ?, ?, '', ?)
+                                    ON CONFLICT(cod_cliente) DO UPDATE SET
+                                        nome_cliente=excluded.nome_cliente,
+                                        endereco=excluded.endereco,
+                                        vendedor=excluded.vendedor
+                                """, (upper(cod_cliente), upper(nome_cliente), upper(endereco), upper(vendedor)))
+                            except Exception:
+                                cur.execute("""
+                                    INSERT INTO clientes (cod_cliente, nome_cliente, endereco, telefone)
+                                    VALUES (?, ?, ?, '')
+                                    ON CONFLICT(cod_cliente) DO UPDATE SET
+                                        nome_cliente=excluded.nome_cliente,
+                                        endereco=excluded.endereco
+                                """, (upper(cod_cliente), upper(nome_cliente), upper(endereco)))
 
                 # =========================================================
                 # âÅâ€œââ‚¬¦ REGRA NOVA: Vendas selecionadas viram "usadas" e somem
@@ -12538,8 +12743,20 @@ class ProgramacaoPage(PageBase):
             messagebox.showinfo("OK", f"Programação atualizada: {codigo}")
             self.set_status(f"STATUS: Programação atualizada: {codigo}")
         else:
-            messagebox.showinfo("OK", f"Programação salva: {codigo} (ABERTA/ATIVA)")
-            self.set_status(f"STATUS: Programação salva: {codigo} (ABERTA/ATIVA)")
+            if creating_base_programacao:
+                messagebox.showinfo(
+                    "OK",
+                    f"Programação-base salva: {codigo}.\n\n"
+                    "O vínculo com o celular já pode ser feito.\n"
+                    "Depois, importe as vendas, carregue as selecionadas e salve novamente para anexar os clientes."
+                )
+                self.set_status(
+                    f"STATUS: Programação-base {codigo} salva sem clientes. "
+                    "Importe as vendas e salve novamente para vincular os itens."
+                )
+            else:
+                messagebox.showinfo("OK", f"Programação salva: {codigo} (ABERTA/ATIVA)")
+                self.set_status(f"STATUS: Programação salva: {codigo} (ABERTA/ATIVA)")
 
         # Sincroniza programação com a API central (para aparecer no app mobile).
         try:
@@ -12620,6 +12837,10 @@ class ProgramacaoPage(PageBase):
                     page_rotas._load_data()
         except Exception:
             logging.debug("Falha ignorada")
+
+        if creating_base_programacao:
+            self._loaded_venda_ids = []
+            return
 
         if messagebox.askyesno("PDF", "Deseja gerar o PDF da programação agora?\n\n(Pronto para impressão A4)"):
             self.gerar_pdf_programacao_salva(
@@ -16480,6 +16701,7 @@ class DespesasPage(PageBase):
         else:
             self.nf_ocorrencias_content.grid()
             self.btn_toggle_nf_ocorrencias.configure(text="Ocultar")
+
 
 # ==========================
 # ===== FIM DA PARTE 7 (ATUALIZADA) =====
