@@ -2,7 +2,7 @@
 ; Ajuste AppVersion e rode no Inno Setup Compiler (ISCC).
 
 #define MyAppName "RotaHub Desktop"
-#define MyAppVersionBase "4.0.7"
+#define MyAppVersionBase "4.0.8"
 #define MyAppVersion MyAppVersionBase
 #define MyAppPublisher "RotaHub"
 #define MyAppExeName "RotaHubDesktop.exe"

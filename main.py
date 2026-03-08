@@ -1017,6 +1017,41 @@ class SyncError(Exception):
     """Erro especÃÂÂfico ao tentar sincronizar com a API mobile."""
 
 
+API_GET_CACHE = {}
+API_CACHE_TTLS = {
+    "desktop/cadastros/": 30.0,
+    "desktop/clientes/base": 20.0,
+    "desktop/programacoes": 8.0,
+    "desktop/monitoramento/rotas": 5.0,
+    "desktop/overview": 5.0,
+}
+
+
+def _api_cache_ttl(path: str) -> float:
+    normalized = str(path or "").strip().lstrip("/")
+    for prefix, ttl in API_CACHE_TTLS.items():
+        if normalized.startswith(prefix):
+            return ttl
+    return 0.0
+
+
+def _api_cache_key(method: str, path: str, token: str = None, extra_headers: dict = None):
+    headers = tuple(sorted((str(k), str(v)) for k, v in (extra_headers or {}).items() if k and v is not None))
+    return (str(method or "").upper(), str(path or "").strip(), str(token or ""), headers)
+
+
+def _invalidate_api_cache(path: str = ""):
+    normalized = str(path or "").strip().lstrip("/")
+    keys = list(API_GET_CACHE.keys())
+    for key in keys:
+        try:
+            _, cached_path, _, _ = key
+        except Exception:
+            cached_path = ""
+        if (not normalized) or str(cached_path).startswith(normalized):
+            API_GET_CACHE.pop(key, None)
+
+
 def _build_api_url(path: str) -> str:
     path = (path or "").strip().lstrip("/")
     if path:
@@ -1025,6 +1060,7 @@ def _build_api_url(path: str) -> str:
 
 
 def _call_api(method: str, path: str, payload=None, token: str = None, extra_headers: dict = None):
+    method = str(method or "GET").upper()
     url = _build_api_url(path)
     headers = {
         "Accept": "application/json",
@@ -1043,15 +1079,36 @@ def _call_api(method: str, path: str, payload=None, token: str = None, extra_hea
             if k and v is not None:
                 headers[str(k)] = str(v)
 
-    req = urllib.request.Request(url, data=data, headers=headers, method=method.upper())
+    cache_ttl = _api_cache_ttl(path) if method == "GET" and payload is None else 0.0
+    cache_key = _api_cache_key(method, path, token=token, extra_headers=extra_headers) if cache_ttl > 0 else None
+    if cache_key:
+        cached = API_GET_CACHE.get(cache_key)
+        if cached:
+            expires_at, cached_payload = cached
+            if expires_at > time.time():
+                logging.info("API cache hit | path=%s", path)
+                return cached_payload
+            API_GET_CACHE.pop(cache_key, None)
+
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    started = time.perf_counter()
     try:
         with urllib.request.urlopen(req, timeout=API_SYNC_TIMEOUT) as resp:
             body = resp.read()
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            logging.info("API %s %s | %.0f ms", method, path, elapsed_ms)
             if not body:
                 return {}
             text = body.decode("utf-8")
-            return json.loads(text)
+            parsed = json.loads(text)
+            if cache_key:
+                API_GET_CACHE[cache_key] = (time.time() + cache_ttl, parsed)
+            elif method != "GET":
+                _invalidate_api_cache()
+            return parsed
     except urllib.error.HTTPError as exc:
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        logging.warning("API %s %s | HTTPError %s | %.0f ms", method, path, exc.code, elapsed_ms)
         body = exc.read()
         detail = ""
         if body:
@@ -1065,8 +1122,12 @@ def _call_api(method: str, path: str, payload=None, token: str = None, extra_hea
                 detail = body.decode("utf-8", errors="ignore")
         raise SyncError(f"{exc.code} {exc.reason}: {detail or 'Sem detalhes'}")
     except urllib.error.URLError as exc:
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        logging.warning("API %s %s | URLError | %.0f ms", method, path, elapsed_ms)
         raise SyncError(f"Falha ao conectar-se a {url}: {exc.reason}")
     except Exception as exc:
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        logging.warning("API %s %s | erro inesperado | %.0f ms", method, path, elapsed_ms)
         raise SyncError(f"Erro inesperado ao chamar a API de sincronização: {exc}")
     return None
 
@@ -3598,6 +3659,87 @@ class CadastroCRUD(ttk.Frame):
         self._update_password_controls()
 
         # Mantive seu importar_clientes_excel como estava (se você ainda usa em algum ponto)
+    def _importar_clientes_worker(self, path):
+        df = pd.read_excel(path, engine=excel_engine_for(path))
+
+        col_cod = guess_col(df.columns, ["cod", "cÃ³d", "codigo", "cliente", "cod cliente"])
+        col_nome = guess_col(df.columns, ["nome", "cliente"])
+        col_end = guess_col(df.columns, ["endereco", "endereÃ§o", "rua", "logradouro"])
+        col_tel = guess_col(df.columns, ["telefone", "fone", "celular", "contato"])
+        col_vendedor = guess_col(df.columns, ["vendedor", "vend", "representante"])
+
+        if not col_cod or not col_nome:
+            cols = list(df.columns or [])
+            if len(cols) >= 2:
+                col_cod = col_cod or cols[0]
+                col_nome = col_nome or cols[1]
+            else:
+                raise ValueError("NÃƒO IDENTIFIQUEI AS COLUNAS DE CÃ“DIGO E NOME DO CLIENTE NO EXCEL.")
+
+        total = 0
+        sync_falhas = 0
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        api_mode = bool(desktop_secret and is_desktop_api_sync_enabled())
+        if api_mode:
+            for _, r in df.iterrows():
+                cod = str(r.get(col_cod, "")).strip()
+                nome = str(r.get(col_nome, "")).strip()
+                if not cod or not nome:
+                    continue
+
+                endereco = str(r.get(col_end, "")).strip() if col_end else ""
+                telefone = str(r.get(col_tel, "")).strip() if col_tel else ""
+                vendedor = str(r.get(col_vendedor, "")).strip() if col_vendedor else ""
+                try:
+                    self._sync_cliente_upsert_api(cod, nome, endereco, telefone, vendedor)
+                    total += 1
+                except Exception:
+                    sync_falhas += 1
+        else:
+            with get_db() as conn:
+                cur = conn.cursor()
+                for _, r in df.iterrows():
+                    cod = str(r.get(col_cod, "")).strip()
+                    nome = str(r.get(col_nome, "")).strip()
+                    if not cod or not nome:
+                        continue
+
+                    endereco = str(r.get(col_end, "")).strip() if col_end else ""
+                    telefone = str(r.get(col_tel, "")).strip() if col_tel else ""
+                    vendedor = str(r.get(col_vendedor, "")).strip() if col_vendedor else ""
+
+                    cur.execute("""
+                        INSERT INTO clientes (cod_cliente, nome_cliente, endereco, telefone, vendedor)
+                        VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT(cod_cliente) DO UPDATE SET
+                            nome_cliente=excluded.nome_cliente,
+                            endereco=excluded.endereco,
+                            telefone=excluded.telefone,
+                            vendedor=excluded.vendedor
+                    """, (upper(cod), upper(nome), upper(endereco), upper(telefone), upper(vendedor)))
+                    total += 1
+                    try:
+                        self._sync_cliente_upsert_api(cod, nome, endereco, telefone, vendedor)
+                    except Exception:
+                        sync_falhas += 1
+
+        msg = f"CLIENTES IMPORTADOS/ATUALIZADOS: {total}"
+        if sync_falhas:
+            msg += f"\nFalhas de sincronizaÃ§Ã£o API: {sync_falhas}"
+        return msg
+
+    def _on_importar_clientes_done(self, seq, msg):
+        if seq != self._import_seq or not self.winfo_exists():
+            return
+        messagebox.showinfo("OK", msg)
+        self.carregar()
+
+    def _on_importar_clientes_error(self, seq, exc):
+        if seq != self._import_seq or not self.winfo_exists():
+            return
+        logging.error("Falha ao importar clientes via Excel", exc_info=(type(exc), exc, exc.__traceback__))
+        messagebox.showerror("ERRO", str(exc))
+
     def importar_clientes_excel(self):
         if not ensure_system_api_binding(context="Importar clientes (cadastros)", parent=self):
             return
@@ -4142,10 +4284,18 @@ class App(tk.Tk):
 
         page.tkraise()
         self.current_page_name = name
-        try:
-            page.on_show()
-        except Exception as e:
-            messagebox.showerror("ERRO", f"Erro ao abrir página '{name}':\n\n{e}")
+        started = time.perf_counter()
+
+        def _run_on_show():
+            try:
+                if page.winfo_exists() and self.current_page_name == name:
+                    page.on_show()
+                    elapsed_ms = (time.perf_counter() - started) * 1000.0
+                    logging.info("Tela %s exibida | %.0f ms", name, elapsed_ms)
+            except Exception as e:
+                messagebox.showerror("ERRO", f"Erro ao abrir página '{name}':\n\n{e}")
+
+        self.after_idle(_run_on_show)
 
     def refresh_programacao_comboboxes(self):
         """Atualiza comboboxes em páginas relevantes"""
@@ -4289,6 +4439,7 @@ class HomePage(PageBase):
     def __init__(self, parent, app):
         super().__init__(parent, app, "Home")
         self._api_job = None
+        self._load_seq = 0
         self._update_notice_shown = False
         self._remote_version = "-"
         self._remote_setup_url = SETUP_DOWNLOAD_URL
@@ -5297,7 +5448,7 @@ class HomePage(PageBase):
                 pass
         return txt
 
-    def on_show(self):
+    def _load_home_payload(self):
         total_prog = 0
         total_vendas = 0
         total_clientes_ativos = 0
@@ -5311,31 +5462,15 @@ class HomePage(PageBase):
             total_clientes_ativos = safe_int(api_overview.get("total_clientes_ativos"), 0)
             rows = api_overview.get("rotas") or []
             source = "API CENTRAL"
-            for i in self.tree_rotas.get_children():
-                self.tree_rotas.delete(i)
-            for r in rows:
-                if isinstance(r, dict):
-                    codigo = upper(r.get("codigo_programacao") or "")
-                    motorista = upper(r.get("motorista") or "")
-                    veiculo = upper(r.get("veiculo") or "")
-                    data_criacao = str(r.get("data_criacao") or "")
-                else:
-                    codigo = upper(r[0] if len(r) > 0 else "")
-                    motorista = upper(r[1] if len(r) > 1 else "")
-                    veiculo = upper(r[2] if len(r) > 2 else "")
-                    data_criacao = str(r[3] if len(r) > 3 else "")
-                data_fmt = self._format_home_data(data_criacao)
-                self.tree_rotas.insert("", "end", values=(codigo, motorista, veiculo, data_fmt))
-            self.lbl_total_prog.config(text=str(total_prog))
-            self.lbl_total_vendas.config(text=str(total_vendas))
-            self.lbl_total_clientes_ativos.config(text=str(total_clientes_ativos))
             pending = self._load_pending_counts(total_prog_hint=total_prog)
-            self.lbl_pend_rotas.config(text=str(pending.get("rotas_abertas", 0)))
-            self.lbl_pend_prest.config(text=str(pending.get("prestacao_pendente", 0)))
-            self.lbl_pend_desp.config(text=str(pending.get("sem_despesa", 0)))
-            self._refresh_home_footer(source)
-            self.set_status(f"STATUS: Home carregada ({source}).")
-            return
+            return {
+                "total_prog": total_prog,
+                "total_vendas": total_vendas,
+                "total_clientes_ativos": total_clientes_ativos,
+                "rows": rows,
+                "source": source,
+                "pending": pending,
+            }
 
         with get_db() as conn:
             cur = conn.cursor()
@@ -5347,10 +5482,7 @@ class HomePage(PageBase):
             where_ativas = self._home_local_not_finalized_where(cols_prog)
 
             try:
-                cur.execute("""
-                    SELECT COUNT(*)
-                    FROM programacoes
-                    WHERE """ + where_ativas)
+                cur.execute("SELECT COUNT(*) FROM programacoes WHERE " + where_ativas)
                 r = cur.fetchone()
                 total_prog = (r[0] if r else 0) or 0
             except Exception:
@@ -5383,9 +5515,6 @@ class HomePage(PageBase):
             except Exception:
                 total_clientes_ativos = 0
 
-            for i in self.tree_rotas.get_children():
-                self.tree_rotas.delete(i)
-
             api_rows = self._home_api_rows()
             if api_rows:
                 rows = api_rows
@@ -5413,14 +5542,42 @@ class HomePage(PageBase):
                     except Exception:
                         rows = []
 
-            for r in rows:
-                data_fmt = self._format_home_data(r[3] if len(r) > 3 else "")
-                tree_insert_aligned(self.tree_rotas, "", "end", (r[0], r[1], r[2], data_fmt))
-
-        self.lbl_total_prog.config(text=str(total_prog))
-        self.lbl_total_vendas.config(text=str(total_vendas))
-        self.lbl_total_clientes_ativos.config(text=str(total_clientes_ativos))
         pending = self._load_pending_counts(total_prog_hint=total_prog)
+        return {
+            "total_prog": total_prog,
+            "total_vendas": total_vendas,
+            "total_clientes_ativos": total_clientes_ativos,
+            "rows": rows,
+            "source": source,
+            "pending": pending,
+        }
+
+    def _apply_home_payload(self, seq, payload):
+        if seq != self._load_seq or not self.winfo_exists():
+            return
+        payload = payload or {}
+        rows = payload.get("rows") or []
+        source = payload.get("source") or "LOCAL"
+        pending = payload.get("pending") or {}
+
+        self.tree_rotas.delete(*self.tree_rotas.get_children())
+        for r in rows:
+            if isinstance(r, dict):
+                codigo = upper(r.get("codigo_programacao") or "")
+                motorista = upper(r.get("motorista") or "")
+                veiculo = upper(r.get("veiculo") or "")
+                data_criacao = str(r.get("data_criacao") or r.get("recorded_at") or "")
+            else:
+                codigo = upper(r[0] if len(r) > 0 else "")
+                motorista = upper(r[1] if len(r) > 1 else "")
+                veiculo = upper(r[2] if len(r) > 2 else "")
+                data_criacao = str(r[3] if len(r) > 3 else "")
+            data_fmt = self._format_home_data(data_criacao)
+            tree_insert_aligned(self.tree_rotas, "", "end", (codigo, motorista, veiculo, data_fmt))
+
+        self.lbl_total_prog.config(text=str(payload.get("total_prog", 0)))
+        self.lbl_total_vendas.config(text=str(payload.get("total_vendas", 0)))
+        self.lbl_total_clientes_ativos.config(text=str(payload.get("total_clientes_ativos", 0)))
         self.lbl_pend_rotas.config(text=str(pending.get("rotas_abertas", 0)))
         self.lbl_pend_prest.config(text=str(pending.get("prestacao_pendente", 0)))
         self.lbl_pend_desp.config(text=str(pending.get("sem_despesa", 0)))
@@ -5429,6 +5586,23 @@ class HomePage(PageBase):
         nome = self.app.user.get("nome", "")
         is_admin = bool(self.app.user.get("is_admin", False))
         self.set_status(f"STATUS: Logado como {nome} (ADMIN: {is_admin}). Fonte Home: {source}.")
+
+    def _handle_home_load_error(self, seq, exc):
+        if seq != self._load_seq or not self.winfo_exists():
+            return
+        logging.error("Falha ao carregar Home", exc_info=(type(exc), exc, exc.__traceback__))
+        self.set_status("STATUS: Falha ao carregar a Home.")
+
+    def on_show(self):
+        self._load_seq += 1
+        seq = self._load_seq
+        self.set_status("STATUS: Carregando Home...")
+        run_async_ui(
+            self,
+            self._load_home_payload,
+            lambda payload, seq=seq: self._apply_home_payload(seq, payload),
+            lambda exc, seq=seq: self._handle_home_load_error(seq, exc),
+        )
 
     # =========================================================
     # PREVIEW ROTA âââââ€š¬Å¡¬ââââ‚¬Å¡¬ PUXA DADOS REAIS DA PROGRAMAÃÆââ‚¬â„¢ââââ‚¬Å¡¬¡ÃÆââ‚¬â„¢Æâââ€š¬ââ€ž¢O ATIVA
@@ -6802,6 +6976,7 @@ class RotasPage(PageBase):
         )
 
         self._rows_cache = []
+        self._load_seq = 0
         self._last_source = "LOCAL"
         self._last_error = ""
         self._refresh_job = None
@@ -6961,8 +7136,10 @@ class RotasPage(PageBase):
                 rows.append(dict(r))
         return rows
 
-    def carregar(self):
-        self._rows_cache = self._fetch_rows()
+    def _apply_rows(self, seq, rows):
+        if seq != self._load_seq or not self.winfo_exists():
+            return
+        self._rows_cache = rows or []
         self.tree.delete(*self.tree.get_children())
 
         com_gps = 0
@@ -7010,6 +7187,32 @@ class RotasPage(PageBase):
         if self._last_error:
             fonte = f"LOCAL (fallback API: {self._last_error})"
         self.set_status(f"STATUS: {len(self._rows_cache)} rota(s) ativa(s). GPS em {com_gps} rota(s). Fonte: {fonte}.")
+
+    def _handle_rows_error(self, seq, exc):
+        if seq != self._load_seq or not self.winfo_exists():
+            return
+        logging.error("Falha ao carregar rotas", exc_info=(type(exc), exc, exc.__traceback__))
+        self.set_status("STATUS: Falha ao carregar monitoramento de rotas.")
+
+    def carregar(self, async_load=True):
+        self._load_seq += 1
+        seq = self._load_seq
+        self.set_status("STATUS: Carregando monitoramento de rotas...")
+        if not async_load:
+            try:
+                rows = self._fetch_rows()
+            except Exception as exc:
+                self._handle_rows_error(seq, exc)
+                return
+            self._apply_rows(seq, rows)
+            return
+
+        run_async_ui(
+            self,
+            self._fetch_rows,
+            lambda rows, seq=seq: self._apply_rows(seq, rows),
+            lambda exc, seq=seq: self._handle_rows_error(seq, exc),
+        )
 
     def _start_auto_refresh(self):
         self._stop_auto_refresh()
@@ -7943,6 +8146,7 @@ class ClientesImportPage(ttk.Frame):
         self.app = app
         self._editing = None
         self._load_seq = 0
+        self._import_seq = 0
 
         card = ttk.Frame(self, style="Card.TFrame", padding=14)
         card.pack(fill="both", expand=True)
@@ -8295,6 +8499,16 @@ class ClientesImportPage(ttk.Frame):
         if not (require_pandas() and require_excel_support(path)):
             return
 
+        self._import_seq += 1
+        seq = self._import_seq
+        run_async_ui(
+            self,
+            lambda path=path: self._importar_clientes_worker(path),
+            lambda msg, seq=seq: self._on_importar_clientes_done(seq, msg),
+            lambda exc, seq=seq: self._on_importar_clientes_error(seq, exc),
+        )
+        return
+
         try:
             df = pd.read_excel(path, engine=excel_engine_for(path))
 
@@ -8625,6 +8839,188 @@ class ImportarVendasPage(PageBase):
         except Exception as e:
             logging.exception("Falha ao garantir colunas de vendas_importadas: %s", e)
 
+    def _importar_vendas_worker(self, path):
+        df = pd.read_excel(path, engine=excel_engine_for(path))
+
+        col_pedido = guess_col(df.columns, ["numero pedido", "num pedido", "n pedido", "pedido"])
+        col_data = guess_col(df.columns, ["data venda", "data", "dt"])
+        col_cliente = guess_col(df.columns, ["cod cliente", "codigo cliente", "cliente", "cod"])
+        col_nome = guess_col(df.columns, ["nome completo", "nome cliente", "razao", "nome"])
+        col_prod = guess_col(df.columns, ["descricao do produto", "produto", "descr", "item"])
+        col_vr_total = guess_col(df.columns, ["vr. total", "vr total", "valor total", "total"])
+        col_qnt = guess_col(df.columns, ["qnt", "qtd", "quantidade"])
+        col_cidade = guess_col(df.columns, ["cidade", "municipio"])
+        col_vend = guess_col(df.columns, ["nome do vendedor", "vendedor", "vend"])
+        col_obs = guess_col(df.columns, ["obs", "observ", "observacao"])
+
+        missing = []
+        if not col_pedido:
+            missing.append("Numero Pedido")
+        if not col_cliente:
+            missing.append("Cliente")
+        if not col_nome:
+            missing.append("Nome Completo")
+        if not col_prod:
+            missing.append("Descricao do Produto")
+        if not col_vr_total:
+            missing.append("Vr. Total")
+        if not col_qnt:
+            missing.append("Qnt.")
+        if missing:
+            raise ValueError("Nao identifiquei as colunas: " + ", ".join(missing))
+
+        opcionais_ausentes = []
+        if not col_data:
+            opcionais_ausentes.append("Data")
+        if not col_cidade:
+            opcionais_ausentes.append("Cidade")
+        if not col_vend:
+            opcionais_ausentes.append("Nome do Vendedor")
+        if not col_obs:
+            opcionais_ausentes.append("Observacao")
+
+        total = 0
+        ignoradas = 0
+        ignoradas_invalidas = 0
+        payload_rows = []
+
+        self._ensure_vendas_usada_cols()
+
+        for _, r in df.iterrows():
+            pedido = self._clean_pedido(r.get(col_pedido, ""))
+            if self._is_invalid_token(pedido):
+                ignoradas_invalidas += 1
+                continue
+
+            data_venda = self._normalize_data_venda(r.get(col_data, "")) if col_data else ""
+            cliente = self._excel_text(r.get(col_cliente, ""))
+            nome_cliente = self._excel_text(r.get(col_nome, "")) if col_nome else ""
+            vendedor = self._excel_text(r.get(col_vend, "")) if col_vend else ""
+            produto = self._excel_text(r.get(col_prod, "")) if col_prod else ""
+            vr_total = safe_float(r.get(col_vr_total, 0)) if col_vr_total else 0.0
+            qnt = safe_float(r.get(col_qnt, 0)) if col_qnt else 0.0
+            cidade = self._excel_text(r.get(col_cidade, "")) if col_cidade else ""
+            valor_unit = (vr_total / qnt) if qnt else 0.0
+            obs = self._excel_text(r.get(col_obs, "")) if col_obs else ""
+
+            pedido_u = self._norm(pedido)
+            cliente_u = self._norm(cliente)
+            produto_u = self._norm(produto)
+            nome_u = self._norm(nome_cliente)
+            if (not pedido_u) or (not cliente_u) or (not nome_u) or (not produto_u):
+                ignoradas_invalidas += 1
+                continue
+
+            payload_rows.append(
+                {
+                    "pedido": pedido_u,
+                    "data_venda": data_venda,
+                    "cliente": cliente_u,
+                    "nome_cliente": nome_u,
+                    "vendedor": self._norm(vendedor),
+                    "produto": produto_u,
+                    "vr_total": float(vr_total or 0),
+                    "qnt": float(qnt or 0),
+                    "cidade": self._norm(cidade),
+                    "valor_unitario": float(valor_unit or 0),
+                    "observacao": self._norm(obs),
+                }
+            )
+
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            resp = _call_api(
+                "POST",
+                "desktop/vendas-importadas/importar",
+                payload={"rows": payload_rows},
+                extra_headers={"X-Desktop-Secret": desktop_secret},
+            )
+            total = safe_int((resp or {}).get("importadas"), 0)
+            ignoradas += safe_int((resp or {}).get("ignoradas"), 0)
+        else:
+            with get_db() as conn:
+                cur = conn.cursor()
+                existing_keys = set()
+                try:
+                    cur.execute("""
+                        SELECT UPPER(TRIM(COALESCE(pedido,''))),
+                               UPPER(TRIM(COALESCE(cliente,''))),
+                               UPPER(TRIM(COALESCE(produto,''))),
+                               COALESCE(TRIM(data_venda),'')
+                        FROM vendas_importadas
+                    """)
+                    existing_keys = {
+                        (
+                            str(r[0] or ""),
+                            str(r[1] or ""),
+                            str(r[2] or ""),
+                            str(r[3] or ""),
+                        )
+                        for r in (cur.fetchall() or [])
+                    }
+                except Exception:
+                    existing_keys = set()
+                for row in payload_rows:
+                    data_venda = str(row.get("data_venda") or "")
+                    pedido_u = str(row.get("pedido") or "")
+                    cliente_u = str(row.get("cliente") or "")
+                    produto_u = str(row.get("produto") or "")
+                    key = (
+                        upper(pedido_u.strip()),
+                        upper(cliente_u.strip()),
+                        upper(produto_u.strip()),
+                        data_venda.strip(),
+                    )
+                    if key in existing_keys:
+                        ignoradas += 1
+                        continue
+                    cur.execute("""
+                        INSERT INTO vendas_importadas
+                        (pedido, data_venda, cliente, nome_cliente, vendedor, produto, vr_total, qnt, cidade, valor_unitario, observacao, selecionada, usada, usada_em, codigo_programacao)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, '', '')
+                    """, (
+                        pedido_u,
+                        data_venda,
+                        cliente_u,
+                        str(row.get("nome_cliente") or ""),
+                        str(row.get("vendedor") or ""),
+                        produto_u,
+                        float(row.get("vr_total") or 0),
+                        float(row.get("qnt") or 0),
+                        str(row.get("cidade") or ""),
+                        float(row.get("valor_unitario") or 0),
+                        str(row.get("observacao") or ""),
+                    ))
+                    existing_keys.add(key)
+                    total += 1
+
+        msg = f"Vendas importadas: {total}"
+        if ignoradas:
+            msg += f"\nIgnoradas (duplicadas/invalidas): {ignoradas}"
+        if ignoradas_invalidas:
+            msg += f"\nIgnoradas (linhas invalidas/NaN): {ignoradas_invalidas}"
+        if opcionais_ausentes:
+            msg += "\nCampos opcionais nao encontrados (preenchidos em branco): " + ", ".join(opcionais_ausentes)
+        return msg
+
+    def _on_importar_vendas_done(self, seq, msg):
+        if seq != self._import_seq or not self.winfo_exists():
+            return
+        if hasattr(self, "ent_busca"):
+            try:
+                self.ent_busca.delete(0, "end")
+            except Exception:
+                logging.debug("Falha ao limpar busca apos importacao")
+        messagebox.showinfo("OK", msg)
+        self.carregar()
+
+    def _on_importar_vendas_error(self, seq, exc):
+        if seq != self._import_seq or not self.winfo_exists():
+            return
+        logging.error("Falha ao importar vendas via Excel", exc_info=(type(exc), exc, exc.__traceback__))
+        self.set_status("STATUS: Falha ao importar vendas.")
+        messagebox.showerror("ERRO", str(exc))
+
     def importar_excel(self):
         path = filedialog.askopenfilename(
             title="IMPORTAR VENDAS (EXCEL)",
@@ -8636,168 +9032,15 @@ class ImportarVendasPage(PageBase):
         if not (require_pandas() and require_excel_support(path)):
             return
 
-        try:
-            df = pd.read_excel(path, engine=excel_engine_for(path))
-
-            col_pedido = guess_col(df.columns, ["numero pedido", "num pedido", "n pedido", "pedido"])
-            col_data = guess_col(df.columns, ["data venda", "data", "dt"])
-            col_cliente = guess_col(df.columns, ["cod cliente", "codigo cliente", "cliente", "cod"])
-            col_nome = guess_col(df.columns, ["nome completo", "nome cliente", "razao", "nome"])
-            col_prod = guess_col(df.columns, ["descricao do produto", "produto", "descr", "item"])
-            col_vr_total = guess_col(df.columns, ["vr. total", "vr total", "valor total", "total"])
-            col_qnt = guess_col(df.columns, ["qnt", "qtd", "quantidade"])
-            col_cidade = guess_col(df.columns, ["cidade", "municipio"])
-            col_vend = guess_col(df.columns, ["nome do vendedor", "vendedor", "vend"])
-            col_obs = guess_col(df.columns, ["obs", "observ", "observacao"])
-
-            missing = []
-            if not col_pedido:
-                missing.append("Numero Pedido")
-            if not col_cliente:
-                missing.append("Cliente")
-            if not col_nome:
-                missing.append("Nome Completo")
-            if not col_prod:
-                missing.append("Descricao do Produto")
-            if not col_vr_total:
-                missing.append("Vr. Total")
-            if not col_qnt:
-                missing.append("Qnt.")
-            if missing:
-                messagebox.showerror("ERRO", "Nao identifiquei as colunas: " + ", ".join(missing))
-                return
-
-            opcionais_ausentes = []
-            if not col_data:
-                opcionais_ausentes.append("Data")
-            if not col_cidade:
-                opcionais_ausentes.append("Cidade")
-            if not col_vend:
-                opcionais_ausentes.append("Nome do Vendedor")
-            if not col_obs:
-                opcionais_ausentes.append("Observacao")
-
-            total = 0
-            ignoradas = 0
-            ignoradas_invalidas = 0
-            payload_rows = []
-
-            self._ensure_vendas_usada_cols()
-
-            for _, r in df.iterrows():
-                pedido = self._clean_pedido(r.get(col_pedido, ""))
-                if self._is_invalid_token(pedido):
-                    ignoradas_invalidas += 1
-                    continue
-
-                data_venda = self._normalize_data_venda(r.get(col_data, "")) if col_data else ""
-                cliente = self._excel_text(r.get(col_cliente, ""))
-                nome_cliente = self._excel_text(r.get(col_nome, "")) if col_nome else ""
-                vendedor = self._excel_text(r.get(col_vend, "")) if col_vend else ""
-                produto = self._excel_text(r.get(col_prod, "")) if col_prod else ""
-                vr_total = safe_float(r.get(col_vr_total, 0)) if col_vr_total else 0.0
-                qnt = safe_float(r.get(col_qnt, 0)) if col_qnt else 0.0
-                cidade = self._excel_text(r.get(col_cidade, "")) if col_cidade else ""
-                valor_unit = (vr_total / qnt) if qnt else 0.0
-                obs = self._excel_text(r.get(col_obs, "")) if col_obs else ""
-
-                pedido_u = self._norm(pedido)
-                cliente_u = self._norm(cliente)
-                produto_u = self._norm(produto)
-                nome_u = self._norm(nome_cliente)
-                if (not pedido_u) or (not cliente_u) or (not nome_u) or (not produto_u):
-                    ignoradas_invalidas += 1
-                    continue
-
-                payload_rows.append(
-                    {
-                        "pedido": pedido_u,
-                        "data_venda": data_venda,
-                        "cliente": cliente_u,
-                        "nome_cliente": nome_u,
-                        "vendedor": self._norm(vendedor),
-                        "produto": produto_u,
-                        "vr_total": float(vr_total or 0),
-                        "qnt": float(qnt or 0),
-                        "cidade": self._norm(cidade),
-                        "valor_unitario": float(valor_unit or 0),
-                        "observacao": self._norm(obs),
-                    }
-                )
-
-            desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-            if desktop_secret and is_desktop_api_sync_enabled():
-                resp = _call_api(
-                    "POST",
-                    "desktop/vendas-importadas/importar",
-                    payload={"rows": payload_rows},
-                    extra_headers={"X-Desktop-Secret": desktop_secret},
-                )
-                total = safe_int((resp or {}).get("importadas"), 0)
-                ignoradas += safe_int((resp or {}).get("ignoradas"), 0)
-            else:
-                with get_db() as conn:
-                    cur = conn.cursor()
-                    for row in payload_rows:
-                        data_venda = str(row.get("data_venda") or "")
-                        pedido_u = str(row.get("pedido") or "")
-                        cliente_u = str(row.get("cliente") or "")
-                        produto_u = str(row.get("produto") or "")
-                        try:
-                            cur.execute("""
-                                SELECT 1
-                                FROM vendas_importadas
-                                WHERE UPPER(TRIM(COALESCE(pedido,'')))=UPPER(TRIM(?))
-                                  AND UPPER(TRIM(COALESCE(cliente,'')))=UPPER(TRIM(?))
-                                  AND UPPER(TRIM(COALESCE(produto,'')))=UPPER(TRIM(?))
-                                  AND COALESCE(TRIM(data_venda),'')=COALESCE(TRIM(?),'')
-                                LIMIT 1
-                            """, (pedido_u, cliente_u, produto_u, data_venda))
-                            exists = cur.fetchone()
-                        except Exception:
-                            exists = None
-                        if exists:
-                            ignoradas += 1
-                            continue
-                        cur.execute("""
-                            INSERT INTO vendas_importadas
-                            (pedido, data_venda, cliente, nome_cliente, vendedor, produto, vr_total, qnt, cidade, valor_unitario, observacao, selecionada, usada, usada_em, codigo_programacao)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, '', '')
-                        """, (
-                            pedido_u,
-                            data_venda,
-                            cliente_u,
-                            str(row.get("nome_cliente") or ""),
-                            str(row.get("vendedor") or ""),
-                            produto_u,
-                            float(row.get("vr_total") or 0),
-                            float(row.get("qnt") or 0),
-                            str(row.get("cidade") or ""),
-                            float(row.get("valor_unitario") or 0),
-                            str(row.get("observacao") or ""),
-                        ))
-                        total += 1
-
-            msg = f"Vendas importadas: {total}"
-            if ignoradas:
-                msg += f"\nIgnoradas (duplicadas/invalidas): {ignoradas}"
-            if ignoradas_invalidas:
-                msg += f"\nIgnoradas (linhas invalidas/NaN): {ignoradas_invalidas}"
-
-            if hasattr(self, "ent_busca"):
-                try:
-                    self.ent_busca.delete(0, "end")
-                except Exception:
-                    logging.debug("Falha ao limpar busca apos importacao")
-
-            if opcionais_ausentes:
-                msg += "\nCampos opcionais nao encontrados (preenchidos em branco): " + ", ".join(opcionais_ausentes)
-
-            messagebox.showinfo("OK", msg)
-            self.carregar()
-
-        except Exception as e:
-            messagebox.showerror("ERRO", str(e))
+        self._import_seq += 1
+        seq = self._import_seq
+        self.set_status("STATUS: Importando vendas do Excel...")
+        run_async_ui(
+            self,
+            lambda path=path: self._importar_vendas_worker(path),
+            lambda msg, seq=seq: self._on_importar_vendas_done(seq, msg),
+            lambda exc, seq=seq: self._on_importar_vendas_error(seq, exc),
+        )
 
     def _fetch_vendas_rows(self, busca):
         self._ensure_vendas_usada_cols()
