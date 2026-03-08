@@ -13414,7 +13414,7 @@ class RecebimentosPage(PageBase):
             except Exception:
                 logging.debug("Falha ignorada")
 
-        self.set_status("STATUS: Selecione uma programacao FINALIZADA e lance os pagantes (prestacao de contas).")
+        self.set_status("STATUS: Selecione uma programacao para Recebimentos. Rotas em aberto serao consolidadas ao finalizar.")
 
     # -------------------------
     # Helpers de segurança UI (readonly sem quebrar inserts)
@@ -13649,8 +13649,9 @@ class RecebimentosPage(PageBase):
         except Exception:
             return False
 
-        # Regra estrita: somente quando motorista finalizou no app (status operacional).
-        # Se a coluna existir, status local nao libera recebimentos.
+        # Mantido como indicador de conclusao da rota.
+        # A programacao pode existir/vincular Recebimentos antes da finalizacao;
+        # a finalizacao no app apenas consolida os dados operacionais.
         if st_op:
             if fin_app != 1:
                 return False
@@ -13682,11 +13683,19 @@ class RecebimentosPage(PageBase):
             try:
                 resp = _call_api(
                     "GET",
-                    "desktop/programacoes?modo=finalizadas_pendentes&limit=300",
+                    "desktop/programacoes?modo=todas&limit=300",
                     extra_headers={"X-Desktop-Secret": desktop_secret},
                 )
                 arr = resp.get("programacoes") if isinstance(resp, dict) else []
-                valores = [upper((r or {}).get("codigo_programacao") or "") for r in (arr or []) if isinstance(r, dict)]
+                valores = []
+                for r in (arr or []):
+                    if not isinstance(r, dict):
+                        continue
+                    codigo = upper((r or {}).get("codigo_programacao") or "")
+                    status_ref = upper((r or {}).get("status_operacional") or (r or {}).get("status") or "")
+                    if not codigo or status_ref in {"CANCELADA", "CANCELADO"}:
+                        continue
+                    valores.append(codigo)
                 self.cb_prog["values"] = valores
                 atual = upper(str(self.cb_prog.get() or "").strip())
                 if atual and atual not in {upper(str(v or "").strip()) for v in valores}:
@@ -13704,12 +13713,10 @@ class RecebimentosPage(PageBase):
                 has_prest = "prestacao_status" in cols_prog
 
                 if has_status_op:
-                    status_where = "UPPER(TRIM(COALESCE(status_operacional,''))) IN ('FINALIZADA','FINALIZADO')"
+                    status_where = "UPPER(TRIM(COALESCE(status_operacional,''))) NOT IN ('CANCELADA','CANCELADO')"
                 else:
-                    status_where = "UPPER(TRIM(COALESCE(status,''))) IN ('FINALIZADA','FINALIZADO')"
-                if has_finalizada_app:
-                    status_where += " AND COALESCE(finalizada_no_app,0)=1"
-                prest_where = " AND COALESCE(prestacao_status,'PENDENTE')='PENDENTE'" if has_prest else ""
+                    status_where = "UPPER(TRIM(COALESCE(status,''))) NOT IN ('CANCELADA','CANCELADO')"
+                prest_where = " AND COALESCE(prestacao_status,'PENDENTE') IN ('PENDENTE','FECHADA')" if has_prest else ""
 
                 cur.execute(
                     f"""
@@ -13724,7 +13731,7 @@ class RecebimentosPage(PageBase):
                 cur.execute("""
                     SELECT codigo_programacao
                     FROM programacoes
-                    WHERE UPPER(TRIM(COALESCE(status,''))) IN ('FINALIZADA','FINALIZADO')
+                    WHERE UPPER(TRIM(COALESCE(status,''))) NOT IN ('CANCELADA','CANCELADO')
                     ORDER BY id DESC
                     LIMIT 300
                 """)
@@ -14197,14 +14204,7 @@ class RecebimentosPage(PageBase):
             messagebox.showwarning("ATENÇÃO", "Selecione uma programação pendente.")
             return
 
-        if not self._rota_apt_para_recebimentos(prog):
-            messagebox.showwarning(
-                "ATENCAO",
-                "Esse codigo ainda nao esta liberado para Recebimentos.\n\n"
-                "Regra: so libera quando a rota estiver FINALIZADA no celular pelo motorista.",
-            )
-            self.refresh_comboboxes()
-            return
+        rota_finalizada = self._rota_apt_para_recebimentos(prog)
 
         synced_api = False
         try:
@@ -14213,14 +14213,7 @@ class RecebimentosPage(PageBase):
             logging.debug("Falha ignorada")
 
         # Revalida após sincronizar com API para impedir abertura indevida.
-        if not self._rota_apt_para_recebimentos(prog):
-            messagebox.showwarning(
-                "ATENCAO",
-                "Esse codigo nao esta mais liberado para Recebimentos apos sincronizacao.\n\n"
-                "Regra: so libera quando a rota estiver FINALIZADA no celular e pendente de prestacao.",
-            )
-            self.refresh_comboboxes()
-            return
+        rota_finalizada = self._rota_apt_para_recebimentos(prog)
 
         self._current_prog = prog
         motorista = veiculo = equipe = nf = ""
@@ -14327,10 +14320,20 @@ class RecebimentosPage(PageBase):
         if self._is_prestacao_fechada(prog):
             self.set_status(f"STATUS: Programacao {self._current_prog} (PRESTACAO FECHADA - somente consulta)")
         else:
-            if synced_api:
-                self.set_status(f"STATUS: Programacao carregada e sincronizada da API: {prog}")
+            if rota_finalizada and synced_api:
+                self.set_status(f"STATUS: Programacao finalizada e sincronizada da API: {prog}")
+            elif rota_finalizada:
+                self.set_status(f"STATUS: Programacao finalizada pronta para recebimentos: {prog}")
+            elif synced_api:
+                self.set_status(
+                    f"STATUS: Programacao carregada em aberto: {prog}. "
+                    "Recebimentos serao consolidados ao finalizar no app ou no encerramento manual."
+                )
             else:
-                self.set_status(f"STATUS: Programacao carregada: {prog}")
+                self.set_status(
+                    f"STATUS: Programacao carregada em aberto: {prog}. "
+                    "Ela ja esta vinculada a Recebimentos."
+                )
 
     # -------------------------
     # Validação leve de data/hora
@@ -18039,7 +18042,7 @@ class DespesasPage(PageBase):
             try:
                 resp = _call_api(
                     "GET",
-                    "desktop/programacoes?modo=finalizadas_prestacao&limit=300",
+                    "desktop/programacoes?modo=todas&limit=300",
                     extra_headers={"X-Desktop-Secret": desktop_secret},
                 )
                 arr = resp.get("programacoes") if isinstance(resp, dict) else []
@@ -18048,8 +18051,9 @@ class DespesasPage(PageBase):
                     if not isinstance(r, dict):
                         continue
                     codigo = upper((r or {}).get("codigo_programacao") or "")
+                    status_ref = upper((r or {}).get("status_operacional") or (r or {}).get("status") or "")
                     data = str((r or {}).get("data_criacao") or "")[:10] or "Sem data"
-                    if codigo:
+                    if codigo and status_ref not in {"CANCELADA", "CANCELADO"}:
                         programas.append(f"{codigo} ({data})")
                 self.cb_prog["values"] = programas
                 atual = str(self.cb_prog.get() or "").strip()
@@ -18076,13 +18080,10 @@ class DespesasPage(PageBase):
 
                 where_parts = []
                 if has_status_op:
-                    part = f"{status_op_expr} IN ('FINALIZADA','FINALIZADO')"
-                    if has_finalizada_app:
-                        part = f"({part} AND {finalizada_expr}=1)"
-                    where_parts.append(part)
+                    where_parts.append(f"{status_op_expr} NOT IN ('CANCELADA','CANCELADO')")
                 if has_status:
-                    where_parts.append(f"{status_base_expr} IN ('FINALIZADA','FINALIZADO')")
-                where_sql = " OR ".join(where_parts) if where_parts else "1=0"
+                    where_parts.append(f"{status_base_expr} NOT IN ('CANCELADA','CANCELADO')")
+                where_sql = " OR ".join(where_parts) if where_parts else "1=1"
 
                 prest_where = ""
                 if has_prest:
