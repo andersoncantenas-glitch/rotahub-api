@@ -16,6 +16,7 @@ import urllib.request
 import webbrowser
 import shutil
 import subprocess
+import threading
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from tkinter import filedialog, messagebox, simpledialog, ttk
 try:
@@ -1068,6 +1069,29 @@ def _call_api(method: str, path: str, payload=None, token: str = None, extra_hea
     except Exception as exc:
         raise SyncError(f"Erro inesperado ao chamar a API de sincronização: {exc}")
     return None
+
+
+def run_async_ui(widget, work, on_success, on_error=None):
+    """Executa trabalho em background e devolve resultado no thread da UI."""
+    def _deliver(callback, *args):
+        if not callback:
+            return
+        try:
+            if widget.winfo_exists():
+                widget.after(0, lambda: widget.winfo_exists() and callback(*args))
+        except Exception:
+            logging.debug("Falha ao entregar resultado async para a UI", exc_info=True)
+
+    def _worker():
+        try:
+            result = work()
+        except Exception as exc:
+            _deliver(on_error, exc)
+            return
+        _deliver(on_success, result)
+
+    threading.Thread(target=_worker, daemon=True).start()
+
 
 def normalize_date_time_components(data: str, hora: str):
     """Normaliza data/hora e retorna tupla (data, hora) preservando valor original se inválido."""
@@ -2258,6 +2282,7 @@ class CadastroCRUD(ttk.Frame):
         self._is_admin = bool(getattr(self.app, "user", {}).get("is_admin")) if self.app else False
         self._edit_mode = "view"  # view | novo | status
         self._has_status_field = any(col == "status" for col, _ in fields)
+        self._load_seq = 0
 
         # Card
         card = ttk.Frame(self, style="Card.TFrame", padding=18)
@@ -2968,7 +2993,7 @@ class CadastroCRUD(ttk.Frame):
         except Exception:
             logging.debug("Falha ignorada")
 
-    def carregar(self):
+    def _fetch_cadastro_rows(self, status_filter="TODOS"):
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
         if desktop_secret and can_read_from_api():
             try:
@@ -3043,21 +3068,7 @@ class CadastroCRUD(ttk.Frame):
                         for c, _ in self.fields:
                             row.append(row_map.get(c, ""))
                         rows.append(tuple(row))
-
-                    self.tree.delete(*self.tree.get_children())
-                    senha_pos = None
-                    if self.table in {"usuarios", "motoristas"}:
-                        try:
-                            senha_pos = 1 + [c for c, _ in self.fields].index("senha")
-                        except Exception:
-                            senha_pos = None
-                    for row in rows:
-                        if senha_pos is not None:
-                            row = list(row)
-                            row[senha_pos] = "******" if row[senha_pos] else ""
-                            row = tuple(row)
-                        tree_insert_aligned(self.tree, "", "end", row)
-                    return
+                    return rows
             except Exception:
                 logging.debug("Falha ao carregar cadastro via API; usando fallback local.", exc_info=True)
 
@@ -3076,25 +3087,19 @@ class CadastroCRUD(ttk.Frame):
                 else:
                     select_cols.append(f"'' AS {c}")
             cols_db = ", ".join(select_cols)
-            if self.table == "ajudantes":
-                status_filter = "TODOS"
-                try:
-                    status_filter = upper(self._ajudantes_status_filter.get())
-                except Exception:
-                    status_filter = "TODOS"
-
-                if status_filter in {"ATIVO", "DESATIVADO"}:
-                    cur.execute(
-                        f"SELECT id, {cols_db} FROM {self.table} "
-                        "WHERE UPPER(COALESCE(status, 'ATIVO'))=? ORDER BY id DESC",
-                        (status_filter,),
-                    )
-                else:
-                    cur.execute(f"SELECT id, {cols_db} FROM {self.table} ORDER BY id DESC")
+            if self.table == "ajudantes" and status_filter in {"ATIVO", "DESATIVADO"}:
+                cur.execute(
+                    f"SELECT id, {cols_db} FROM {self.table} "
+                    "WHERE UPPER(COALESCE(status, 'ATIVO'))=? ORDER BY id DESC",
+                    (status_filter,),
+                )
             else:
                 cur.execute(f"SELECT id, {cols_db} FROM {self.table} ORDER BY id DESC")
-            rows = cur.fetchall() or []
+            return cur.fetchall() or []
 
+    def _apply_cadastro_rows(self, seq, rows):
+        if seq != self._load_seq or not self.winfo_exists():
+            return
         self.tree.delete(*self.tree.get_children())
         senha_pos = None
         if self.table in {"usuarios", "motoristas"}:
@@ -3108,6 +3113,36 @@ class CadastroCRUD(ttk.Frame):
                 row[senha_pos] = "******" if row[senha_pos] else ""
                 row = tuple(row)
             tree_insert_aligned(self.tree, "", "end", row)
+
+    def _handle_cadastro_load_error(self, seq, exc):
+        if seq != self._load_seq or not self.winfo_exists():
+            return
+        logging.error("Falha ao carregar cadastro %s", self.table, exc_info=(type(exc), exc, exc.__traceback__))
+
+    def carregar(self, async_load=True):
+        status_filter = "TODOS"
+        if self.table == "ajudantes":
+            try:
+                status_filter = upper(self._ajudantes_status_filter.get())
+            except Exception:
+                status_filter = "TODOS"
+        self._load_seq += 1
+        seq = self._load_seq
+        if not async_load:
+            try:
+                rows = self._fetch_cadastro_rows(status_filter=status_filter)
+            except Exception as exc:
+                self._handle_cadastro_load_error(seq, exc)
+                return
+            self._apply_cadastro_rows(seq, rows)
+            return
+
+        run_async_ui(
+            self,
+            lambda status_filter=status_filter: self._fetch_cadastro_rows(status_filter=status_filter),
+            lambda rows, seq=seq: self._apply_cadastro_rows(seq, rows),
+            lambda exc, seq=seq: self._handle_cadastro_load_error(seq, exc),
+        )
 
     def salvar(self):
         """
@@ -7907,6 +7942,7 @@ class ClientesImportPage(ttk.Frame):
         super().__init__(parent, style="Content.TFrame")
         self.app = app
         self._editing = None
+        self._load_seq = 0
 
         card = ttk.Frame(self, style="Card.TFrame", padding=14)
         card.pack(fill="both", expand=True)
@@ -8016,7 +8052,7 @@ class ClientesImportPage(ttk.Frame):
             extra_headers={"X-Desktop-Secret": desktop_secret},
         )
 
-    def carregar(self):
+    def _fetch_clientes_rows(self):
         rows = []
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
         if desktop_secret and is_desktop_api_sync_enabled():
@@ -8051,7 +8087,11 @@ class ClientesImportPage(ttk.Frame):
                     LIMIT 5000
                 """)
                 rows = cur.fetchall()
+        return rows
 
+    def _apply_clientes_rows(self, seq, rows):
+        if seq != self._load_seq or not self.winfo_exists():
+            return
         self.tree.delete(*self.tree.get_children())
 
         for r in rows:
@@ -8059,6 +8099,30 @@ class ClientesImportPage(ttk.Frame):
 
         if self.app and hasattr(self.app, "refresh_programacao_comboboxes"):
             self.app.refresh_programacao_comboboxes()
+
+    def _handle_clientes_load_error(self, seq, exc):
+        if seq != self._load_seq or not self.winfo_exists():
+            return
+        logging.error("Falha ao carregar clientes", exc_info=(type(exc), exc, exc.__traceback__))
+
+    def carregar(self, async_load=True):
+        self._load_seq += 1
+        seq = self._load_seq
+        if not async_load:
+            try:
+                rows = self._fetch_clientes_rows()
+            except Exception as exc:
+                self._handle_clientes_load_error(seq, exc)
+                return
+            self._apply_clientes_rows(seq, rows)
+            return
+
+        run_async_ui(
+            self,
+            self._fetch_clientes_rows,
+            lambda rows, seq=seq: self._apply_clientes_rows(seq, rows),
+            lambda exc, seq=seq: self._handle_clientes_load_error(seq, exc),
+        )
 
     def inserir_linha(self):
         tree_insert_aligned(self.tree, "", "end", ("", "", "", "", ""))
@@ -8413,6 +8477,7 @@ class CadastrosPage(PageBase):
 class ImportarVendasPage(PageBase):
     def __init__(self, parent, app):
         super().__init__(parent, app, "Importar Vendas (Excel)")
+        self._load_seq = 0
 
         top = ttk.Frame(self.body, style="Content.TFrame")
         top.grid(row=0, column=0, sticky="ew")
@@ -8487,8 +8552,6 @@ class ImportarVendasPage(PageBase):
             money_cols={"VR TOTAL"},
             date_cols={"DATA"}
         )
-
-        self.carregar()
 
     def on_show(self):
         self.set_status("STATUS: Importação e seleção de vendas para programação.")
@@ -8736,10 +8799,9 @@ class ImportarVendasPage(PageBase):
         except Exception as e:
             messagebox.showerror("ERRO", str(e))
 
-    def carregar(self):
+    def _fetch_vendas_rows(self, busca):
         self._ensure_vendas_usada_cols()
 
-        busca = self._norm(self.ent_busca.get()) if hasattr(self, "ent_busca") else ""
         rows = []
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
         if desktop_secret and is_desktop_api_sync_enabled():
@@ -8795,6 +8857,11 @@ class ImportarVendasPage(PageBase):
                         ORDER BY id DESC
                     """)
                 rows = cur.fetchall() or []
+        return rows
+
+    def _apply_vendas_rows(self, seq, rows):
+        if seq != self._load_seq or not self.winfo_exists():
+            return
 
         self.tree.delete(*self.tree.get_children())
 
@@ -8826,6 +8893,33 @@ class ImportarVendasPage(PageBase):
             )
 
         self.set_status(f"STATUS: {len(rows)} registros carregados (NAO usadas)  Selecionadas: {selected_count}.")
+
+    def _handle_vendas_load_error(self, seq, exc):
+        if seq != self._load_seq or not self.winfo_exists():
+            return
+        logging.error("Falha ao carregar vendas importadas", exc_info=(type(exc), exc, exc.__traceback__))
+        self.set_status("STATUS: Falha ao carregar vendas importadas.")
+
+    def carregar(self, async_load=True):
+        busca = self._norm(self.ent_busca.get()) if hasattr(self, "ent_busca") else ""
+        self._load_seq += 1
+        seq = self._load_seq
+        self.set_status("STATUS: Carregando vendas importadas...")
+        if not async_load:
+            try:
+                rows = self._fetch_vendas_rows(busca)
+            except Exception as exc:
+                self._handle_vendas_load_error(seq, exc)
+                return
+            self._apply_vendas_rows(seq, rows)
+            return
+
+        run_async_ui(
+            self,
+            lambda busca=busca: self._fetch_vendas_rows(busca),
+            lambda rows, seq=seq: self._apply_vendas_rows(seq, rows),
+            lambda exc, seq=seq: self._handle_vendas_load_error(seq, exc),
+        )
 
     def toggle_selected(self, event=None):
         # âÅâ€œââ‚¬¦ só alterna se clicar em uma célula (evita bug ao clicar em cabeçalho)
@@ -9223,7 +9317,7 @@ class ProgramacaoPage(PageBase):
             date_cols=set()
         )
 
-        self.refresh_comboboxes()
+        self._combo_load_seq = 0
         self._refresh_total_caixas_field()
 
     # -------------------------
@@ -10023,7 +10117,7 @@ class ProgramacaoPage(PageBase):
         if self._editing:
             self._commit_edit()
 
-    def refresh_comboboxes(self):
+    def _fetch_programacao_combobox_data(self):
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
         if desktop_secret and can_read_from_api():
             try:
@@ -10039,11 +10133,8 @@ class ProgramacaoPage(PageBase):
                     if status_m != "ATIVO":
                         continue
                     valores_motoristas.append(self._motorista_display(r.get("nome") or "", r.get("codigo") or ""))
-                self.cb_motorista["values"] = valores_motoristas
 
-                self.cb_veiculo["values"] = [upper((r or {}).get("placa") or "") for r in (vei_resp or []) if isinstance(r, dict)]
-
-                self._equipe_display_map = {}
+                equipe_display_map = {}
                 rows_ajudantes = []
                 for r in (aju_resp or []):
                     if not isinstance(r, dict):
@@ -10067,10 +10158,14 @@ class ProgramacaoPage(PageBase):
                         }
                     )
                     if ajudante_id:
-                        self._equipe_display_map[upper(display)] = ajudante_id
-                self._set_ajudantes_options(rows_ajudantes, mode="ajudantes")
-                self._apply_programacao_rankings()
-                return
+                        equipe_display_map[upper(display)] = ajudante_id
+                return {
+                    "motoristas": valores_motoristas,
+                    "veiculos": [upper((r or {}).get("placa") or "") for r in (vei_resp or []) if isinstance(r, dict)],
+                    "ajudantes": rows_ajudantes,
+                    "ajudantes_mode": "ajudantes",
+                    "equipe_display_map": equipe_display_map,
+                }
             except Exception:
                 logging.debug("Falha ao carregar comboboxes da Programacao via API", exc_info=True)
 
@@ -10094,12 +10189,10 @@ class ProgramacaoPage(PageBase):
                 cur.execute("SELECT nome FROM motoristas ORDER BY nome")
                 valores_motoristas = [r[0] for r in cur.fetchall()]
 
-            self.cb_motorista["values"] = valores_motoristas
-
             cur.execute("SELECT placa FROM veiculos ORDER BY placa")
-            self.cb_veiculo["values"] = [r[0] for r in cur.fetchall()]
+            valores_veiculos = [r[0] for r in cur.fetchall()]
 
-            self._equipe_display_map = {}
+            equipe_display_map = {}
             try:
                 cur.execute("PRAGMA table_info(ajudantes)")
                 cols_aj = [str(r[1]).lower() for r in cur.fetchall()]
@@ -10129,10 +10222,15 @@ class ProgramacaoPage(PageBase):
                             "telefone": telefone,
                         })
                         if ajudante_id:
-                            self._equipe_display_map[upper(display)] = ajudante_id
-                self._set_ajudantes_options(rows_ajudantes, mode="ajudantes")
+                            equipe_display_map[upper(display)] = ajudante_id
+                return {
+                    "motoristas": valores_motoristas,
+                    "veiculos": valores_veiculos,
+                    "ajudantes": rows_ajudantes,
+                    "ajudantes_mode": "ajudantes",
+                    "equipe_display_map": equipe_display_map,
+                }
             except Exception:
-                # fallback de base antiga
                 try:
                     cur.execute("SELECT codigo, ajudante1, ajudante2 FROM equipes ORDER BY codigo")
                     rows_equipes = []
@@ -10151,12 +10249,58 @@ class ProgramacaoPage(PageBase):
                                 "telefone": "",
                             })
                             if codigo:
-                                self._equipe_display_map[upper(display)] = upper(codigo)
-                    self._set_ajudantes_options(rows_equipes, mode="equipes")
+                                equipe_display_map[upper(display)] = upper(codigo)
+                    return {
+                        "motoristas": valores_motoristas,
+                        "veiculos": valores_veiculos,
+                        "ajudantes": rows_equipes,
+                        "ajudantes_mode": "equipes",
+                        "equipe_display_map": equipe_display_map,
+                    }
                 except Exception:
-                    self._set_ajudantes_options([], mode="ajudantes")
+                    return {
+                        "motoristas": valores_motoristas,
+                        "veiculos": valores_veiculos,
+                        "ajudantes": [],
+                        "ajudantes_mode": "ajudantes",
+                        "equipe_display_map": {},
+                    }
 
+    def _apply_programacao_combobox_data(self, seq, data):
+        if seq != self._combo_load_seq or not self.winfo_exists():
+            return
+        data = data or {}
+        self.cb_motorista["values"] = data.get("motoristas") or []
+        self.cb_veiculo["values"] = data.get("veiculos") or []
+        self._equipe_display_map = data.get("equipe_display_map") or {}
+        self._set_ajudantes_options(data.get("ajudantes") or [], mode=data.get("ajudantes_mode") or "ajudantes")
         self._apply_programacao_rankings()
+        self.set_status("STATUS: Carregue vendas e ajuste dados antes de salvar a programaÃ§Ã£o.")
+
+    def _handle_programacao_combobox_error(self, seq, exc):
+        if seq != self._combo_load_seq or not self.winfo_exists():
+            return
+        logging.error("Falha ao carregar comboboxes da Programacao", exc_info=(type(exc), exc, exc.__traceback__))
+        self.set_status("STATUS: Falha ao carregar cadastros da programaÃ§Ã£o.")
+
+    def refresh_comboboxes(self, async_load=True):
+        self._combo_load_seq += 1
+        seq = self._combo_load_seq
+        if not async_load:
+            try:
+                data = self._fetch_programacao_combobox_data()
+            except Exception as exc:
+                self._handle_programacao_combobox_error(seq, exc)
+                return
+            self._apply_programacao_combobox_data(seq, data)
+            return
+
+        run_async_ui(
+            self,
+            self._fetch_programacao_combobox_data,
+            lambda data, seq=seq: self._apply_programacao_combobox_data(seq, data),
+            lambda exc, seq=seq: self._handle_programacao_combobox_error(seq, exc),
+        )
 
     def on_show(self):
         self.set_status("STATUS: Carregue vendas e ajuste dados antes de salvar a programação.")
