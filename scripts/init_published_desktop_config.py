@@ -29,7 +29,7 @@ def main() -> int:
             "data_root": str(data_root),
             "db_path": str(db_path),
             "sync_enabled": True,
-            "sql_mirror_api": True,
+            "sql_mirror_api": False,
             "require_server_binding": True,
             "allow_remote_write": True,
             "allow_remote_read": True,

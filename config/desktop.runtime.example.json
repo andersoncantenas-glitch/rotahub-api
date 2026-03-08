@@ -8,7 +8,7 @@
     "data_root": "C:\\Users\\Public\\RotaHubDesktop",
     "db_path": "C:\\Users\\Public\\RotaHubDesktop\\desktop\\staging\\empresa-homolog\\rotahub_desktop.db",
     "sync_enabled": true,
-    "sql_mirror_api": true,
+    "sql_mirror_api": false,
     "require_server_binding": true,
     "allow_remote_write": true,
     "allow_remote_read": true,

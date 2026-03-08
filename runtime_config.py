@@ -354,6 +354,8 @@ def load_app_config(app_kind: str = "desktop") -> AppConfig:
         require_server_binding = str(binding_raw).strip().lower() in {"1", "true", "yes", "y", "sim", "on"}
 
     desktop_secret = str((env_value("ROTA_SECRET")) or runtime_cfg.get("desktop_secret") or "").strip()
+    if app_kind == "desktop" and is_frozen and not desktop_secret:
+        sql_mirror_api = False
     allow_remote_write_raw = env_value("ROTA_ALLOW_REMOTE_WRITE")
     if local_desktop_mode:
         allow_remote_write = False

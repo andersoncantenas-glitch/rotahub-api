@@ -500,6 +500,8 @@ def _normalize_sql_params(params):
 
 
 def _is_sql_mirror_enabled() -> bool:
+    if not str(os.environ.get("ROTA_SECRET", "") or "").strip():
+        return False
     raw = str(os.environ.get("ROTA_SQL_MIRROR_API", "1") or "").strip().lower()
     return is_desktop_api_sync_enabled() and raw in {"1", "true", "yes", "y", "sim", "on"}
 
@@ -511,7 +513,8 @@ def _push_sql_mutations_to_api(statements):
         return
     desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
     if not desktop_secret:
-        raise RuntimeError("ROTA_SECRET nao configurada para espelhamento SQL.")
+        logging.warning("Espelhamento SQL desativado: ROTA_SECRET ausente.")
+        return
     _call_api(
         "POST",
         "desktop/sql/mutate",
@@ -3731,12 +3734,14 @@ class CadastroCRUD(ttk.Frame):
     def _on_importar_clientes_done(self, seq, msg):
         if seq != self._import_seq or not self.winfo_exists():
             return
+        self._set_busy(False, "Importação concluída")
         messagebox.showinfo("OK", msg)
         self.carregar()
 
     def _on_importar_clientes_error(self, seq, exc):
         if seq != self._import_seq or not self.winfo_exists():
             return
+        self._set_busy(False, "Falha na importação")
         logging.error("Falha ao importar clientes via Excel", exc_info=(type(exc), exc, exc.__traceback__))
         messagebox.showerror("ERRO", str(exc))
 
@@ -8147,6 +8152,7 @@ class ClientesImportPage(ttk.Frame):
         self._editing = None
         self._load_seq = 0
         self._import_seq = 0
+        self._save_seq = 0
 
         card = ttk.Frame(self, style="Card.TFrame", padding=14)
         card.pack(fill="both", expand=True)
@@ -8159,17 +8165,21 @@ class ClientesImportPage(ttk.Frame):
         actions.grid(row=1, column=0, sticky="ew", pady=(12, 10))
         actions.grid_columnconfigure(10, weight=1)
 
-        ttk.Button(actions, text="IMPORTAR CLIENTES (EXCEL)", style="Warn.TButton",
-                   command=self.importar_clientes_excel).grid(row=0, column=0, padx=6)
+        self.btn_importar = ttk.Button(actions, text="IMPORTAR CLIENTES (EXCEL)", style="Warn.TButton",
+                                       command=self.importar_clientes_excel)
+        self.btn_importar.grid(row=0, column=0, padx=6)
 
-        ttk.Button(actions, text="ATUALIZAR", style="Ghost.TButton",
-                   command=self.carregar).grid(row=0, column=1, padx=6)
+        self.btn_atualizar = ttk.Button(actions, text="ATUALIZAR", style="Ghost.TButton",
+                                        command=self.carregar)
+        self.btn_atualizar.grid(row=0, column=1, padx=6)
 
-        ttk.Button(actions, text="\u2795 INSERIR LINHA", style="Ghost.TButton",
-                   command=self.inserir_linha).grid(row=0, column=2, padx=6)
+        self.btn_inserir = ttk.Button(actions, text="\u2795 INSERIR LINHA", style="Ghost.TButton",
+                                      command=self.inserir_linha)
+        self.btn_inserir.grid(row=0, column=2, padx=6)
 
-        ttk.Button(actions, text="SALVAR ALTERAÇÕES", style="Primary.TButton",
-                   command=self.salvar_alteracoes).grid(row=0, column=3, padx=6)
+        self.btn_salvar = ttk.Button(actions, text="SALVAR ALTERAÇÕES", style="Primary.TButton",
+                                     command=self.salvar_alteracoes)
+        self.btn_salvar.grid(row=0, column=3, padx=6)
 
         self.lbl_info = ttk.Label(
             actions,
@@ -8179,6 +8189,17 @@ class ClientesImportPage(ttk.Frame):
             font=("Segoe UI", 8, "bold")
         )
         self.lbl_info.grid(row=0, column=4, padx=12, sticky="w")
+
+        self.pb_loading = ttk.Progressbar(actions, mode="indeterminate", length=150)
+        self.pb_loading.grid(row=0, column=5, padx=(12, 8), sticky="w")
+        self.lbl_loading = ttk.Label(
+            actions,
+            text="",
+            background="white",
+            foreground="#2563EB",
+            font=("Segoe UI", 8, "bold")
+        )
+        self.lbl_loading.grid(row=0, column=6, padx=(0, 6), sticky="w")
 
         cols = ["CÓD CLIENTE", "NOME CLIENTE", "ENDEREÇO", "TELEFONE", "VENDEDOR"]
         table_wrap = ttk.Frame(card, style="Card.TFrame")
@@ -8217,6 +8238,26 @@ class ClientesImportPage(ttk.Frame):
         self.tree.bind("<Button-5>", self._on_tree_scroll, add=True)  # linux
 
         self.carregar()
+
+    def _set_busy(self, busy, text=""):
+        state = "disabled" if busy else "normal"
+        for btn in (self.btn_importar, self.btn_atualizar, self.btn_inserir, self.btn_salvar):
+            try:
+                btn.configure(state=state)
+            except Exception:
+                logging.debug("Falha ao ajustar estado de botao da tela de clientes")
+        if busy:
+            self.lbl_loading.configure(text=text or "Processando...")
+            try:
+                self.pb_loading.start(10)
+            except Exception:
+                logging.debug("Falha ao iniciar progressbar da tela de clientes")
+        else:
+            try:
+                self.pb_loading.stop()
+            except Exception:
+                logging.debug("Falha ao parar progressbar da tela de clientes")
+            self.lbl_loading.configure(text=text or "")
 
     # -------------------------
     # Helpers (reduz duplicidade)
@@ -8296,6 +8337,7 @@ class ClientesImportPage(ttk.Frame):
     def _apply_clientes_rows(self, seq, rows):
         if seq != self._load_seq or not self.winfo_exists():
             return
+        self._set_busy(False, f"Lista carregada: {len(rows)} clientes")
         self.tree.delete(*self.tree.get_children())
 
         for r in rows:
@@ -8307,11 +8349,13 @@ class ClientesImportPage(ttk.Frame):
     def _handle_clientes_load_error(self, seq, exc):
         if seq != self._load_seq or not self.winfo_exists():
             return
+        self._set_busy(False, "Falha ao carregar clientes")
         logging.error("Falha ao carregar clientes", exc_info=(type(exc), exc, exc.__traceback__))
 
     def carregar(self, async_load=True):
         self._load_seq += 1
         seq = self._load_seq
+        self._set_busy(True, "Carregando lista de clientes...")
         if not async_load:
             try:
                 rows = self._fetch_clientes_rows()
@@ -8445,46 +8489,65 @@ class ClientesImportPage(ttk.Frame):
             messagebox.showwarning("ATENÇÃO", "Nenhuma linha válida para salvar.")
             return
 
+        self._save_seq += 1
+        seq = self._save_seq
+        self._set_busy(True, "Salvando clientes...")
+        run_async_ui(
+            self,
+            lambda linhas=tuple(linhas): self._salvar_clientes_worker(linhas),
+            lambda msg, seq=seq: self._on_salvar_clientes_done(seq, msg),
+            lambda exc, seq=seq: self._on_salvar_clientes_error(seq, exc),
+        )
+
+    def _salvar_clientes_worker(self, linhas):
         total = 0
         sync_falhas = 0
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
         api_mode = bool(desktop_secret and is_desktop_api_sync_enabled())
-        try:
-            if api_mode:
+        if api_mode:
+            for cod, nome, endereco, telefone, vendedor in linhas:
+                try:
+                    self._sync_cliente_upsert_api(cod, nome, endereco, telefone, vendedor)
+                    total += 1
+                except Exception:
+                    sync_falhas += 1
+        else:
+            with get_db() as conn:
+                cur = conn.cursor()
                 for cod, nome, endereco, telefone, vendedor in linhas:
+                    cur.execute("""
+                        INSERT INTO clientes (cod_cliente, nome_cliente, endereco, telefone, vendedor)
+                        VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT(cod_cliente) DO UPDATE SET
+                            nome_cliente=excluded.nome_cliente,
+                            endereco=excluded.endereco,
+                            telefone=excluded.telefone,
+                            vendedor=excluded.vendedor
+                    """, (cod, nome, endereco, telefone, vendedor))
+                    total += 1
                     try:
                         self._sync_cliente_upsert_api(cod, nome, endereco, telefone, vendedor)
-                        total += 1
                     except Exception:
                         sync_falhas += 1
-            else:
-                with get_db() as conn:
-                    cur = conn.cursor()
-                    for cod, nome, endereco, telefone, vendedor in linhas:
-                        cur.execute("""
-                            INSERT INTO clientes (cod_cliente, nome_cliente, endereco, telefone, vendedor)
-                            VALUES (?, ?, ?, ?, ?)
-                            ON CONFLICT(cod_cliente) DO UPDATE SET
-                                nome_cliente=excluded.nome_cliente,
-                                endereco=excluded.endereco,
-                                telefone=excluded.telefone,
-                                vendedor=excluded.vendedor
-                        """, (cod, nome, endereco, telefone, vendedor))
-                        total += 1
-                        try:
-                            self._sync_cliente_upsert_api(cod, nome, endereco, telefone, vendedor)
-                        except Exception:
-                            sync_falhas += 1
 
-            msg = f"Clientes salvos/atualizados: {total}"
-            if sync_falhas:
-                msg += f"\nFalhas de sincronização API: {sync_falhas}"
-            messagebox.showinfo("OK", msg)
+        msg = f"Clientes salvos/atualizados: {total}"
+        if sync_falhas:
+            msg += f"\nFalhas de sincronização API: {sync_falhas}"
+        return msg
 
-        except Exception as e:
-            messagebox.showerror("ERRO", str(e))
-
+    def _on_salvar_clientes_done(self, seq, msg):
+        if seq != self._save_seq or not self.winfo_exists():
+            return
+        self._set_busy(False, "Clientes salvos")
+        messagebox.showinfo("OK", msg)
         self.carregar()
+
+    def _on_salvar_clientes_error(self, seq, exc):
+        if seq != self._save_seq or not self.winfo_exists():
+            return
+        self._set_busy(False, "Falha ao salvar clientes")
+        logging.error("Falha ao salvar clientes", exc_info=(type(exc), exc, exc.__traceback__))
+        messagebox.showerror("ERRO", str(exc))
 
     def _importar_clientes_worker(self, path):
         df = pd.read_excel(path, engine=excel_engine_for(path))
@@ -8582,6 +8645,7 @@ class ClientesImportPage(ttk.Frame):
 
         self._import_seq += 1
         seq = self._import_seq
+        self._set_busy(True, "Importando clientes do Excel...")
         run_async_ui(
             self,
             lambda path=path: self._importar_clientes_worker(path),
@@ -8773,13 +8837,17 @@ class ImportarVendasPage(PageBase):
     def __init__(self, parent, app):
         super().__init__(parent, app, "Importar Vendas (Excel)")
         self._load_seq = 0
+        self._import_seq = 0
 
         top = ttk.Frame(self.body, style="Content.TFrame")
         top.grid(row=0, column=0, sticky="ew")
-        top.grid_columnconfigure(3, weight=1)
-        ttk.Button(top, text="IMPORTAR EXCEL", style="Primary.TButton", command=self.importar_excel).grid(row=0, column=0, padx=6)
-        ttk.Button(top, text="LIMPAR TUDO", style="Danger.TButton", command=self.limpar_tudo).grid(row=0, column=1, sticky="w", padx=6)
-        ttk.Button(top, text="ATUALIZAR", style="Ghost.TButton", command=self.carregar).grid(row=0, column=2, padx=6)
+        top.grid_columnconfigure(5, weight=1)
+        self.btn_importar = ttk.Button(top, text="IMPORTAR EXCEL", style="Primary.TButton", command=self.importar_excel)
+        self.btn_importar.grid(row=0, column=0, padx=6)
+        self.btn_limpar = ttk.Button(top, text="LIMPAR TUDO", style="Danger.TButton", command=self.limpar_tudo)
+        self.btn_limpar.grid(row=0, column=1, sticky="w", padx=6)
+        self.btn_atualizar = ttk.Button(top, text="ATUALIZAR", style="Ghost.TButton", command=self.carregar)
+        self.btn_atualizar.grid(row=0, column=2, padx=6)
         self.lbl_info = ttk.Label(
             top,
             text="Selecione as vendas que irao para Programacao (duplo clique marca/desmarca).",
@@ -8788,6 +8856,16 @@ class ImportarVendasPage(PageBase):
             font=("Segoe UI", 8, "bold")
         )
         self.lbl_info.grid(row=0, column=3, sticky="w", padx=10)
+        self.pb_loading = ttk.Progressbar(top, mode="indeterminate", length=150)
+        self.pb_loading.grid(row=0, column=4, padx=(12, 8), sticky="w")
+        self.lbl_loading = ttk.Label(
+            top,
+            text="",
+            background="#F4F6FB",
+            foreground="#2563EB",
+            font=("Segoe UI", 8, "bold")
+        )
+        self.lbl_loading.grid(row=0, column=5, sticky="w")
 
         card = ttk.Frame(self.body, style="Card.TFrame", padding=14)
         card.grid(row=1, column=0, sticky="nsew", pady=(14, 0))
@@ -8848,6 +8926,26 @@ class ImportarVendasPage(PageBase):
             date_cols={"DATA"}
         )
 
+    def _set_busy(self, busy, text=""):
+        state = "disabled" if busy else "normal"
+        for btn in (self.btn_importar, self.btn_limpar, self.btn_atualizar):
+            try:
+                btn.configure(state=state)
+            except Exception:
+                logging.debug("Falha ao ajustar estado de botoes da tela de importar vendas")
+        if busy:
+            self.lbl_loading.configure(text=text or "Processando...")
+            try:
+                self.pb_loading.start(10)
+            except Exception:
+                logging.debug("Falha ao iniciar progressbar de importar vendas")
+        else:
+            try:
+                self.pb_loading.stop()
+            except Exception:
+                logging.debug("Falha ao parar progressbar de importar vendas")
+            self.lbl_loading.configure(text=text or "")
+
     def on_show(self):
         self.set_status("STATUS: Importação e seleção de vendas para programação.")
         self.carregar()
@@ -8902,12 +9000,29 @@ class ImportarVendasPage(PageBase):
 
     def _ensure_vendas_usada_cols(self):
         """Garante colunas para evitar reutilização (não quebra bases antigas)."""
-        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-        if desktop_secret and is_desktop_api_sync_enabled():
-            return
         try:
             with get_db() as conn:
                 cur = conn.cursor()
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS vendas_importadas (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        pedido TEXT,
+                        data_venda TEXT,
+                        cliente TEXT,
+                        nome_cliente TEXT,
+                        vendedor TEXT,
+                        produto TEXT,
+                        vr_total REAL,
+                        qnt REAL,
+                        cidade TEXT,
+                        valor_unitario REAL,
+                        observacao TEXT,
+                        selecionada INTEGER DEFAULT 0,
+                        usada INTEGER DEFAULT 0,
+                        usada_em TEXT,
+                        codigo_programacao TEXT
+                    )
+                """)
                 cur.execute("PRAGMA table_info(vendas_importadas)")
                 cols = [str(r[1]).lower() for r in cur.fetchall()]
 
@@ -9087,6 +9202,7 @@ class ImportarVendasPage(PageBase):
     def _on_importar_vendas_done(self, seq, msg):
         if seq != self._import_seq or not self.winfo_exists():
             return
+        self._set_busy(False, "Importação concluída")
         if hasattr(self, "ent_busca"):
             try:
                 self.ent_busca.delete(0, "end")
@@ -9098,6 +9214,7 @@ class ImportarVendasPage(PageBase):
     def _on_importar_vendas_error(self, seq, exc):
         if seq != self._import_seq or not self.winfo_exists():
             return
+        self._set_busy(False, "Falha na importação")
         logging.error("Falha ao importar vendas via Excel", exc_info=(type(exc), exc, exc.__traceback__))
         self.set_status("STATUS: Falha ao importar vendas.")
         messagebox.showerror("ERRO", str(exc))
@@ -9115,6 +9232,7 @@ class ImportarVendasPage(PageBase):
 
         self._import_seq += 1
         seq = self._import_seq
+        self._set_busy(True, "Importando vendas do Excel...")
         self.set_status("STATUS: Importando vendas do Excel...")
         run_async_ui(
             self,
@@ -9161,31 +9279,36 @@ class ImportarVendasPage(PageBase):
                 logging.debug("Falha ao carregar vendas importadas via API; usando fallback local.", exc_info=True)
 
         if not rows:
-            with get_db() as conn:
-                cur = conn.cursor()
-                if busca:
-                    cur.execute("""
-                        SELECT id, selecionada, pedido, data_venda, cliente, nome_cliente, produto, vr_total, qnt, cidade, vendedor
-                        FROM vendas_importadas
-                        WHERE (IFNULL(usada,0)=0)
-                          AND (
-                            pedido LIKE ? OR cliente LIKE ? OR nome_cliente LIKE ? OR vendedor LIKE ? OR produto LIKE ?
-                          )
-                        ORDER BY id DESC
-                    """, (f"%{busca}%", f"%{busca}%", f"%{busca}%", f"%{busca}%", f"%{busca}%"))
-                else:
-                    cur.execute("""
-                        SELECT id, selecionada, pedido, data_venda, cliente, nome_cliente, produto, vr_total, qnt, cidade, vendedor
-                        FROM vendas_importadas
-                        WHERE (IFNULL(usada,0)=0)
-                        ORDER BY id DESC
-                    """)
-                rows = cur.fetchall() or []
+            try:
+                with get_db() as conn:
+                    cur = conn.cursor()
+                    if busca:
+                        cur.execute("""
+                            SELECT id, selecionada, pedido, data_venda, cliente, nome_cliente, produto, vr_total, qnt, cidade, vendedor
+                            FROM vendas_importadas
+                            WHERE (IFNULL(usada,0)=0)
+                              AND (
+                                pedido LIKE ? OR cliente LIKE ? OR nome_cliente LIKE ? OR vendedor LIKE ? OR produto LIKE ?
+                              )
+                            ORDER BY id DESC
+                        """, (f"%{busca}%", f"%{busca}%", f"%{busca}%", f"%{busca}%", f"%{busca}%"))
+                    else:
+                        cur.execute("""
+                            SELECT id, selecionada, pedido, data_venda, cliente, nome_cliente, produto, vr_total, qnt, cidade, vendedor
+                            FROM vendas_importadas
+                            WHERE (IFNULL(usada,0)=0)
+                            ORDER BY id DESC
+                        """)
+                    rows = cur.fetchall() or []
+            except Exception:
+                logging.debug("Falha ao carregar vendas importadas no fallback local.", exc_info=True)
+                rows = []
         return rows
 
     def _apply_vendas_rows(self, seq, rows):
         if seq != self._load_seq or not self.winfo_exists():
             return
+        self._set_busy(False, f"Lista carregada: {len(rows)} vendas")
 
         self.tree.delete(*self.tree.get_children())
 
@@ -9221,6 +9344,7 @@ class ImportarVendasPage(PageBase):
     def _handle_vendas_load_error(self, seq, exc):
         if seq != self._load_seq or not self.winfo_exists():
             return
+        self._set_busy(False, "Falha ao carregar vendas")
         logging.error("Falha ao carregar vendas importadas", exc_info=(type(exc), exc, exc.__traceback__))
         self.set_status("STATUS: Falha ao carregar vendas importadas.")
 
@@ -9228,6 +9352,7 @@ class ImportarVendasPage(PageBase):
         busca = self._norm(self.ent_busca.get()) if hasattr(self, "ent_busca") else ""
         self._load_seq += 1
         seq = self._load_seq
+        self._set_busy(True, "Carregando lista de vendas...")
         self.set_status("STATUS: Carregando vendas importadas...")
         if not async_load:
             try:

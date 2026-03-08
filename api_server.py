@@ -7247,6 +7247,7 @@ def desktop_listar_vendas_importadas(
     term = (busca or "").strip()
     like = f"%{term}%"
     with get_conn() as conn:
+        ensure_core_schema(conn)
         cur = conn.cursor()
         if term:
             cur.execute(
@@ -7315,6 +7316,7 @@ def desktop_importar_vendas_importadas(
     total = 0
     ignoradas = 0
     with get_conn() as conn:
+        ensure_core_schema(conn)
         cur = conn.cursor()
         for rr in rows:
             if not isinstance(rr, dict):
@@ -7373,6 +7375,7 @@ def desktop_toggle_venda_importada_selecao(venda_id: int, _ok: bool = Depends(_r
     if rid <= 0:
         raise HTTPException(status_code=400, detail="venda_id invalido.")
     with get_conn() as conn:
+        ensure_core_schema(conn)
         cur = conn.cursor()
         cur.execute(
             """
@@ -7392,6 +7395,7 @@ def desktop_marcar_todas_vendas_importadas(
     _ok: bool = Depends(_require_desktop_secret),
 ):
     with get_conn() as conn:
+        ensure_core_schema(conn)
         cur = conn.cursor()
         cur.execute("UPDATE vendas_importadas SET selecionada=? WHERE IFNULL(usada,0)=0", (int(selected),))
         updated = int(cur.rowcount or 0)
@@ -7416,6 +7420,7 @@ def desktop_marcar_ids_vendas_importadas(
         return {"ok": True, "updated": 0}
 
     with get_conn() as conn:
+        ensure_core_schema(conn)
         cur = conn.cursor()
         cur.executemany(
             "UPDATE vendas_importadas SET selecionada=1 WHERE id=? AND IFNULL(usada,0)=0",
@@ -7451,6 +7456,7 @@ def desktop_consumir_vendas_importadas(
         usada_em = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     with get_conn() as conn:
+        ensure_core_schema(conn)
         cur = conn.cursor()
         cur.executemany(
             """
@@ -7470,6 +7476,7 @@ def desktop_consumir_vendas_importadas(
 @app.delete("/desktop/vendas-importadas")
 def desktop_apagar_vendas_importadas(_ok: bool = Depends(_require_desktop_secret)):
     with get_conn() as conn:
+        ensure_core_schema(conn)
         cur = conn.cursor()
         cur.execute("DELETE FROM vendas_importadas")
         deleted = int(cur.rowcount or 0)
