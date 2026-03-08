@@ -39,7 +39,7 @@ def main() -> int:
             "tenant_mode": "database-per-tenant",
             "source_of_truth": "api-central",
             "schema_version": 1,
-            "desktop_secret": "",
+            "desktop_secret": "rota-secreta",
         },
         "api": {
             "base_url": args.api_url.rstrip("/"),

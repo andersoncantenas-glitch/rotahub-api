@@ -187,6 +187,12 @@ def _default_config_file(*, app_kind: str, app_dir: str, data_root: str, is_froz
     return os.path.join(app_dir, "config", "desktop.runtime.json")
 
 
+def _default_desktop_secret(*, app_kind: str, is_frozen: bool, app_env: str) -> str:
+    if app_kind == "desktop" and is_frozen and app_env in {"staging", "production"}:
+        return "rota-secreta"
+    return ""
+
+
 def resolve_database_path(
     *,
     explicit_db_path: str,
@@ -353,7 +359,12 @@ def load_app_config(app_kind: str = "desktop") -> AppConfig:
     else:
         require_server_binding = str(binding_raw).strip().lower() in {"1", "true", "yes", "y", "sim", "on"}
 
-    desktop_secret = str((env_value("ROTA_SECRET")) or runtime_cfg.get("desktop_secret") or "").strip()
+    desktop_secret = str(
+        (env_value("ROTA_SECRET"))
+        or runtime_cfg.get("desktop_secret")
+        or _default_desktop_secret(app_kind=app_kind, is_frozen=is_frozen, app_env=app_env)
+        or ""
+    ).strip()
     if app_kind == "desktop" and is_frozen and not desktop_secret:
         sql_mirror_api = False
     allow_remote_write_raw = env_value("ROTA_ALLOW_REMOTE_WRITE")
@@ -527,7 +538,7 @@ def ensure_runtime_files(config: AppConfig) -> None:
                 "tenant_mode": config.tenant_mode,
                 "source_of_truth": config.source_of_truth,
                 "schema_version": config.schema_version,
-                "desktop_secret": "",
+                "desktop_secret": config.desktop_secret,
             },
             "api": {
                 "base_url": config.api_base_url,
