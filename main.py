@@ -2614,9 +2614,179 @@ class CadastroCRUD(ttk.Frame):
         self._set_form_mode("view")
         self._update_password_controls()
 
+    def vincular_selecionadas_programacao(self):
+        prog = upper((self.cb_prog_vinculo.get() or "").strip())
+        if not prog:
+            messagebox.showwarning("ATENÇÃO", "Selecione a programação ativa para vincular as vendas.")
+            return
+
+        ids = self._collect_vinculo_target_ids()
+        if not ids:
+            messagebox.showwarning("ATENÇÃO", "Selecione uma ou mais vendas para vincular.")
+            return
+
+        rows = self._fetch_vinculo_rows_from_tree(ids)
+        if not rows:
+            messagebox.showwarning("ATENÇÃO", "Não foi possível carregar os dados das vendas selecionadas.")
+            return
+        rows = self._collect_vinculo_caixas(rows)
+        if rows is None:
+            self.set_status("STATUS: Vínculo cancelado pelo usuário antes de definir as caixas.")
+            return
+
+        snapshot = self._fetch_programacao_vinculo_snapshot(prog)
+        if not snapshot:
+            messagebox.showwarning("ATENÇÃO", f"Programação não encontrada para vínculo: {prog}.")
+            return
+
+        endereco_map = self._resolve_clientes_endereco_map([(r or {}).get("cliente") for r in rows])
+        novos_itens = [self._row_venda_to_programacao_item(row, endereco_map) for row in (rows or [])]
+        itens_merged = self._merge_programacao_items((snapshot or {}).get("itens") or [], novos_itens)
+        if not itens_merged:
+            messagebox.showwarning("ATENÇÃO", "Nenhum item válido foi preparado para a programação.")
+            return
+
+        meta = dict((snapshot or {}).get("meta") or {})
+        meta["codigo_programacao"] = prog
+        total_caixas = sum(safe_int(it.get("qnt_caixas"), 0) for it in itens_merged)
+        total_quilos = round(sum(safe_float(it.get("kg"), 0.0) for it in itens_merged), 2)
+        usada_em = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                _call_api(
+                    "POST",
+                    "desktop/rotas/upsert",
+                    payload={
+                        "codigo_programacao": prog,
+                        "data_criacao": str(meta.get("data_criacao") or usada_em),
+                        "motorista": upper(str(meta.get("motorista") or "")),
+                        "motorista_id": safe_int(meta.get("motorista_id"), 0),
+                        "motorista_codigo": upper(str(meta.get("motorista_codigo") or meta.get("codigo_motorista") or "")),
+                        "codigo_motorista": upper(str(meta.get("codigo_motorista") or meta.get("motorista_codigo") or "")),
+                        "veiculo": upper(str(meta.get("veiculo") or "")),
+                        "equipe": upper(str(meta.get("equipe") or "")),
+                        "kg_estimado": safe_float(meta.get("kg_estimado"), 0.0),
+                        "tipo_estimativa": upper(str(meta.get("tipo_estimativa") or "KG").strip()) or "KG",
+                        "caixas_estimado": safe_int(meta.get("caixas_estimado"), 0),
+                        "status": upper(str(meta.get("status") or "ATIVA").strip()) or "ATIVA",
+                        "local_rota": upper(str(meta.get("local_rota") or "")),
+                        "local_carregamento": upper(str(meta.get("local_carregamento") or "")),
+                        "adiantamento": safe_float(meta.get("adiantamento"), 0.0),
+                        "total_caixas": total_caixas,
+                        "quilos": total_quilos,
+                        "usuario_criacao": upper(str(meta.get("usuario_criacao") or "").strip()),
+                        "usuario_ultima_edicao": upper(str(meta.get("usuario_ultima_edicao") or meta.get("usuario_criacao") or "").strip()),
+                        "itens": itens_merged,
+                    },
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                _call_api(
+                    "POST",
+                    "desktop/vendas-importadas/consumir",
+                    payload={"ids": ids, "codigo_programacao": prog, "usada_em": usada_em},
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+            except Exception:
+                logging.debug("Falha ao anexar vendas diretamente à programação via API; usando fallback local.", exc_info=True)
+                self._persist_vinculo_programacao_local(meta, itens_merged, ids, usada_em)
+        else:
+            self._persist_vinculo_programacao_local(meta, itens_merged, ids, usada_em)
+
+        self.carregar()
+        self.refresh_programacoes_vinculo()
+        self.set_status(
+            f"STATUS: {len(ids)} venda(s) anexada(s) à programação {prog}. "
+            "As vendas vinculadas saíram da lista e a rota já pode refletir os clientes."
+        )
+
     # -------------------------
     # Helpers
     # -------------------------
+    def vincular_selecionadas_programacao(self):
+        prog = upper((self.cb_prog_vinculo.get() or "").strip())
+        if not prog:
+            messagebox.showwarning("ATENÇÃO", "Selecione a programação ativa para vincular as vendas.")
+            return
+
+        ids = self._collect_vinculo_target_ids()
+        if not ids:
+            messagebox.showwarning("ATENÇÃO", "Selecione uma ou mais vendas para vincular.")
+            return
+
+        rows = self._fetch_vinculo_rows_from_tree(ids)
+        if not rows:
+            messagebox.showwarning("ATENÇÃO", "Não foi possível carregar os dados das vendas selecionadas.")
+            return
+
+        snapshot = self._fetch_programacao_vinculo_snapshot(prog)
+        if not snapshot:
+            messagebox.showwarning("ATENÇÃO", f"Programação não encontrada para vínculo: {prog}.")
+            return
+
+        endereco_map = self._resolve_clientes_endereco_map([(r or {}).get("cliente") for r in rows])
+        novos_itens = [self._row_venda_to_programacao_item(row, endereco_map) for row in (rows or [])]
+        itens_merged = self._merge_programacao_items((snapshot or {}).get("itens") or [], novos_itens)
+        if not itens_merged:
+            messagebox.showwarning("ATENÇÃO", "Nenhum item válido foi preparado para a programação.")
+            return
+
+        meta = dict((snapshot or {}).get("meta") or {})
+        meta["codigo_programacao"] = prog
+        total_caixas = sum(safe_int(it.get("qnt_caixas"), 0) for it in itens_merged)
+        total_quilos = round(sum(safe_float(it.get("kg"), 0.0) for it in itens_merged), 2)
+        usada_em = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                _call_api(
+                    "POST",
+                    "desktop/rotas/upsert",
+                    payload={
+                        "codigo_programacao": prog,
+                        "data_criacao": str(meta.get("data_criacao") or usada_em),
+                        "motorista": upper(str(meta.get("motorista") or "")),
+                        "motorista_id": safe_int(meta.get("motorista_id"), 0),
+                        "motorista_codigo": upper(str(meta.get("motorista_codigo") or meta.get("codigo_motorista") or "")),
+                        "codigo_motorista": upper(str(meta.get("codigo_motorista") or meta.get("motorista_codigo") or "")),
+                        "veiculo": upper(str(meta.get("veiculo") or "")),
+                        "equipe": upper(str(meta.get("equipe") or "")),
+                        "kg_estimado": safe_float(meta.get("kg_estimado"), 0.0),
+                        "tipo_estimativa": upper(str(meta.get("tipo_estimativa") or "KG").strip()) or "KG",
+                        "caixas_estimado": safe_int(meta.get("caixas_estimado"), 0),
+                        "status": upper(str(meta.get("status") or "ATIVA").strip()) or "ATIVA",
+                        "local_rota": upper(str(meta.get("local_rota") or "")),
+                        "local_carregamento": upper(str(meta.get("local_carregamento") or "")),
+                        "adiantamento": safe_float(meta.get("adiantamento"), 0.0),
+                        "total_caixas": total_caixas,
+                        "quilos": total_quilos,
+                        "usuario_criacao": upper(str(meta.get("usuario_criacao") or "").strip()),
+                        "usuario_ultima_edicao": upper(str(meta.get("usuario_ultima_edicao") or meta.get("usuario_criacao") or "").strip()),
+                        "itens": itens_merged,
+                    },
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                _call_api(
+                    "POST",
+                    "desktop/vendas-importadas/consumir",
+                    payload={"ids": ids, "codigo_programacao": prog, "usada_em": usada_em},
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+            except Exception:
+                logging.debug("Falha ao anexar vendas diretamente à programação via API; usando fallback local.", exc_info=True)
+                self._persist_vinculo_programacao_local(meta, itens_merged, ids, usada_em)
+        else:
+            self._persist_vinculo_programacao_local(meta, itens_merged, ids, usada_em)
+
+        self.carregar()
+        self.refresh_programacoes_vinculo()
+        self.set_status(
+            f"STATUS: {len(ids)} venda(s) anexada(s) à programação {prog}. "
+            "As vendas vinculadas saíram da lista e a rota já pode refletir os clientes."
+        )
+
     def _norm(self, v):
         return upper(str(v or "").strip())
 
@@ -9287,6 +9457,7 @@ class ImportarVendasPage(PageBase):
         super().__init__(parent, app, "Importar Vendas (Excel)")
         self._load_seq = 0
         self._import_seq = 0
+        self._vinc_seq = 0
 
         top = ttk.Frame(self.body, style="Content.TFrame")
         top.grid(row=0, column=0, sticky="ew")
@@ -9325,7 +9496,7 @@ class ImportarVendasPage(PageBase):
         filt = ttk.Frame(card, style="Card.TFrame")
         filt.grid(row=0, column=0, sticky="ew", pady=(0, 12))
         filt.grid_columnconfigure(1, weight=1)
-        filt.grid_columnconfigure(9, weight=1)
+        filt.grid_columnconfigure(7, weight=1)
 
         ttk.Label(filt, text="Buscar:", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w")
         self.ent_busca = ttk.Entry(filt, style="Field.TEntry")
@@ -9335,6 +9506,16 @@ class ImportarVendasPage(PageBase):
         ttk.Button(filt, text="MARCAR", style="Primary.TButton", command=self.marcar_selecionadas).grid(row=0, column=3, padx=6)
         ttk.Button(filt, text="MARCAR TODOS", style="Warn.TButton", command=lambda: self.set_all_selected(1)).grid(row=0, column=4, padx=6)
         ttk.Button(filt, text="DESMARCAR TODOS", style="Ghost.TButton", command=lambda: self.set_all_selected(0)).grid(row=0, column=5, padx=6)
+        ttk.Label(filt, text="Programação ativa:", style="CardLabel.TLabel").grid(row=1, column=0, sticky="w", pady=(10, 0))
+        self.cb_prog_vinculo = ttk.Combobox(filt, state="readonly")
+        self.cb_prog_vinculo.grid(row=1, column=1, columnspan=2, sticky="ew", padx=6, pady=(10, 0))
+        self.btn_vincular_prog = ttk.Button(
+            filt,
+            text="VINCULAR A PROGRAMAÇÃO",
+            style="Primary.TButton",
+            command=self.vincular_selecionadas_programacao,
+        )
+        self.btn_vincular_prog.grid(row=1, column=3, columnspan=3, padx=6, pady=(10, 0), sticky="ew")
         # Tabela (com scroll horizontal)
         cols = ["ID", "SEL", "PEDIDO", "DATA", "CLIENTE", "NOME COMPLETO", "PRODUTO", "VR TOTAL", "QNT", "CIDADE", "VENDEDOR"]
         table_wrap = ttk.Frame(card, style="Card.TFrame")
@@ -9381,7 +9562,9 @@ class ImportarVendasPage(PageBase):
 
     def _set_busy(self, busy, text=""):
         state = "disabled" if busy else "normal"
-        for btn in (self.btn_importar, self.btn_limpar, self.btn_atualizar):
+        for btn in (self.btn_importar, self.btn_limpar, self.btn_atualizar, getattr(self, "btn_vincular_prog", None)):
+            if not btn:
+                continue
             try:
                 btn.configure(state=state)
             except Exception:
@@ -9401,13 +9584,797 @@ class ImportarVendasPage(PageBase):
 
     def on_show(self):
         self.set_status("STATUS: Importação e seleção de vendas para programação.")
+        self.refresh_programacoes_vinculo()
         self.carregar()
+
+    def _is_programacao_vinculavel(self, status_raw, status_op_raw, prest_raw):
+        st = upper(str(status_raw or "").strip())
+        st_op = upper(str(status_op_raw or "").strip())
+        prest = upper(str(prest_raw or "").strip())
+        if st in {"EM ENTREGAS", "EM_ENTREGAS"} or st_op in {"EM ENTREGAS", "EM_ENTREGAS"}:
+            return False
+        if st_op in {"CANCELADA", "CANCELADO", "FINALIZADA", "FINALIZADO"}:
+            return False
+        if st in {"CANCELADA", "CANCELADO"}:
+            return False
+        if prest == "FECHADA":
+            return False
+        return (st in {"ATIVA", "ABERTA", "PROGRAMADA", "EM_ROTA", "EM ROTA", "INICIADA", "CARREGADA"} or
+                st_op in {"ATIVA", "ABERTA", "PROGRAMADA", "EM_ROTA", "EM ROTA", "INICIADA", "CARREGADA"} or
+                not (st or st_op))
+
+    def _fetch_programacoes_vinculo(self):
+        encontrados = []
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                resp = _call_api(
+                    "GET",
+                    "desktop/programacoes?modo=todas&limit=300",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                for r in ((resp or {}).get("programacoes") or []):
+                    if not isinstance(r, dict):
+                        continue
+                    codigo = upper((r or {}).get("codigo_programacao") or "")
+                    if not codigo:
+                        continue
+                    if self._is_programacao_vinculavel(r.get("status"), r.get("status_operacional"), r.get("prestacao_status")):
+                        encontrados.append(codigo)
+                if encontrados:
+                    return encontrados
+            except Exception:
+                logging.debug("Falha ao carregar programacoes vinculaveis via API.", exc_info=True)
+
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(programacoes)")
+            cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+            status_expr = "COALESCE(status,'')" if "status" in cols else "''"
+            status_op_expr = "COALESCE(status_operacional,'')" if "status_operacional" in cols else "''"
+            prest_expr = "COALESCE(prestacao_status,'')" if "prestacao_status" in cols else "''"
+            cur.execute(
+                f"""
+                SELECT COALESCE(codigo_programacao,''), {status_expr}, {status_op_expr}, {prest_expr}
+                FROM programacoes
+                WHERE COALESCE(codigo_programacao,'') <> ''
+                ORDER BY id DESC
+                LIMIT 300
+                """
+            )
+            for r in (cur.fetchall() or []):
+                codigo = upper((r[0] if r else "") or "")
+                if not codigo:
+                    continue
+                if self._is_programacao_vinculavel(r[1] if len(r) > 1 else "", r[2] if len(r) > 2 else "", r[3] if len(r) > 3 else ""):
+                    encontrados.append(codigo)
+        return list(dict.fromkeys(encontrados))
+
+    def _apply_programacoes_vinculo(self, seq, values):
+        if seq != self._vinc_seq or not self.winfo_exists():
+            return
+        atual = upper((self.cb_prog_vinculo.get() or "").strip())
+        values = values or []
+        self.cb_prog_vinculo["values"] = values
+        if atual in values:
+            self.cb_prog_vinculo.set(atual)
+        elif values:
+            self.cb_prog_vinculo.set(values[0])
+        else:
+            self.cb_prog_vinculo.set("")
+
+    def _handle_programacoes_vinculo_error(self, seq, exc):
+        if seq != self._vinc_seq or not self.winfo_exists():
+            return
+        logging.error("Falha ao carregar programacoes para vinculo", exc_info=(type(exc), exc, exc.__traceback__))
+
+    def refresh_programacoes_vinculo(self):
+        self._vinc_seq += 1
+        seq = self._vinc_seq
+        run_async_ui(
+            self,
+            self._fetch_programacoes_vinculo,
+            lambda values, seq=seq: self._apply_programacoes_vinculo(seq, values),
+            lambda exc, seq=seq: self._handle_programacoes_vinculo_error(seq, exc),
+        )
+
+    def _collect_vinculo_target_ids(self):
+        itens = tuple(self.tree.selection() or ())
+        if not itens:
+            marcados = []
+            for iid in (self.tree.get_children() or ()):
+                vals = self.tree.item(iid, "values") or ()
+                if len(vals) > 1 and str(vals[1]).strip() == "[x]":
+                    marcados.append(iid)
+            itens = tuple(marcados)
+        if not itens:
+            return []
+
+        ids = []
+        seen = set()
+        for iid in itens:
+            vals = self.tree.item(iid, "values") or ()
+            rid = safe_int(vals[0] if vals else 0, 0)
+            if rid > 0 and rid not in seen:
+                seen.add(rid)
+                ids.append(rid)
+        return ids
+
+    def _fetch_vinculo_rows_from_tree(self, ids):
+        wanted = {safe_int(x, 0) for x in (ids or []) if safe_int(x, 0) > 0}
+        if not wanted:
+            return []
+
+        rows = []
+        for iid in (self.tree.get_children() or ()):
+            vals = self.tree.item(iid, "values") or ()
+            rid = safe_int(vals[0] if vals else 0, 0)
+            if rid not in wanted:
+                continue
+            rows.append(
+                {
+                    "id": rid,
+                    "pedido": str(vals[2] if len(vals) > 2 else ""),
+                    "data_venda": str(vals[3] if len(vals) > 3 else ""),
+                    "cliente": str(vals[4] if len(vals) > 4 else ""),
+                    "nome_cliente": str(vals[5] if len(vals) > 5 else ""),
+                    "produto": str(vals[6] if len(vals) > 6 else ""),
+                    "vr_total": safe_float(vals[7] if len(vals) > 7 else 0, 0.0),
+                    "qnt": safe_float(vals[8] if len(vals) > 8 else 0, 0.0),
+                    "cidade": str(vals[9] if len(vals) > 9 else ""),
+                    "vendedor": str(vals[10] if len(vals) > 10 else ""),
+                }
+            )
+        return rows
+
+    def _fetch_programacao_vinculo_snapshot(self, codigo_programacao):
+        codigo = upper(str(codigo_programacao or "").strip())
+        if not codigo:
+            return None
+
+        usuario = upper(str((getattr(self.app, "user", {}) or {}).get("nome", "")).strip()) or "ADMIN"
+        meta = {
+            "codigo_programacao": codigo,
+            "data_criacao": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "motorista": "",
+            "motorista_id": 0,
+            "motorista_codigo": "",
+            "codigo_motorista": "",
+            "veiculo": "",
+            "equipe": "",
+            "kg_estimado": 0.0,
+            "tipo_estimativa": "KG",
+            "caixas_estimado": 0,
+            "status": "ATIVA",
+            "local_rota": "",
+            "local_carregamento": "",
+            "adiantamento": 0.0,
+            "usuario_criacao": usuario,
+            "usuario_ultima_edicao": usuario,
+        }
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                resp = _call_api(
+                    "GET",
+                    f"desktop/rotas/{urllib.parse.quote(codigo)}",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                rota = resp.get("rota") if isinstance(resp, dict) else None
+                clientes = resp.get("clientes") if isinstance(resp, dict) else []
+                if isinstance(rota, dict):
+                    meta.update(
+                        {
+                            "data_criacao": str(rota.get("data_criacao") or rota.get("data") or meta["data_criacao"]),
+                            "motorista": upper(str(rota.get("motorista") or "")),
+                            "motorista_id": safe_int(rota.get("motorista_id"), 0),
+                            "motorista_codigo": upper(str(rota.get("motorista_codigo") or rota.get("codigo_motorista") or "")),
+                            "codigo_motorista": upper(str(rota.get("codigo_motorista") or rota.get("motorista_codigo") or "")),
+                            "veiculo": upper(str(rota.get("veiculo") or "")),
+                            "equipe": upper(str(rota.get("equipe") or "")),
+                            "kg_estimado": safe_float(rota.get("kg_estimado"), 0.0),
+                            "tipo_estimativa": upper(str(rota.get("tipo_estimativa") or "KG").strip()) or "KG",
+                            "caixas_estimado": safe_int(rota.get("caixas_estimado"), 0),
+                            "status": upper(str(rota.get("status") or "ATIVA").strip()) or "ATIVA",
+                            "local_rota": upper(str(rota.get("local_rota") or rota.get("tipo_rota") or "")),
+                            "local_carregamento": upper(
+                                str(
+                                    rota.get("local_carregamento")
+                                    or rota.get("granja_carregada")
+                                    or rota.get("local_carregado")
+                                    or rota.get("local_carreg")
+                                    or ""
+                                )
+                            ),
+                            "adiantamento": safe_float(rota.get("adiantamento"), safe_float(rota.get("adiantamento_rota"), 0.0)),
+                            "usuario_criacao": upper(
+                                str(
+                                    rota.get("usuario_criacao")
+                                    or rota.get("usuario")
+                                    or rota.get("criado_por")
+                                    or usuario
+                                ).strip()
+                            )
+                            or usuario,
+                            "usuario_ultima_edicao": upper(
+                                str(rota.get("usuario_ultima_edicao") or usuario).strip()
+                            )
+                            or usuario,
+                        }
+                    )
+                itens = []
+                if isinstance(clientes, list):
+                    itens = [
+                        {
+                            "cod_cliente": str(it.get("cod_cliente") or ""),
+                            "nome_cliente": str(it.get("nome_cliente") or ""),
+                            "produto": str(it.get("produto") or ""),
+                            "endereco": str(it.get("endereco") or ""),
+                            "qnt_caixas": safe_int(it.get("qnt_caixas"), 0),
+                            "kg": safe_float(it.get("kg"), 0.0),
+                            "preco": safe_float(it.get("preco"), 0.0),
+                            "vendedor": str(it.get("vendedor") or ""),
+                            "pedido": str(it.get("pedido") or ""),
+                            "obs": str(it.get("obs") or it.get("observacao") or ""),
+                        }
+                        for it in clientes
+                        if isinstance(it, dict)
+                    ]
+                return {"meta": meta, "itens": itens}
+            except Exception:
+                logging.debug("Falha ao carregar snapshot da programacao via API; usando fallback local.", exc_info=True)
+
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(programacoes)")
+            cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+            if "codigo_programacao" not in cols_prog:
+                return None
+            select_cols = [
+                "COALESCE(data_criacao,'')",
+                "COALESCE(motorista,'')",
+                "COALESCE(veiculo,'')",
+                "COALESCE(equipe,'')",
+                "COALESCE(kg_estimado,0)",
+                "COALESCE(tipo_estimativa,'KG')" if "tipo_estimativa" in cols_prog else "'KG'",
+                "COALESCE(caixas_estimado,0)" if "caixas_estimado" in cols_prog else "0",
+                "COALESCE(status,'ATIVA')" if "status" in cols_prog else "'ATIVA'",
+                "COALESCE(local_rota,'')" if "local_rota" in cols_prog else ("COALESCE(tipo_rota,'')" if "tipo_rota" in cols_prog else "''"),
+                (
+                    "COALESCE(local_carregamento,'')"
+                    if "local_carregamento" in cols_prog
+                    else (
+                        "COALESCE(granja_carregada,'')"
+                        if "granja_carregada" in cols_prog
+                        else ("COALESCE(local_carregado,'')" if "local_carregado" in cols_prog else "''")
+                    )
+                ),
+                "COALESCE(adiantamento,0)" if "adiantamento" in cols_prog else ("COALESCE(adiantamento_rota,0)" if "adiantamento_rota" in cols_prog else "0"),
+                "COALESCE(motorista_id,0)" if "motorista_id" in cols_prog else "0",
+                "COALESCE(motorista_codigo,'')" if "motorista_codigo" in cols_prog else ("COALESCE(codigo_motorista,'')" if "codigo_motorista" in cols_prog else "''"),
+                "COALESCE(codigo_motorista,'')" if "codigo_motorista" in cols_prog else ("COALESCE(motorista_codigo,'')" if "motorista_codigo" in cols_prog else "''"),
+                "COALESCE(usuario_criacao,'')" if "usuario_criacao" in cols_prog else "''",
+                "COALESCE(usuario_ultima_edicao,'')" if "usuario_ultima_edicao" in cols_prog else "''",
+            ]
+            cur.execute(
+                f"SELECT {', '.join(select_cols)} FROM programacoes WHERE codigo_programacao=? ORDER BY id DESC LIMIT 1",
+                (codigo,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            meta.update(
+                {
+                    "data_criacao": str(row[0] or meta["data_criacao"]),
+                    "motorista": upper(str(row[1] or "")),
+                    "veiculo": upper(str(row[2] or "")),
+                    "equipe": upper(str(row[3] or "")),
+                    "kg_estimado": safe_float(row[4], 0.0),
+                    "tipo_estimativa": upper(str(row[5] or "KG").strip()) or "KG",
+                    "caixas_estimado": safe_int(row[6], 0),
+                    "status": upper(str(row[7] or "ATIVA").strip()) or "ATIVA",
+                    "local_rota": upper(str(row[8] or "")),
+                    "local_carregamento": upper(str(row[9] or "")),
+                    "adiantamento": safe_float(row[10], 0.0),
+                    "motorista_id": safe_int(row[11], 0),
+                    "motorista_codigo": upper(str(row[12] or "")),
+                    "codigo_motorista": upper(str(row[13] or "")),
+                    "usuario_criacao": upper(str(row[14] or usuario).strip()) or usuario,
+                    "usuario_ultima_edicao": upper(str(row[15] or usuario).strip()) or usuario,
+                }
+            )
+        return {"meta": meta, "itens": fetch_programacao_itens(codigo) or []}
+
+    def _resolve_clientes_endereco_map(self, codigos):
+        codes = sorted({upper(str(c or "").strip()) for c in (codigos or []) if str(c or "").strip()})
+        if not codes:
+            return {}
+        placeholders = ",".join(["?"] * len(codes))
+        endereco_map = {}
+        try:
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    f"SELECT UPPER(COALESCE(cod_cliente,'')), UPPER(COALESCE(endereco,'')) FROM clientes WHERE UPPER(COALESCE(cod_cliente,'')) IN ({placeholders})",
+                    tuple(codes),
+                )
+                for cod, endereco in (cur.fetchall() or []):
+                    endereco_map[upper(cod or "")] = upper(endereco or "")
+        except Exception:
+            logging.debug("Falha ao resolver enderecos dos clientes para vinculo.", exc_info=True)
+        return endereco_map
+
+    def _row_venda_to_programacao_item(self, row, endereco_map):
+        cliente = upper(str((row or {}).get("cliente") or "").strip())
+        pedido = upper(str((row or {}).get("pedido") or "").strip())
+        nome_cliente = upper(str((row or {}).get("nome_cliente") or "").strip())
+        produto = upper(str((row or {}).get("produto") or "").strip())
+        cidade = upper(str((row or {}).get("cidade") or "").strip())
+        vendedor = upper(str((row or {}).get("vendedor") or "").strip())
+        qnt = safe_float((row or {}).get("qnt"), 0.0)
+        vr_total = safe_float((row or {}).get("vr_total"), 0.0)
+        caixas = safe_int((row or {}).get("qnt_caixas_vinculo"), -1)
+        if caixas <= 0:
+            caixas = max(safe_int(round(qnt), 0), 1 if qnt > 0 else 1)
+        preco = (vr_total / qnt) if qnt > 0 else 0.0
+        endereco = upper(str(endereco_map.get(cliente) or cidade or "").strip())
+        return {
+            "cod_cliente": cliente,
+            "nome_cliente": nome_cliente,
+            "produto": produto,
+            "endereco": endereco,
+            "qnt_caixas": caixas,
+            "kg": 0.0,
+            "preco": safe_float(preco, 0.0),
+            "vendedor": vendedor,
+            "pedido": pedido,
+            "obs": "",
+        }
+
+    def _prompt_caixas_vinculo_row(self, row, index_atual, total_itens):
+        result = {"ok": False, "value": None}
+        default_qtd = safe_int((row or {}).get("qnt"), 0)
+        if default_qtd <= 0:
+            default_qtd = 1
+
+        win = tk.Toplevel(self)
+        win.title(f"Vincular Cliente {index_atual}/{total_itens}")
+        win.transient(self.winfo_toplevel())
+        win.resizable(False, False)
+        win.grab_set()
+
+        box = ttk.Frame(win, style="Card.TFrame", padding=16)
+        box.grid(row=0, column=0, sticky="nsew")
+        win.grid_columnconfigure(0, weight=1)
+        win.grid_rowconfigure(0, weight=1)
+        box.grid_columnconfigure(1, weight=1)
+
+        nome = upper(str((row or {}).get("nome_cliente") or ""))
+        vendedor = upper(str((row or {}).get("vendedor") or ""))
+        produto = upper(str((row or {}).get("produto") or ""))
+        preco_total = safe_float((row or {}).get("vr_total"), 0.0)
+        qtd_excel = safe_float((row or {}).get("qnt"), 0.0)
+        preco_unit = (preco_total / qtd_excel) if qtd_excel > 0 else 0.0
+
+        ttk.Label(box, text=f"Cliente {index_atual} de {total_itens}", style="SectionTitle.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        ttk.Label(box, text="Nome:", style="CardLabel.TLabel").grid(row=1, column=0, sticky="w", pady=3)
+        ttk.Label(box, text=nome or "-", style="CardValue.TLabel").grid(row=1, column=1, sticky="w", pady=3)
+        ttk.Label(box, text="Vendedor:", style="CardLabel.TLabel").grid(row=2, column=0, sticky="w", pady=3)
+        ttk.Label(box, text=vendedor or "-", style="CardValue.TLabel").grid(row=2, column=1, sticky="w", pady=3)
+        ttk.Label(box, text="Produto:", style="CardLabel.TLabel").grid(row=3, column=0, sticky="w", pady=3)
+        ttk.Label(box, text=produto or "-", style="CardValue.TLabel").grid(row=3, column=1, sticky="w", pady=3)
+        ttk.Label(box, text="Preço:", style="CardLabel.TLabel").grid(row=4, column=0, sticky="w", pady=3)
+        ttk.Label(
+            box,
+            text=f"R$ {preco_unit:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."),
+            style="CardValue.TLabel",
+        ).grid(row=4, column=1, sticky="w", pady=3)
+        ttk.Label(box, text="Quantidade de caixas:", style="CardLabel.TLabel").grid(row=5, column=0, sticky="w", pady=(10, 3))
+        ent_qtd = ttk.Entry(box, style="Field.TEntry", width=12)
+        ent_qtd.grid(row=5, column=1, sticky="w", pady=(10, 3))
+        ent_qtd.insert(0, str(default_qtd))
+        ent_qtd.focus_set()
+        ent_qtd.selection_range(0, "end")
+
+        btns = ttk.Frame(box, style="Card.TFrame")
+        btns.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        btns.grid_columnconfigure(0, weight=1)
+        btns.grid_columnconfigure(1, weight=1)
+
+        def _confirm():
+            qtd = safe_int(ent_qtd.get(), 0)
+            if qtd <= 0:
+                messagebox.showwarning("ATENÇÃO", "Informe uma quantidade de caixas maior que zero.", parent=win)
+                return
+            result["ok"] = True
+            result["value"] = qtd
+            win.destroy()
+
+        def _cancel():
+            result["ok"] = False
+            result["value"] = None
+            win.destroy()
+
+        ttk.Button(btns, text="CANCELAR", style="Ghost.TButton", command=_cancel).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        ttk.Button(btns, text="CONFIRMAR", style="Primary.TButton", command=_confirm).grid(row=0, column=1, sticky="ew", padx=(6, 0))
+
+        ent_qtd.bind("<Return>", lambda e: _confirm())
+        ent_qtd.bind("<Escape>", lambda e: _cancel())
+        win.protocol("WM_DELETE_WINDOW", _cancel)
+        try:
+            win.update_idletasks()
+            px = self.winfo_rootx() + max((self.winfo_width() - win.winfo_reqwidth()) // 2, 40)
+            py = self.winfo_rooty() + max((self.winfo_height() - win.winfo_reqheight()) // 2, 40)
+            win.geometry(f"+{px}+{py}")
+        except Exception:
+            logging.debug("Falha ignorada ao centralizar dialogo de caixas.")
+        win.wait_window()
+        return result["value"] if result["ok"] else None
+
+    def _collect_vinculo_caixas(self, rows):
+        prepared = []
+        total = len(rows or [])
+        for idx, row in enumerate((rows or []), start=1):
+            qtd = self._prompt_caixas_vinculo_row(row, idx, total)
+            if qtd is None:
+                return None
+            novo = dict(row or {})
+            novo["qnt_caixas_vinculo"] = qtd
+            prepared.append(novo)
+        return prepared
+
+    def _merge_programacao_items(self, itens_existentes, novos_itens):
+        merged = []
+        seen = set()
+        for src in list(itens_existentes or []) + list(novos_itens or []):
+            item = {
+                "cod_cliente": upper(str((src or {}).get("cod_cliente") or "").strip()),
+                "nome_cliente": upper(str((src or {}).get("nome_cliente") or "").strip()),
+                "produto": upper(str((src or {}).get("produto") or "").strip()),
+                "endereco": upper(str((src or {}).get("endereco") or "").strip()),
+                "qnt_caixas": safe_int((src or {}).get("qnt_caixas"), 0),
+                "kg": safe_float((src or {}).get("kg"), 0.0),
+                "preco": safe_float((src or {}).get("preco"), 0.0),
+                "vendedor": upper(str((src or {}).get("vendedor") or "").strip()),
+                "pedido": upper(str((src or {}).get("pedido") or "").strip()),
+                "obs": upper(str((src or {}).get("obs") or (src or {}).get("observacao") or "").strip()),
+            }
+            key = (item["cod_cliente"], item["pedido"], item["produto"])
+            if not item["cod_cliente"] or not item["nome_cliente"] or key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+        return merged
+
+    def _persist_vinculo_programacao_local(self, meta, itens, ids, usada_em):
+        codigo = upper(str((meta or {}).get("codigo_programacao") or "").strip())
+        with get_db() as conn:
+            cur = conn.cursor()
+            existentes = set()
+            try:
+                cur.execute(
+                    """
+                    SELECT UPPER(COALESCE(cod_cliente,'')), UPPER(COALESCE(pedido,'')), UPPER(COALESCE(produto,''))
+                    FROM programacao_itens
+                    WHERE codigo_programacao=?
+                    """,
+                    (codigo,),
+                )
+                existentes = {
+                    (upper(r[0] or ""), upper(r[1] or ""), upper(r[2] or ""))
+                    for r in (cur.fetchall() or [])
+                }
+            except Exception:
+                logging.debug("Falha ao consultar itens existentes da programacao local.", exc_info=True)
+
+            for item in (itens or []):
+                key = (
+                    upper(str(item.get("cod_cliente") or "").strip()),
+                    upper(str(item.get("pedido") or "").strip()),
+                    upper(str(item.get("produto") or "").strip()),
+                )
+                if key in existentes:
+                    continue
+                cur.execute(
+                    """
+                    INSERT INTO programacao_itens
+                        (codigo_programacao, cod_cliente, nome_cliente, qnt_caixas, kg, preco, endereco, vendedor, pedido, produto)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        codigo,
+                        key[0],
+                        upper(str(item.get("nome_cliente") or "").strip()),
+                        safe_int(item.get("qnt_caixas"), 0),
+                        safe_float(item.get("kg"), 0.0),
+                        safe_float(item.get("preco"), 0.0),
+                        upper(str(item.get("endereco") or "").strip()),
+                        upper(str(item.get("vendedor") or "").strip()),
+                        key[1],
+                        key[2],
+                    ),
+                )
+                existentes.add(key)
+
+            try:
+                cur.execute("PRAGMA table_info(programacoes)")
+                cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+                sets = []
+                vals = []
+                total_caixas = sum(safe_int(it.get("qnt_caixas"), 0) for it in (itens or []))
+                total_quilos = round(sum(safe_float(it.get("kg"), 0.0) for it in (itens or [])), 2)
+                if "total_caixas" in cols_prog:
+                    sets.append("total_caixas=?")
+                    vals.append(total_caixas)
+                if "quilos" in cols_prog:
+                    sets.append("quilos=?")
+                    vals.append(total_quilos)
+                if "status" in cols_prog:
+                    sets.append("status='ATIVA'")
+                if "usuario_ultima_edicao" in cols_prog:
+                    sets.append("usuario_ultima_edicao=?")
+                    vals.append(upper(str((meta or {}).get("usuario_ultima_edicao") or "").strip()))
+                if sets:
+                    vals.append(codigo)
+                    cur.execute(f"UPDATE programacoes SET {', '.join(sets)} WHERE codigo_programacao=?", tuple(vals))
+            except Exception:
+                logging.debug("Falha ao atualizar totais da programacao local apos vinculo.", exc_info=True)
+
+            if ids:
+                cur.executemany(
+                    """
+                    UPDATE vendas_importadas
+                       SET usada=1,
+                           usada_em=?,
+                           codigo_programacao=?,
+                           selecionada=0
+                     WHERE id=? AND IFNULL(usada,0)=0
+                    """,
+                    [(usada_em, codigo, rid) for rid in ids],
+                )
+
+    def vincular_selecionadas_programacao(self):
+        prog = upper((self.cb_prog_vinculo.get() or "").strip())
+        if not prog:
+            messagebox.showwarning("ATENÇÃO", "Selecione a programação ativa para vincular as vendas.")
+            return
+        itens = tuple(self.tree.selection() or ())
+        if not itens:
+            marcados = []
+            for iid in (self.tree.get_children() or ()):
+                vals = self.tree.item(iid, "values") or ()
+                if len(vals) > 1 and str(vals[1]).strip() == "[x]":
+                    marcados.append(iid)
+            itens = tuple(marcados)
+        if not itens:
+            messagebox.showwarning("ATENÇÃO", "Selecione uma ou mais vendas para vincular.")
+            return
+        ids = []
+        seen = set()
+        for iid in itens:
+            vals = self.tree.item(iid, "values") or ()
+            rid = safe_int(vals[0] if vals else 0, 0)
+            if rid > 0 and rid not in seen:
+                seen.add(rid)
+                ids.append(rid)
+        if not ids:
+            messagebox.showwarning("ATENÇÃO", "Nao foi possivel identificar as vendas selecionadas.")
+            return
+
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                _call_api(
+                    "POST",
+                    "desktop/vendas-importadas/vincular",
+                    payload={"ids": ids, "codigo_programacao": prog},
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+            except Exception:
+                logging.debug("Falha ao vincular vendas via API; usando fallback local.", exc_info=True)
+                with get_db() as conn:
+                    cur = conn.cursor()
+                    cur.executemany(
+                        "UPDATE vendas_importadas SET codigo_programacao=?, selecionada=1 WHERE id=? AND IFNULL(usada,0)=0",
+                        [(prog, rid) for rid in ids],
+                    )
+        else:
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.executemany(
+                    "UPDATE vendas_importadas SET codigo_programacao=?, selecionada=1 WHERE id=? AND IFNULL(usada,0)=0",
+                    [(prog, rid) for rid in ids],
+                )
+        self.carregar()
+        self.set_status(f"STATUS: {len(ids)} venda(s) vinculada(s) à programação {prog}.")
 
     # -------------------------
     # Helpers segurança/normalização
     # -------------------------
     def _norm(self, v):
         return upper(str(v or "").strip())
+
+    def vincular_selecionadas_programacao(self):
+        prog = upper((self.cb_prog_vinculo.get() or "").strip())
+        if not prog:
+            messagebox.showwarning("ATENÇÃO", "Selecione a programação ativa para vincular as vendas.")
+            return
+
+        ids = self._collect_vinculo_target_ids()
+        if not ids:
+            messagebox.showwarning("ATENÇÃO", "Selecione uma ou mais vendas para vincular.")
+            return
+
+        rows = self._fetch_vinculo_rows_from_tree(ids)
+        if not rows:
+            messagebox.showwarning("ATENÇÃO", "Não foi possível carregar os dados das vendas selecionadas.")
+            return
+
+        snapshot = self._fetch_programacao_vinculo_snapshot(prog)
+        if not snapshot:
+            messagebox.showwarning("ATENÇÃO", f"Programação não encontrada para vínculo: {prog}.")
+            return
+
+        endereco_map = self._resolve_clientes_endereco_map([(r or {}).get("cliente") for r in rows])
+        novos_itens = [self._row_venda_to_programacao_item(row, endereco_map) for row in (rows or [])]
+        itens_merged = self._merge_programacao_items((snapshot or {}).get("itens") or [], novos_itens)
+        if not itens_merged:
+            messagebox.showwarning("ATENÇÃO", "Nenhum item válido foi preparado para a programação.")
+            return
+
+        meta = dict((snapshot or {}).get("meta") or {})
+        meta["codigo_programacao"] = prog
+        total_caixas = sum(safe_int(it.get("qnt_caixas"), 0) for it in itens_merged)
+        total_quilos = round(sum(safe_float(it.get("kg"), 0.0) for it in itens_merged), 2)
+        usada_em = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                _call_api(
+                    "POST",
+                    "desktop/rotas/upsert",
+                    payload={
+                        "codigo_programacao": prog,
+                        "data_criacao": str(meta.get("data_criacao") or usada_em),
+                        "motorista": upper(str(meta.get("motorista") or "")),
+                        "motorista_id": safe_int(meta.get("motorista_id"), 0),
+                        "motorista_codigo": upper(str(meta.get("motorista_codigo") or meta.get("codigo_motorista") or "")),
+                        "codigo_motorista": upper(str(meta.get("codigo_motorista") or meta.get("motorista_codigo") or "")),
+                        "veiculo": upper(str(meta.get("veiculo") or "")),
+                        "equipe": upper(str(meta.get("equipe") or "")),
+                        "kg_estimado": safe_float(meta.get("kg_estimado"), 0.0),
+                        "tipo_estimativa": upper(str(meta.get("tipo_estimativa") or "KG").strip()) or "KG",
+                        "caixas_estimado": safe_int(meta.get("caixas_estimado"), 0),
+                        "status": upper(str(meta.get("status") or "ATIVA").strip()) or "ATIVA",
+                        "local_rota": upper(str(meta.get("local_rota") or "")),
+                        "local_carregamento": upper(str(meta.get("local_carregamento") or "")),
+                        "adiantamento": safe_float(meta.get("adiantamento"), 0.0),
+                        "total_caixas": total_caixas,
+                        "quilos": total_quilos,
+                        "usuario_criacao": upper(str(meta.get("usuario_criacao") or "").strip()),
+                        "usuario_ultima_edicao": upper(str(meta.get("usuario_ultima_edicao") or meta.get("usuario_criacao") or "").strip()),
+                        "itens": itens_merged,
+                    },
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                _call_api(
+                    "POST",
+                    "desktop/vendas-importadas/consumir",
+                    payload={"ids": ids, "codigo_programacao": prog, "usada_em": usada_em},
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+            except Exception:
+                logging.debug("Falha ao anexar vendas diretamente à programação via API; usando fallback local.", exc_info=True)
+                self._persist_vinculo_programacao_local(meta, itens_merged, ids, usada_em)
+        else:
+            self._persist_vinculo_programacao_local(meta, itens_merged, ids, usada_em)
+
+        self.carregar()
+        self.refresh_programacoes_vinculo()
+        self.set_status(
+            f"STATUS: {len(ids)} venda(s) anexada(s) à programação {prog}. "
+            "As vendas vinculadas saíram da lista e a rota já pode refletir os clientes."
+        )
+
+    def vincular_selecionadas_programacao(self):
+        prog = upper((self.cb_prog_vinculo.get() or "").strip())
+        if not prog:
+            messagebox.showwarning("ATENCAO", "Selecione a programacao ativa para vincular as vendas.")
+            return
+
+        ids = self._collect_vinculo_target_ids()
+        if not ids:
+            messagebox.showwarning("ATENCAO", "Selecione uma ou mais vendas para vincular.")
+            return
+
+        rows = self._fetch_vinculo_rows_from_tree(ids)
+        if not rows:
+            messagebox.showwarning("ATENCAO", "Nao foi possivel carregar os dados das vendas selecionadas.")
+            return
+
+        snapshot = self._fetch_programacao_vinculo_snapshot(prog)
+        if not snapshot:
+            messagebox.showwarning("ATENCAO", f"Programacao nao encontrada para vinculo: {prog}.")
+            return
+
+        meta = dict((snapshot or {}).get("meta") or {})
+        if not self._is_programacao_vinculavel(
+            meta.get("status"),
+            meta.get("status_operacional"),
+            meta.get("prestacao_status"),
+        ):
+            messagebox.showwarning(
+                "ATENCAO",
+                f"A programacao {prog} nao pode receber vendas porque esta em rota de entregas.",
+            )
+            return
+
+        rows = self._collect_vinculo_caixas(rows)
+        if rows is None:
+            self.set_status("STATUS: Vinculo cancelado pelo usuario antes de definir as caixas.")
+            return
+
+        endereco_map = self._resolve_clientes_endereco_map([(r or {}).get("cliente") for r in rows])
+        novos_itens = [self._row_venda_to_programacao_item(row, endereco_map) for row in (rows or [])]
+        itens_merged = self._merge_programacao_items((snapshot or {}).get("itens") or [], novos_itens)
+        if not itens_merged:
+            messagebox.showwarning("ATENCAO", "Nenhum item valido foi preparado para a programacao.")
+            return
+
+        meta["codigo_programacao"] = prog
+        total_caixas = sum(safe_int(it.get("qnt_caixas"), 0) for it in itens_merged)
+        total_quilos = round(sum(safe_float(it.get("kg"), 0.0) for it in itens_merged), 2)
+        usada_em = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                _call_api(
+                    "POST",
+                    "desktop/rotas/upsert",
+                    payload={
+                        "codigo_programacao": prog,
+                        "data_criacao": str(meta.get("data_criacao") or usada_em),
+                        "motorista": upper(str(meta.get("motorista") or "")),
+                        "motorista_id": safe_int(meta.get("motorista_id"), 0),
+                        "motorista_codigo": upper(str(meta.get("motorista_codigo") or meta.get("codigo_motorista") or "")),
+                        "codigo_motorista": upper(str(meta.get("codigo_motorista") or meta.get("motorista_codigo") or "")),
+                        "veiculo": upper(str(meta.get("veiculo") or "")),
+                        "equipe": upper(str(meta.get("equipe") or "")),
+                        "kg_estimado": safe_float(meta.get("kg_estimado"), 0.0),
+                        "tipo_estimativa": upper(str(meta.get("tipo_estimativa") or "KG").strip()) or "KG",
+                        "caixas_estimado": safe_int(meta.get("caixas_estimado"), 0),
+                        "status": upper(str(meta.get("status") or "ATIVA").strip()) or "ATIVA",
+                        "local_rota": upper(str(meta.get("local_rota") or "")),
+                        "local_carregamento": upper(str(meta.get("local_carregamento") or "")),
+                        "adiantamento": safe_float(meta.get("adiantamento"), 0.0),
+                        "total_caixas": total_caixas,
+                        "quilos": total_quilos,
+                        "usuario_criacao": upper(str(meta.get("usuario_criacao") or "").strip()),
+                        "usuario_ultima_edicao": upper(str(meta.get("usuario_ultima_edicao") or meta.get("usuario_criacao") or "").strip()),
+                        "itens": itens_merged,
+                    },
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                _call_api(
+                    "POST",
+                    "desktop/vendas-importadas/consumir",
+                    payload={"ids": ids, "codigo_programacao": prog, "usada_em": usada_em},
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+            except Exception:
+                logging.debug("Falha ao anexar vendas diretamente a programacao via API; usando fallback local.", exc_info=True)
+                self._persist_vinculo_programacao_local(meta, itens_merged, ids, usada_em)
+        else:
+            self._persist_vinculo_programacao_local(meta, itens_merged, ids, usada_em)
+
+        self.carregar()
+        self.refresh_programacoes_vinculo()
+        self.set_status(
+            f"STATUS: {len(ids)} venda(s) anexada(s) a programacao {prog}. "
+            "As vendas vinculadas sairam da lista e a rota ja pode refletir os clientes."
+        )
 
     def _excel_text(self, v):
         """Normaliza valor textual vindo do Excel, removendo NaN/NaT e espaços."""
@@ -9724,6 +10691,7 @@ class ImportarVendasPage(PageBase):
                             safe_float(r.get("qnt"), 0.0),
                             r.get("cidade"),
                             r.get("vendedor"),
+                            r.get("codigo_programacao"),
                         )
                         for r in rows_api
                         if isinstance(r, dict)
@@ -9737,7 +10705,7 @@ class ImportarVendasPage(PageBase):
                     cur = conn.cursor()
                     if busca:
                         cur.execute("""
-                            SELECT id, selecionada, pedido, data_venda, cliente, nome_cliente, produto, vr_total, qnt, cidade, vendedor
+                            SELECT id, selecionada, pedido, data_venda, cliente, nome_cliente, produto, vr_total, qnt, cidade, vendedor, codigo_programacao
                             FROM vendas_importadas
                             WHERE (IFNULL(usada,0)=0)
                               AND (
@@ -9747,7 +10715,7 @@ class ImportarVendasPage(PageBase):
                         """, (f"%{busca}%", f"%{busca}%", f"%{busca}%", f"%{busca}%", f"%{busca}%"))
                     else:
                         cur.execute("""
-                            SELECT id, selecionada, pedido, data_venda, cliente, nome_cliente, produto, vr_total, qnt, cidade, vendedor
+                            SELECT id, selecionada, pedido, data_venda, cliente, nome_cliente, produto, vr_total, qnt, cidade, vendedor, codigo_programacao
                             FROM vendas_importadas
                             WHERE (IFNULL(usada,0)=0)
                             ORDER BY id DESC
@@ -10075,6 +11043,7 @@ class ProgramacaoPage(PageBase):
         self._prog_cols_checked = False  # evita PRAGMA/ALTER toda hora
         self._vendas_cols_checked = False  # evita PRAGMA/ALTER toda hora
         self._equipe_display_map = {}
+        self._veiculos_lookup = {}
         self._editing_programacao_codigo = ""
         self._loaded_venda_ids = []
 
@@ -10145,6 +11114,7 @@ class ProgramacaoPage(PageBase):
         self.cb_estimativa_tipo.bind("<<ComboboxSelected>>", lambda _e: self._on_estimativa_tipo_change())
         self.ent_kg = ttk.Entry(frm_estim, style="Field.TEntry")
         self.ent_kg.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        self.ent_kg.bind("<KeyRelease>", lambda _e: self._refresh_total_caixas_field())
         self.lbl_estimado_hint = ttk.Label(route, text="KG estimado", style="CardLabel.TLabel")
         self.lbl_estimado_hint.grid(row=2, column=1, sticky="w", pady=(6, 0))
 
@@ -11234,9 +12204,26 @@ class ProgramacaoPage(PageBase):
                     )
                     if ajudante_id:
                         equipe_display_map[upper(display)] = ajudante_id
+                veiculos_lookup = {}
+                veiculos_values = []
+                for r in (vei_resp or []):
+                    if not isinstance(r, dict):
+                        continue
+                    placa = upper((r or {}).get("placa") or "")
+                    if not placa:
+                        continue
+                    veiculos_values.append(placa)
+                    cap_raw = r.get("capacidade_cx")
+                    if cap_raw in (None, ""):
+                        cap_raw = r.get("capacidade_c")
+                    veiculos_lookup[placa] = {
+                        "placa": placa,
+                        "capacidade_cx": safe_int(cap_raw, -1),
+                    }
                 return {
                     "motoristas": valores_motoristas,
-                    "veiculos": [upper((r or {}).get("placa") or "") for r in (vei_resp or []) if isinstance(r, dict)],
+                    "veiculos": veiculos_values,
+                    "veiculos_lookup": veiculos_lookup,
                     "ajudantes": rows_ajudantes,
                     "ajudantes_mode": "ajudantes",
                     "equipe_display_map": equipe_display_map,
@@ -11264,8 +12251,29 @@ class ProgramacaoPage(PageBase):
                 cur.execute("SELECT nome FROM motoristas ORDER BY nome")
                 valores_motoristas = [r[0] for r in cur.fetchall()]
 
-            cur.execute("SELECT placa FROM veiculos ORDER BY placa")
-            valores_veiculos = [r[0] for r in cur.fetchall()]
+            cur.execute("PRAGMA table_info(veiculos)")
+            cols_vei = [str(r[1]).lower() for r in cur.fetchall()]
+            cap_col = "capacidade_cx"
+            if "capacidade_cx" not in cols_vei and "capacidade_c" in cols_vei:
+                cap_col = "capacidade_c"
+            try:
+                cur.execute(f"SELECT placa, {cap_col} FROM veiculos ORDER BY placa")
+                veiculos_rows = cur.fetchall()
+            except Exception:
+                cur.execute("SELECT placa FROM veiculos ORDER BY placa")
+                veiculos_rows = [(r[0], None) for r in cur.fetchall()]
+            valores_veiculos = []
+            veiculos_lookup = {}
+            for r in veiculos_rows:
+                placa = upper((r[0] if r else "") or "")
+                if not placa:
+                    continue
+                valores_veiculos.append(placa)
+                cap_raw = r[1] if len(r) > 1 else None
+                veiculos_lookup[placa] = {
+                    "placa": placa,
+                    "capacidade_cx": safe_int(cap_raw, -1),
+                }
 
             equipe_display_map = {}
             try:
@@ -11301,6 +12309,7 @@ class ProgramacaoPage(PageBase):
                 return {
                     "motoristas": valores_motoristas,
                     "veiculos": valores_veiculos,
+                    "veiculos_lookup": veiculos_lookup,
                     "ajudantes": rows_ajudantes,
                     "ajudantes_mode": "ajudantes",
                     "equipe_display_map": equipe_display_map,
@@ -11328,6 +12337,7 @@ class ProgramacaoPage(PageBase):
                     return {
                         "motoristas": valores_motoristas,
                         "veiculos": valores_veiculos,
+                        "veiculos_lookup": veiculos_lookup,
                         "ajudantes": rows_equipes,
                         "ajudantes_mode": "equipes",
                         "equipe_display_map": equipe_display_map,
@@ -11336,6 +12346,7 @@ class ProgramacaoPage(PageBase):
                     return {
                         "motoristas": valores_motoristas,
                         "veiculos": valores_veiculos,
+                        "veiculos_lookup": veiculos_lookup,
                         "ajudantes": [],
                         "ajudantes_mode": "ajudantes",
                         "equipe_display_map": {},
@@ -11347,6 +12358,7 @@ class ProgramacaoPage(PageBase):
         data = data or {}
         self.cb_motorista["values"] = data.get("motoristas") or []
         self.cb_veiculo["values"] = data.get("veiculos") or []
+        self._veiculos_lookup = data.get("veiculos_lookup") or {}
         self._equipe_display_map = data.get("equipe_display_map") or {}
         self._set_ajudantes_options(data.get("ajudantes") or [], mode=data.get("ajudantes_mode") or "ajudantes")
         self._apply_programacao_rankings()
@@ -11417,6 +12429,19 @@ class ProgramacaoPage(PageBase):
             self.lbl_estimado_hint.config(text="Modo CIF (Caixas estimadas)")
         else:
             self.lbl_estimado_hint.config(text="Modo FOB (KG estimado)")
+        self._refresh_total_caixas_field()
+
+    def _get_caixas_estimadas_header(self) -> int:
+        try:
+            tipo = upper((self.cb_estimativa_tipo.get() or "KG").strip())
+        except Exception:
+            tipo = "KG"
+        if tipo != "CX":
+            return 0
+        try:
+            return max(safe_int((self.ent_kg.get() or "").strip(), 0), 0)
+        except Exception:
+            return 0
 
     def _compute_total_caixas_tree(self) -> int:
         total = 0
@@ -11432,6 +12457,8 @@ class ProgramacaoPage(PageBase):
         if not hasattr(self, "ent_total_caixas_prog"):
             return
         total = self._compute_total_caixas_tree()
+        if total <= 0:
+            total = self._get_caixas_estimadas_header()
         try:
             self.ent_total_caixas_prog.config(state="normal")
             self.ent_total_caixas_prog.delete(0, "end")
@@ -11765,9 +12792,13 @@ class ProgramacaoPage(PageBase):
                 }
                 for it in (itens_from_api or [])
             ]
+        linked_ids = []
         if not itens:
             itens = fetch_programacao_itens(codigo)
+        if not itens:
+            itens, linked_ids = self._load_linked_vendas_importadas(codigo)
         self.limpar_itens()
+        self._loaded_venda_ids = list(linked_ids or [])
         for it in (itens or []):
             tree_insert_aligned(
                 self.tree,
@@ -11804,6 +12835,73 @@ class ProgramacaoPage(PageBase):
                 f"STATUS: Programação {codigo} carregada para edição. "
                 f"Status local: {status_local or status_ref or '-'}."
             )
+
+    def _load_linked_vendas_importadas(self, codigo_programacao: str):
+        codigo_programacao = upper(str(codigo_programacao or "").strip())
+        if not codigo_programacao:
+            return [], []
+        rows = []
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                resp = _call_api(
+                    "GET",
+                    f"desktop/vendas-importadas?codigo_programacao={urllib.parse.quote(codigo_programacao)}&limit=5000",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                rows = (resp or {}).get("rows") if isinstance(resp, dict) else []
+            except Exception:
+                logging.debug("Falha ao carregar vendas vinculadas via API; usando fallback local.", exc_info=True)
+        if not rows:
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    SELECT id, pedido, cliente, nome_cliente, produto, qnt, valor_unitario, vendedor
+                    FROM vendas_importadas
+                    WHERE IFNULL(usada,0)=0
+                      AND UPPER(COALESCE(codigo_programacao,''))=UPPER(?)
+                    ORDER BY id
+                    """,
+                    (codigo_programacao,),
+                )
+                rows = [
+                    {
+                        "id": safe_int(r[0], 0),
+                        "pedido": r[1],
+                        "cliente": r[2],
+                        "nome_cliente": r[3],
+                        "produto": r[4],
+                        "qnt": safe_float(r[5], 0.0),
+                        "valor_unitario": safe_float(r[6], 0.0),
+                        "vendedor": r[7],
+                    }
+                    for r in (cur.fetchall() or [])
+                ]
+        itens = []
+        ids = []
+        for r in (rows or []):
+            if not isinstance(r, dict):
+                continue
+            rid = safe_int(r.get("id"), 0)
+            if rid > 0:
+                ids.append(rid)
+            caixas = max(safe_int(r.get("qnt"), 0), 0)
+            itens.append(
+                {
+                    "cod_cliente": str(r.get("cliente") or ""),
+                    "nome_cliente": str(r.get("nome_cliente") or ""),
+                    "produto": str(r.get("produto") or ""),
+                    "endereco": "",
+                    "qnt_caixas": caixas,
+                    "kg": 0.0,
+                    "preco": safe_float(r.get("valor_unitario"), 0.0),
+                    "vendedor": str(r.get("vendedor") or ""),
+                    "pedido": str(r.get("pedido") or ""),
+                    "obs": "",
+                }
+            )
+        return itens, ids
 
     def carregar_vendas_selecionadas(self):
         """
@@ -12212,6 +13310,8 @@ class ProgramacaoPage(PageBase):
             total_caixas = sum(safe_int(v[4], 0) for v in itens_salvar)
         except Exception:
             total_caixas = 0
+        if total_caixas <= 0:
+            total_caixas = self._get_caixas_estimadas_header()
         try:
             total_quilos = round(sum(safe_float(v[5], 0.0) for v in itens_salvar), 2)
         except Exception:
@@ -12368,6 +13468,12 @@ class ProgramacaoPage(PageBase):
                 except Exception:
                     cap_col = "capacidade_cx"
 
+                veiculo_info = self._veiculos_lookup.get(upper(veiculo)) or {}
+                if not veiculo_info and veiculo:
+                    veiculo_info = {
+                        "placa": upper(veiculo),
+                        "capacidade_cx": -1,
+                    }
                 try:
                     cur.execute(
                         f"SELECT {cap_col} FROM veiculos WHERE UPPER(placa)=UPPER(?) LIMIT 1",
@@ -12378,22 +13484,24 @@ class ProgramacaoPage(PageBase):
                     vrow = None
 
                 if not vrow:
-                    messagebox.showwarning(
-                        "ATENÇÃO",
-                        f"Veiculo nao encontrado no cadastro: {veiculo}.",
-                    )
-                    return
-
-                capacidade_cx = safe_int(vrow[0], -1)
+                    capacidade_cx = safe_int(veiculo_info.get("capacidade_cx"), -1)
+                    if not veiculo_info:
+                        messagebox.showwarning(
+                            "ATENÇÃO",
+                            f"Veiculo nao encontrado no cadastro: {veiculo}.",
+                        )
+                        return
+                else:
+                    capacidade_cx = safe_int(vrow[0], -1)
                 if capacidade_cx < 0:
-                    messagebox.showwarning(
-                        "ATENÇÃO",
-                        f"Capacidade (CX) invalida para o veiculo {veiculo}. Ajuste no cadastro de veiculos."
+                    logging.warning(
+                        "Capacidade (CX) indisponivel para o veiculo %s; seguindo sem validacao de capacidade.",
+                        veiculo,
                     )
-                    return
+                    capacidade_cx = -1
 
                 caixas_para_validar = caixas_estimado if tipo_estimativa == "CX" else total_caixas
-                if caixas_para_validar > capacidade_cx:
+                if capacidade_cx >= 0 and caixas_para_validar > capacidade_cx:
                     messagebox.showwarning(
                         "ATENÇÃO",
                         f"Capacidade excedida para o veiculo {veiculo}.\n\n"

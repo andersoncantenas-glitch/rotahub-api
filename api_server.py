@@ -7386,10 +7386,12 @@ def criar_transferencia(
 @app.get("/desktop/vendas-importadas")
 def desktop_listar_vendas_importadas(
     busca: str = Query("", description="Filtro textual"),
+    codigo_programacao: str = Query("", description="Filtrar por programacao vinculada"),
     limit: int = Query(5000, ge=1, le=20000),
     _ok: bool = Depends(_require_desktop_secret),
 ):
     term = (busca or "").strip()
+    codigo_filtro = str(codigo_programacao or "").strip().upper()
     like = f"%{term}%"
     with get_conn() as conn:
         ensure_core_schema(conn)
@@ -7401,16 +7403,18 @@ def desktop_listar_vendas_importadas(
                        COALESCE(data_venda,'') AS data_venda, COALESCE(cliente,'') AS cliente,
                        COALESCE(nome_cliente,'') AS nome_cliente, COALESCE(produto,'') AS produto,
                        COALESCE(vr_total,0) AS vr_total, COALESCE(qnt,0) AS qnt,
-                       COALESCE(cidade,'') AS cidade, COALESCE(vendedor,'') AS vendedor
+                       COALESCE(cidade,'') AS cidade, COALESCE(vendedor,'') AS vendedor,
+                       COALESCE(codigo_programacao,'') AS codigo_programacao
                 FROM vendas_importadas
                 WHERE IFNULL(usada,0)=0
+                  AND (?='' OR UPPER(COALESCE(codigo_programacao,''))=?)
                   AND (
                     pedido LIKE ? OR cliente LIKE ? OR nome_cliente LIKE ? OR vendedor LIKE ? OR produto LIKE ?
                   )
                 ORDER BY id DESC
                 LIMIT ?
                 """,
-                (like, like, like, like, like, int(limit)),
+                (codigo_filtro, codigo_filtro, like, like, like, like, like, int(limit)),
             )
         else:
             cur.execute(
@@ -7419,13 +7423,15 @@ def desktop_listar_vendas_importadas(
                        COALESCE(data_venda,'') AS data_venda, COALESCE(cliente,'') AS cliente,
                        COALESCE(nome_cliente,'') AS nome_cliente, COALESCE(produto,'') AS produto,
                        COALESCE(vr_total,0) AS vr_total, COALESCE(qnt,0) AS qnt,
-                       COALESCE(cidade,'') AS cidade, COALESCE(vendedor,'') AS vendedor
+                       COALESCE(cidade,'') AS cidade, COALESCE(vendedor,'') AS vendedor,
+                       COALESCE(codigo_programacao,'') AS codigo_programacao
                 FROM vendas_importadas
                 WHERE IFNULL(usada,0)=0
+                  AND (?='' OR UPPER(COALESCE(codigo_programacao,''))=?)
                 ORDER BY id DESC
                 LIMIT ?
                 """,
-                (int(limit),),
+                (codigo_filtro, codigo_filtro, int(limit)),
             )
         out = []
         for r in (cur.fetchall() or []):
@@ -7442,6 +7448,7 @@ def desktop_listar_vendas_importadas(
                     "qnt": float(r["qnt"] or 0.0),
                     "cidade": str(r["cidade"] or ""),
                     "vendedor": str(r["vendedor"] or ""),
+                    "codigo_programacao": str((r["codigo_programacao"] if "codigo_programacao" in r.keys() else "") or "").strip().upper(),
                 }
             )
     return {"ok": True, "rows": out}
@@ -7616,6 +7623,45 @@ def desktop_consumir_vendas_importadas(
         )
         updated = int(cur.rowcount or 0)
     return {"ok": True, "updated": updated}
+
+
+@app.post("/desktop/vendas-importadas/vincular")
+def desktop_vincular_vendas_importadas(
+    payload: Dict[str, Any],
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    ids_raw = payload.get("ids") if isinstance(payload, dict) else []
+    codigo_programacao = str((payload or {}).get("codigo_programacao") or "").strip().upper()
+    if not codigo_programacao:
+        raise HTTPException(status_code=400, detail="codigo_programacao obrigatorio.")
+    if not isinstance(ids_raw, list):
+        ids_raw = []
+
+    ids: List[int] = []
+    for x in ids_raw:
+        try:
+            v = int(x)
+        except Exception:
+            continue
+        if v > 0:
+            ids.append(v)
+    if not ids:
+        return {"ok": True, "updated": 0}
+
+    with get_conn() as conn:
+        ensure_core_schema(conn)
+        cur = conn.cursor()
+        cur.executemany(
+            """
+            UPDATE vendas_importadas
+               SET codigo_programacao=?,
+                   selecionada=1
+             WHERE id=? AND IFNULL(usada,0)=0
+            """,
+            [(codigo_programacao, rid) for rid in ids],
+        )
+        updated = int(cur.rowcount or 0)
+    return {"ok": True, "updated": updated, "codigo_programacao": codigo_programacao}
 
 
 @app.delete("/desktop/vendas-importadas")
