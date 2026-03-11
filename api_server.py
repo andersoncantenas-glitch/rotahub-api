@@ -402,7 +402,7 @@ def _decorate_rota_row(row: Dict[str, Any], cur: Optional[sqlite3.Cursor] = None
         tipo_estimativa = "KG"
     row["tipo_estimativa"] = tipo_estimativa
     row["unidade_estimativa"] = "CAIXAS" if tipo_estimativa == "CX" else "KG"
-    row["tipo_operacao"] = "CIF" if tipo_estimativa == "CX" else "FOB"
+    row["tipo_operacao"] = "FOB" if tipo_estimativa == "CX" else "CIF"
     if tipo_estimativa == "CX":
         try:
             row["estimativa_valor"] = int(float(row.get("caixas_estimado") or 0))
@@ -1765,9 +1765,14 @@ class DesktopRotaUpsertIn(BaseModel):
     status: Optional[str] = "ATIVA"
     local_rota: Optional[str] = None
     local_carregamento: Optional[str] = None
+    local_carregado: Optional[str] = None
     adiantamento: Optional[float] = 0.0
     total_caixas: Optional[int] = 0
     quilos: Optional[float] = 0.0
+    nf_kg: Optional[float] = None
+    nf_preco: Optional[float] = None
+    nf_caixas: Optional[int] = None
+    caixas_carregadas: Optional[int] = None
     usuario_criacao: Optional[str] = None
     usuario_ultima_edicao: Optional[str] = None
     itens: List[DesktopRotaItemIn] = Field(default_factory=list)
@@ -2586,6 +2591,14 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
         equipe = str(payload.equipe or "").strip().upper()
         status = str(payload.status or "ATIVA").strip().upper() or "ATIVA"
         tipo_estimativa = str(payload.tipo_estimativa or "KG").strip().upper()
+        local_carregamento = str(payload.local_carregamento or payload.local_carregado or "").strip().upper()
+        nf_kg = float(payload.nf_kg or 0.0)
+        nf_preco = float(payload.nf_preco or 0.0)
+        caixas_carregadas = int(
+            payload.caixas_carregadas
+            if payload.caixas_carregadas is not None
+            else (payload.nf_caixas or 0)
+        )
         if tipo_estimativa not in ("KG", "CX"):
             tipo_estimativa = "KG"
 
@@ -2682,7 +2695,10 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
                 vals.append(str(payload.local_rota or "").strip().upper())
             if "local_carregamento" in cols_prog:
                 sets.append("local_carregamento=?")
-                vals.append(str(payload.local_carregamento or "").strip().upper())
+                vals.append(local_carregamento)
+            if "local_carregado" in cols_prog:
+                sets.append("local_carregado=?")
+                vals.append(local_carregamento)
             if "adiantamento" in cols_prog:
                 sets.append("adiantamento=?")
                 vals.append(float(payload.adiantamento or 0.0))
@@ -2695,6 +2711,27 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
             if "quilos" in cols_prog:
                 sets.append("quilos=?")
                 vals.append(float(payload.quilos or 0.0))
+            if "nf_kg" in cols_prog and nf_kg > 0:
+                sets.append("nf_kg=?")
+                vals.append(nf_kg)
+            if "kg_nf" in cols_prog and nf_kg > 0:
+                sets.append("kg_nf=?")
+                vals.append(nf_kg)
+            if "nf_preco" in cols_prog and nf_preco > 0:
+                sets.append("nf_preco=?")
+                vals.append(nf_preco)
+            if "preco_nf" in cols_prog and nf_preco > 0:
+                sets.append("preco_nf=?")
+                vals.append(nf_preco)
+            if "caixas_carregadas" in cols_prog and caixas_carregadas > 0:
+                sets.append("caixas_carregadas=?")
+                vals.append(caixas_carregadas)
+            if "qnt_cx_carregada" in cols_prog and caixas_carregadas > 0:
+                sets.append("qnt_cx_carregada=?")
+                vals.append(caixas_carregadas)
+            if "nf_caixas" in cols_prog and caixas_carregadas > 0:
+                sets.append("nf_caixas=?")
+                vals.append(caixas_carregadas)
             if "usuario_ultima_edicao" in cols_prog:
                 sets.append("usuario_ultima_edicao=?")
                 vals.append(str(payload.usuario_ultima_edicao or payload.usuario_criacao or "").strip().upper())
@@ -2724,7 +2761,10 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
                 values.append(str(payload.local_rota or "").strip().upper())
             if "local_carregamento" in cols_prog:
                 col_names.append("local_carregamento")
-                values.append(str(payload.local_carregamento or "").strip().upper())
+                values.append(local_carregamento)
+            if "local_carregado" in cols_prog:
+                col_names.append("local_carregado")
+                values.append(local_carregamento)
             if "adiantamento" in cols_prog:
                 col_names.append("adiantamento")
                 values.append(float(payload.adiantamento or 0.0))
@@ -2737,6 +2777,27 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
             if "quilos" in cols_prog:
                 col_names.append("quilos")
                 values.append(float(payload.quilos or 0.0))
+            if "nf_kg" in cols_prog:
+                col_names.append("nf_kg")
+                values.append(nf_kg if nf_kg > 0 else None)
+            if "kg_nf" in cols_prog:
+                col_names.append("kg_nf")
+                values.append(nf_kg if nf_kg > 0 else None)
+            if "nf_preco" in cols_prog:
+                col_names.append("nf_preco")
+                values.append(nf_preco if nf_preco > 0 else None)
+            if "preco_nf" in cols_prog:
+                col_names.append("preco_nf")
+                values.append(nf_preco if nf_preco > 0 else None)
+            if "caixas_carregadas" in cols_prog:
+                col_names.append("caixas_carregadas")
+                values.append(caixas_carregadas if caixas_carregadas > 0 else 0)
+            if "qnt_cx_carregada" in cols_prog:
+                col_names.append("qnt_cx_carregada")
+                values.append(caixas_carregadas if caixas_carregadas > 0 else 0)
+            if "nf_caixas" in cols_prog:
+                col_names.append("nf_caixas")
+                values.append(caixas_carregadas if caixas_carregadas > 0 else 0)
             if "usuario_criacao" in cols_prog:
                 col_names.append("usuario_criacao")
                 values.append(str(payload.usuario_criacao or "").strip().upper())
@@ -6216,7 +6277,7 @@ def salvar_carregamento(
         if tipo_estimativa == "KG" and nf_kg <= 0 and kg_carregado <= 0:
             raise HTTPException(
                 status_code=400,
-                detail="FOB exige peso informado (nf_kg ou kg_carregado maior que zero).",
+                detail="CIF exige peso informado (nf_kg ou kg_carregado maior que zero).",
             )
 
         sets = []

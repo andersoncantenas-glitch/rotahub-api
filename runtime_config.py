@@ -252,7 +252,9 @@ def validate_runtime_guardrails(config: AppConfig) -> None:
 
 def load_app_config(app_kind: str = "desktop") -> AppConfig:
     is_frozen = getattr(sys, "frozen", False)
-    local_desktop_mode = app_kind == "desktop" and not is_frozen
+    custom_config_requested = bool(os.environ.get("ROTA_CONFIG_FILE", "").strip())
+    local_desktop_mode = app_kind == "desktop" and not is_frozen and not custom_config_requested
+    local_desktop_custom_mode = app_kind == "desktop" and not is_frozen and custom_config_requested
     desktop_locked_runtime = app_kind == "desktop" and is_frozen
     app_dir = os.path.dirname(os.path.abspath(__file__))
     resource_dir = getattr(sys, "_MEIPASS", app_dir)
@@ -268,7 +270,7 @@ def load_app_config(app_kind: str = "desktop") -> AppConfig:
     file_config = _read_json(config_file)
 
     def env_value(name: str) -> Optional[str]:
-        if local_desktop_mode or desktop_locked_runtime:
+        if local_desktop_mode or local_desktop_custom_mode or desktop_locked_runtime:
             return None
         return os.environ.get(name)
 

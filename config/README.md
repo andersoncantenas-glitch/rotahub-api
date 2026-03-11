@@ -27,3 +27,10 @@ Bootstrap do servidor:
 - cria/atualiza o schema do banco publicado
 - remove dados operacionais existentes
 - preserva somente o usuario `ADMIN`
+
+Modo opcional de integracao local:
+- execute `powershell -ExecutionPolicy Bypass -File .\scripts\run_desktop_integration_local.ps1`
+- usa `config/desktop.runtime.integration.local.json`
+- grava em `.rotahub_runtime/desktop/staging/local-integration/rotahub_integration.db`
+- sincroniza somente com a API local `http://127.0.0.1:8000`
+- nao altera o comportamento padrao do `python main.py`

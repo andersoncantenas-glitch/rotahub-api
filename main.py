@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 # ==========================
 # ===== INCIO DA PARTE 1 =====
 # ==========================
@@ -1870,7 +1870,7 @@ def db_init():
         safe_add_column(cur, "programacoes", "veiculo", "TEXT")
         safe_add_column(cur, "programacoes", "equipe", "TEXT")
         safe_add_column(cur, "programacoes", "kg_estimado", "REAL")
-        # Regra FOB/CIF: estimativa pode ser por KG (FOB) ou por CX (CIF)
+        # Regra FOB/CIF: estimativa pode ser por KG (CIF) ou por CX (FOB)
         safe_add_column(cur, "programacoes", "tipo_estimativa", "TEXT DEFAULT 'KG'")
         safe_add_column(cur, "programacoes", "caixas_estimado", "INTEGER DEFAULT 0")
         # Auditoria de criação/edição da programação
@@ -2650,6 +2650,12 @@ class CadastroCRUD(ttk.Frame):
         meta["codigo_programacao"] = prog
         total_caixas = sum(safe_int(it.get("qnt_caixas"), 0) for it in itens_merged)
         total_quilos = round(sum(safe_float(it.get("kg"), 0.0) for it in itens_merged), 2)
+        if total_caixas <= 0:
+            total_caixas = max(safe_int(meta.get("caixas_estimado"), 0), 0)
+        if total_quilos <= 0 and upper(str(meta.get("tipo_estimativa") or "KG").strip()) == "KG":
+            total_quilos = round(max(safe_float(meta.get("kg_estimado"), 0.0), 0.0), 2)
+        nf_kg_sync = total_quilos if upper(str(meta.get("tipo_estimativa") or "KG").strip()) == "KG" else 0.0
+        nf_caixas_sync = max(safe_int(total_caixas, 0), 0)
         usada_em = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
 
@@ -2673,9 +2679,13 @@ class CadastroCRUD(ttk.Frame):
                         "status": upper(str(meta.get("status") or "ATIVA").strip()) or "ATIVA",
                         "local_rota": upper(str(meta.get("local_rota") or "")),
                         "local_carregamento": upper(str(meta.get("local_carregamento") or "")),
+                        "local_carregado": upper(str(meta.get("local_carregamento") or "")),
                         "adiantamento": safe_float(meta.get("adiantamento"), 0.0),
                         "total_caixas": total_caixas,
                         "quilos": total_quilos,
+                        "nf_kg": nf_kg_sync,
+                        "nf_caixas": nf_caixas_sync,
+                        "caixas_carregadas": nf_caixas_sync,
                         "usuario_criacao": upper(str(meta.get("usuario_criacao") or "").strip()),
                         "usuario_ultima_edicao": upper(str(meta.get("usuario_ultima_edicao") or meta.get("usuario_criacao") or "").strip()),
                         "itens": itens_merged,
@@ -2736,6 +2746,12 @@ class CadastroCRUD(ttk.Frame):
         meta["codigo_programacao"] = prog
         total_caixas = sum(safe_int(it.get("qnt_caixas"), 0) for it in itens_merged)
         total_quilos = round(sum(safe_float(it.get("kg"), 0.0) for it in itens_merged), 2)
+        if total_caixas <= 0:
+            total_caixas = max(safe_int(meta.get("caixas_estimado"), 0), 0)
+        if total_quilos <= 0 and upper(str(meta.get("tipo_estimativa") or "KG").strip()) == "KG":
+            total_quilos = round(max(safe_float(meta.get("kg_estimado"), 0.0), 0.0), 2)
+        nf_kg_sync = total_quilos if upper(str(meta.get("tipo_estimativa") or "KG").strip()) == "KG" else 0.0
+        nf_caixas_sync = max(safe_int(total_caixas, 0), 0)
         usada_em = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
 
@@ -2759,9 +2775,13 @@ class CadastroCRUD(ttk.Frame):
                         "status": upper(str(meta.get("status") or "ATIVA").strip()) or "ATIVA",
                         "local_rota": upper(str(meta.get("local_rota") or "")),
                         "local_carregamento": upper(str(meta.get("local_carregamento") or "")),
+                        "local_carregado": upper(str(meta.get("local_carregamento") or "")),
                         "adiantamento": safe_float(meta.get("adiantamento"), 0.0),
                         "total_caixas": total_caixas,
                         "quilos": total_quilos,
+                        "nf_kg": nf_kg_sync,
+                        "nf_caixas": nf_caixas_sync,
+                        "caixas_carregadas": nf_caixas_sync,
                         "usuario_criacao": upper(str(meta.get("usuario_criacao") or "").strip()),
                         "usuario_ultima_edicao": upper(str(meta.get("usuario_ultima_edicao") or meta.get("usuario_criacao") or "").strip()),
                         "itens": itens_merged,
@@ -4055,7 +4075,7 @@ class CadastroCRUD(ttk.Frame):
             filetypes=[("Excel", "*.xls *.xlsx")]
         )
         if not path:
-            return
+            return None
 
         if not (require_pandas() and require_excel_support(path)):
             return
@@ -4391,7 +4411,7 @@ class Sidebar(ttk.Frame):
         ttk.Label(top, text="ROTAHUB DESKTOP", style="SidebarLogo.TLabel").pack(anchor="w")
         ttk.Label(top, text="Centralizando sua operacao do inicio ao fim.", style="SidebarSmall.TLabel").pack(anchor="w", pady=(2, 0))
 
-        ttk.Separator(self).pack(fill="x", padx=14, pady=(8, 12))
+        ttk.Separator(self).pack(fill="x", padx=12, pady=(8, 12))
 
         # âÅâ€œââ‚¬¦ Menu com scroll (evita quebra/sumir item em telas pequenas)
         wrap = ttk.Frame(self, style="Sidebar.TFrame")
@@ -9257,7 +9277,7 @@ class ClientesImportPage(ttk.Frame):
             filetypes=[("Excel", "*.xls *.xlsx")]
         )
         if not path:
-            return
+            return None
 
         if not (require_pandas() and require_excel_support(path)):
             return
@@ -11075,6 +11095,7 @@ class ProgramacaoPage(PageBase):
         control.grid_columnconfigure(2, weight=2, minsize=170)
         control.grid_columnconfigure(3, weight=2, minsize=180)
         control.grid_columnconfigure(4, weight=2, minsize=180)
+        control.grid_columnconfigure(5, weight=2, minsize=180)
 
         ttk.Label(team, text="Motorista", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w")
         self.cb_motorista = ttk.Combobox(team, state="readonly")
@@ -11158,7 +11179,14 @@ class ProgramacaoPage(PageBase):
             style="Ghost.TButton",
             command=self.carregar_programacao_para_edicao
         )
-        self.btn_editar_prog.grid(row=1, column=4, sticky="ew")
+        self.btn_editar_prog.grid(row=1, column=4, sticky="ew", padx=(0, 8))
+        self.btn_excluir_prog = ttk.Button(
+            control,
+            text="EXCLUIR PROGRAMAÇÃO",
+            style="Danger.TButton",
+            command=self.excluir_programacao,
+        )
+        self.btn_excluir_prog.grid(row=1, column=5, sticky="ew")
 
         rank_wrap = ttk.Frame(card, style="Card.TFrame")
         rank_wrap.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
@@ -12426,9 +12454,9 @@ class ProgramacaoPage(PageBase):
     def _on_estimativa_tipo_change(self):
         tipo = upper((self.cb_estimativa_tipo.get() if hasattr(self, "cb_estimativa_tipo") else "KG") or "KG")
         if tipo == "CX":
-            self.lbl_estimado_hint.config(text="Modo CIF (Caixas estimadas)")
+            self.lbl_estimado_hint.config(text="Modo FOB (Caixas estimadas)")
         else:
-            self.lbl_estimado_hint.config(text="Modo FOB (KG estimado)")
+            self.lbl_estimado_hint.config(text="Modo CIF (KG estimado)")
         self._refresh_total_caixas_field()
 
     def _get_caixas_estimadas_header(self) -> int:
@@ -12494,6 +12522,10 @@ class ProgramacaoPage(PageBase):
     def _status_permite_edicao_programacao(self, status_raw: str) -> bool:
         st = upper(str(status_raw or "").strip())
         return st in {"", "ATIVA", "PENDENTE", "ABERTA", "PROGRAMADA"}
+
+    def _status_permite_exclusao_programacao(self, status_raw: str) -> bool:
+        st = upper(str(status_raw or "").strip())
+        return st in {"", "ATIVA"}
 
     def _obter_status_programacao_para_edicao(self, codigo: str, status_local: str = ""):
         codigo = upper(str(codigo or "").strip())
@@ -12656,21 +12688,21 @@ class ProgramacaoPage(PageBase):
                 cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
 
                 local_expr = "COALESCE(local_rota,'')" if "local_rota" in cols_prog else ("COALESCE(tipo_rota,'')" if "tipo_rota" in cols_prog else "''")
-                carreg_cols = ["COD CLIENTE", "NOME CLIENTE", "PRODUTO", "ENDERECO", "CAIXAS", "KG", "PRECO", "VENDEDOR", "PEDIDO", "OBS"]
-                if carreg_cols:
-                    carreg_expr = "COALESCE(" + ", ".join(carreg_cols) + ", '')"
-                else:
-                    carreg_expr = "''"
-                adiant_cols = ["COD CLIENTE", "NOME CLIENTE", "PRODUTO", "ENDERECO", "CAIXAS", "KG", "PRECO", "VENDEDOR", "PEDIDO", "OBS"]
-                if adiant_cols:
-                    adiant_expr = "COALESCE(" + ", ".join(adiant_cols) + ", 0)"
-                else:
-                    adiant_expr = "0"
-                mot_cod_cols = ["COD CLIENTE", "NOME CLIENTE", "PRODUTO", "ENDERECO", "CAIXAS", "KG", "PRECO", "VENDEDOR", "PEDIDO", "OBS"]
-                if mot_cod_cols:
-                    mot_cod_expr = "COALESCE(" + ", ".join(mot_cod_cols) + ", '')"
-                else:
-                    mot_cod_expr = "''"
+                carreg_expr = (
+                    "COALESCE(local_carregamento,'')"
+                    if "local_carregamento" in cols_prog
+                    else ("COALESCE(granja_carregada,'')" if "granja_carregada" in cols_prog else ("COALESCE(local_carregado,'')" if "local_carregado" in cols_prog else "''"))
+                )
+                adiant_expr = (
+                    "COALESCE(adiantamento, 0)"
+                    if "adiantamento" in cols_prog
+                    else ("COALESCE(adiantamento_rota, 0)" if "adiantamento_rota" in cols_prog else "0")
+                )
+                mot_cod_expr = (
+                    "COALESCE(motorista_codigo, '')"
+                    if "motorista_codigo" in cols_prog
+                    else ("COALESCE(codigo_motorista, '')" if "codigo_motorista" in cols_prog else "''")
+                )
                 mot_id_expr = "COALESCE(motorista_id, 0)" if "motorista_id" in cols_prog else "0"
                 tipo_estim_expr = "COALESCE(tipo_estimativa, 'KG')" if "tipo_estimativa" in cols_prog else "'KG'"
                 caixas_estim_expr = "COALESCE(caixas_estimado, 0)" if "caixas_estimado" in cols_prog else "0"
@@ -12859,8 +12891,7 @@ class ProgramacaoPage(PageBase):
                     """
                     SELECT id, pedido, cliente, nome_cliente, produto, qnt, valor_unitario, vendedor
                     FROM vendas_importadas
-                    WHERE IFNULL(usada,0)=0
-                      AND UPPER(COALESCE(codigo_programacao,''))=UPPER(?)
+                    WHERE UPPER(COALESCE(codigo_programacao,''))=UPPER(?)
                     ORDER BY id
                     """,
                     (codigo_programacao,),
@@ -12902,6 +12933,121 @@ class ProgramacaoPage(PageBase):
                 }
             )
         return itens, ids
+
+    def excluir_programacao(self):
+        codigo = upper((self.ent_codigo.get() or "").strip())
+        if not codigo:
+            codigo = upper(
+                simple_input(
+                    "Excluir Programação",
+                    "Informe o código da programação para excluir:",
+                    master=self.app,
+                    allow_empty=False,
+                )
+                or ""
+            )
+        if not codigo:
+            return
+
+        status_ref, status_api, status_local = self._obter_status_programacao_para_edicao(codigo)
+        if not self._status_permite_exclusao_programacao(status_ref):
+            messagebox.showwarning(
+                "ATENÇÃO",
+                f"A programação {codigo} está com status {status_api or status_local or status_ref or '-'}.\n"
+                "Somente programações ATIVAS podem ser excluídas.",
+            )
+            return
+
+        if not messagebox.askyesno(
+            "Excluir Programação",
+            f"Tem certeza que deseja excluir a programação {codigo}?\n\nEssa ação não pode ser desfeita.",
+        ):
+            return
+
+        escolha_vendas = messagebox.askyesnocancel(
+            "Vendas Vinculadas",
+            "O que deseja fazer com as vendas desta programação?\n\n"
+            "Sim: voltar as vendas para a tela Importar Vendas.\n"
+            "Não: excluir as vendas também.\n"
+            "Cancelar: abortar exclusão.",
+        )
+        if escolha_vendas is None:
+            return
+
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        api_delete_error = None
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                _call_api(
+                    "DELETE",
+                    f"desktop/rotas/{urllib.parse.quote(codigo)}",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+            except Exception as exc:
+                api_delete_error = exc
+                logging.debug("Falha ao excluir programacao na API; aplicando exclusao local.", exc_info=True)
+
+        try:
+            with get_db() as conn:
+                cur = conn.cursor()
+
+                if escolha_vendas:
+                    cur.execute(
+                        """
+                        UPDATE vendas_importadas
+                        SET usada=0,
+                            usada_em='',
+                            codigo_programacao='',
+                            selecionada=0
+                        WHERE UPPER(COALESCE(codigo_programacao,''))=UPPER(?)
+                        """,
+                        (codigo,),
+                    )
+                else:
+                    cur.execute(
+                        "DELETE FROM vendas_importadas WHERE UPPER(COALESCE(codigo_programacao,''))=UPPER(?)",
+                        (codigo,),
+                    )
+
+                for tabela in (
+                    "programacao_itens_log",
+                    "programacao_itens_controle",
+                    "programacao_itens",
+                    "recebimentos",
+                    "despesas",
+                ):
+                    try:
+                        cur.execute(f"DELETE FROM {tabela} WHERE UPPER(COALESCE(codigo_programacao,''))=UPPER(?)", (codigo,))
+                    except Exception:
+                        logging.debug("Falha ao excluir registros da tabela %s para a programacao %s", tabela, codigo, exc_info=True)
+
+                cur.execute(
+                    "DELETE FROM programacoes WHERE UPPER(COALESCE(codigo_programacao,''))=UPPER(?)",
+                    (codigo,),
+                )
+
+            self._reset_form_after_save()
+            self._editing_programacao_codigo = ""
+            self._refresh_programacao_status_badge()
+            if hasattr(self.app, "refresh_programacao_comboboxes"):
+                self.app.refresh_programacao_comboboxes()
+            try:
+                page_imp = self.app.pages.get("ImportarVendas") if hasattr(self.app, "pages") else None
+                if page_imp and hasattr(page_imp, "carregar"):
+                    page_imp.carregar()
+            except Exception:
+                logging.debug("Falha ao atualizar tela ImportarVendas apos exclusao da programacao.", exc_info=True)
+
+            if api_delete_error:
+                messagebox.showwarning(
+                    "Exclusão Parcial",
+                    f"A programação {codigo} foi excluída localmente, mas houve falha ao remover na API.\n\nDetalhe: {api_delete_error}",
+                )
+            else:
+                messagebox.showinfo("OK", f"Programação {codigo} excluída com sucesso.")
+            self.set_status(f"STATUS: Programação {codigo} excluída.")
+        except Exception as e:
+            messagebox.showerror("ERRO", f"Erro ao excluir programação {codigo}: {e}")
 
     def carregar_vendas_selecionadas(self):
         """
@@ -13249,11 +13395,11 @@ class ProgramacaoPage(PageBase):
             return
         if tipo_estimativa == "CX":
             if caixas_estimado <= 0:
-                messagebox.showwarning("ATENÇÃO", "Informe a estimativa em caixas (CX) para CIF.")
+                messagebox.showwarning("ATENÇÃO", "Informe a estimativa em caixas (CX) para FOB.")
                 return
         else:
             if kg_estimado <= 0:
-                messagebox.showwarning("ATENÇÃO", "Informe o KG estimado para FOB.")
+                messagebox.showwarning("ATENÇÃO", "Informe o KG estimado para CIF.")
                 return
 
         if not motorista_nome or not veiculo:
@@ -13312,10 +13458,19 @@ class ProgramacaoPage(PageBase):
             total_caixas = 0
         if total_caixas <= 0:
             total_caixas = self._get_caixas_estimadas_header()
+        if total_caixas <= 0 and tipo_estimativa == "CX":
+            total_caixas = max(safe_int(caixas_estimado, 0), 0)
         try:
             total_quilos = round(sum(safe_float(v[5], 0.0) for v in itens_salvar), 2)
         except Exception:
             total_quilos = 0.0
+        if total_quilos <= 0 and tipo_estimativa == "KG":
+            total_quilos = round(max(safe_float(kg_estimado, 0.0), 0.0), 2)
+
+        caixas_programadas_sync = max(safe_int(total_caixas, 0), 0)
+        kg_programado_sync = round(max(safe_float(total_quilos, 0.0), 0.0), 2)
+        nf_kg_sync = kg_programado_sync if tipo_estimativa == "KG" else 0.0
+        nf_caixas_sync = caixas_programadas_sync if caixas_programadas_sync > 0 else max(safe_int(caixas_estimado, 0), 0)
 
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
         if desktop_secret and is_desktop_api_sync_enabled():
@@ -13406,9 +13561,13 @@ class ProgramacaoPage(PageBase):
                         "status": "ATIVA",
                         "local_rota": local_rota,
                         "local_carregamento": local_carreg,
+                        "local_carregado": local_carreg,
                         "adiantamento": safe_float(adiantamento_val, 0.0),
-                        "total_caixas": safe_int(total_caixas, 0),
-                        "quilos": safe_float(total_quilos, 0.0),
+                        "total_caixas": caixas_programadas_sync,
+                        "quilos": kg_programado_sync,
+                        "nf_kg": nf_kg_sync,
+                        "nf_caixas": nf_caixas_sync,
+                        "caixas_carregadas": nf_caixas_sync,
                         "usuario_criacao": usuario_logado,
                         "usuario_ultima_edicao": usuario_logado,
                         "itens": itens_payload,
@@ -13951,20 +14110,30 @@ class ProgramacaoPage(PageBase):
             return
 
         if messagebox.askyesno("PDF", "Deseja gerar o PDF da programação agora?\n\n(Pronto para impressão A4)"):
-            self.gerar_pdf_programacao_salva(
+            self._abrir_previsualizacao_programacao_salva(
                 codigo, motorista_nome, veiculo, equipe, kg_estimado, tipo_estimativa, caixas_estimado, usuario_logado
             )
 
-        if messagebox.askyesno("Romaneios", "Deseja gerar os romaneios de entrega desta programacao agora?"):
-            self.imprimir_romaneios_programacao()
 
         self._reset_form_after_save()
 
     def gerar_pdf_programacao_salva(
-        self, codigo, motorista, veiculo, equipe, kg_estimado, tipo_estimativa="KG", caixas_estimado=0, usuario_criacao=""
+        self,
+        codigo,
+        motorista,
+        veiculo,
+        equipe,
+        kg_estimado,
+        tipo_estimativa="KG",
+        caixas_estimado=0,
+        usuario_criacao="",
+        perguntar_romaneios=False,
+        itens_override=None,
+        usuario_edicao_override="",
+        data_emissao_override="",
     ):
         if not require_reportlab():
-            return
+            return None
         path = filedialog.asksaveasfilename(
             title="Salvar PDF da Programação",
             defaultextension=".pdf",
@@ -13972,24 +14141,26 @@ class ProgramacaoPage(PageBase):
             initialfile=f"PROGRAMACAO_{codigo}.pdf"
         )
         if not path:
-            return
+            return None
 
-        itens = []
-        for iid in self.tree.get_children():
-            itens.append(self._get_row_values(iid))
+        itens = list(itens_override or [])
+        if not itens:
+            for iid in self.tree.get_children():
+                itens.append(self._get_row_values(iid))
 
         if not itens:
             messagebox.showwarning("ATENÇÃO", "Sem itens na programação.")
             return
 
         try:
-            usuario_edicao = ""
+            usuario_edicao = upper(str(usuario_edicao_override or "").strip())
             try:
                 meta_prog = self._buscar_meta_programacao(codigo)
                 usuario_criacao = upper(str(meta_prog.get("usuario_criacao") or usuario_criacao or "").strip())
-                usuario_edicao = upper(str(meta_prog.get("usuario_ultima_edicao") or "").strip())
+                usuario_edicao = upper(str(meta_prog.get("usuario_ultima_edicao") or usuario_edicao or "").strip())
             except Exception:
                 usuario_criacao = upper((usuario_criacao or "").strip())
+                usuario_edicao = upper((usuario_edicao or "").strip())
 
             c = canvas.Canvas(path, pagesize=A4)
             w, h = A4
@@ -14001,15 +14172,16 @@ class ProgramacaoPage(PageBase):
             y -= 22
 
             c.setFont("Helvetica", 10)
-            c.drawString(40, y, f"Data: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+            data_emissao = str(data_emissao_override or datetime.now().strftime('%d/%m/%Y %H:%M'))
+            c.drawString(40, y, f"Data: {data_emissao}")
             y -= 16
             equipe_txt = self._resolve_equipe_ajudantes(equipe)
             c.drawString(40, y, f"Motorista: {to_txt(motorista)}  |  Veiculo: {to_txt(veiculo)}  |  Equipe: {to_txt(equipe_txt)}")
             y -= 16
             if upper(tipo_estimativa) == "CX":
-                c.drawString(40, y, f"Estimado (CIF): {safe_int(caixas_estimado, 0)} CX")
+                c.drawString(40, y, f"Estimado (FOB): {safe_int(caixas_estimado, 0)} CX")
             else:
-                c.drawString(40, y, f"Estimado (FOB): {safe_float(kg_estimado, 0.0):.2f} KG")
+                c.drawString(40, y, f"Estimado (CIF): {safe_float(kg_estimado, 0.0):.2f} KG")
             y -= 16
             c.drawString(
                 40,
@@ -14084,9 +14256,430 @@ class ProgramacaoPage(PageBase):
 
             c.save()
             messagebox.showinfo("OK", "PDF gerado com sucesso! (A4 pronto para impressão)")
+            if perguntar_romaneios and messagebox.askyesno("Romaneios", "Deseja gerar os romaneios de entrega desta programacao agora?"):
+                self.imprimir_romaneios_programacao()
+            return path
 
         except Exception as e:
             messagebox.showerror("ERRO", str(e))
+            return None
+
+    def _build_preview_programacao_salva_text(
+        self, codigo, motorista, veiculo, equipe, kg_estimado, tipo_estimativa="KG", caixas_estimado=0, usuario_criacao=""
+    ) -> str:
+        itens = [self._get_row_values(iid) for iid in self.tree.get_children()]
+        equipe_txt = self._resolve_equipe_ajudantes(equipe)
+        linhas = [
+            f"FOLHA DE PROGRAMACAO - {upper(codigo)}",
+            "=" * 110,
+            "",
+            f"Data: {datetime.now().strftime('%d/%m/%Y %H:%M')}",
+            f"Motorista: {fix_mojibake_text(str(motorista or ''))}",
+            f"Veiculo: {fix_mojibake_text(str(veiculo or ''))}",
+            f"Equipe: {fix_mojibake_text(str(equipe_txt or '-'))}",
+        ]
+        if upper(tipo_estimativa) == "CX":
+            linhas.append(f"Estimado (FOB): {safe_int(caixas_estimado, 0)} CX")
+        else:
+            linhas.append(f"Estimado (CIF): {safe_float(kg_estimado, 0.0):.2f} KG")
+        linhas.append(f"Criado por: {fix_mojibake_text(str(usuario_criacao or '-'))}")
+        linhas.extend(["", "[CLIENTES]", "CLIENTE / ENDERECO | CX | PRECO | VENDEDOR | PEDIDO | OBS", "-" * 110])
+
+        for cod_cliente, nome_cliente, _produto, endereco, caixas, _kg, preco, vendedor, pedido, obs in itens:
+            cidade = self._extrair_cidade_do_endereco(endereco)
+            linha_cliente = f"{cidade} - {cod_cliente} - {nome_cliente}" if cidade else f"{cod_cliente} - {nome_cliente}"
+            linhas.append(
+                f"{fix_mojibake_text(str(linha_cliente)[:58])} | {caixas} | {preco} | {fix_mojibake_text(str(vendedor)[:12])} | {fix_mojibake_text(str(pedido)[:18])} | {fix_mojibake_text(str(obs or '')[:24])}"
+            )
+
+        if not itens:
+            linhas.append("Sem itens na programacao.")
+
+        return "\n".join(linhas)
+
+    def _collect_programacao_preview_payload(
+        self, codigo, motorista, veiculo, equipe, kg_estimado, tipo_estimativa="KG", caixas_estimado=0, usuario_criacao=""
+    ):
+        itens = []
+        for iid in self.tree.get_children():
+            cod_cliente, nome_cliente, _produto, endereco, caixas, _kg, preco, vendedor, pedido, obs = self._get_row_values(iid)
+            itens.append(
+                {
+                    "cod_cliente": upper(cod_cliente),
+                    "nome_cliente": upper(nome_cliente),
+                    "endereco": upper(endereco),
+                    "qnt_caixas": safe_int(caixas, 0),
+                    "preco": self._normalizar_preco_item(preco),
+                    "vendedor": upper(vendedor),
+                    "pedido": upper(pedido),
+                    "obs": str(obs or "").strip(),
+                }
+            )
+
+        meta = {
+            "codigo": upper(codigo or "-"),
+            "motorista": upper(motorista or "-"),
+            "veiculo": upper(veiculo or "-"),
+            "equipe": self._resolve_equipe_ajudantes(equipe),
+            "usuario_criacao": upper(usuario_criacao or "-"),
+            "usuario_ultima_edicao": upper(usuario_criacao or "-"),
+            "tipo_estimativa": upper(tipo_estimativa or "KG"),
+            "kg_estimado": safe_float(kg_estimado, 0.0),
+            "caixas_estimado": safe_int(caixas_estimado, 0),
+            "data_emissao": datetime.now().strftime('%d/%m/%Y %H:%M'),
+        }
+        try:
+            meta_prog = self._buscar_meta_programacao(codigo)
+            if isinstance(meta_prog, dict):
+                meta["usuario_criacao"] = upper(str(meta_prog.get("usuario_criacao") or meta["usuario_criacao"] or "-").strip())
+                meta["usuario_ultima_edicao"] = upper(str(meta_prog.get("usuario_ultima_edicao") or meta["usuario_ultima_edicao"] or "-").strip())
+        except Exception:
+            logging.debug("Falha ao buscar metadados da programacao para preview local.", exc_info=True)
+
+        return meta, itens
+
+    def _create_programacao_canvas_preview_tab_local(self, notebook, payload, zoom_var=None, mode_var=None):
+        tab = ttk.Frame(notebook)
+        notebook.add(tab, text="Folha Programacao")
+        tab.grid_rowconfigure(0, weight=1)
+        tab.grid_columnconfigure(0, weight=1)
+
+        container = ttk.Frame(tab, style="Content.TFrame")
+        container.grid(row=0, column=0, sticky="nsew")
+        container.grid_rowconfigure(0, weight=1)
+        container.grid_columnconfigure(0, weight=1)
+
+        canvas = tk.Canvas(container, bg="#ECEFF4", highlightthickness=0)
+        vsb = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        hsb = ttk.Scrollbar(container, orient="horizontal", command=canvas.xview)
+        canvas.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+
+        meta = payload.get("meta") or {}
+        itens = payload.get("itens") or []
+
+        def _fit_font(base_size, scale_factor):
+            return max(8, int(round(base_size * max(0.8, scale_factor))))
+
+        def _paginate_preview_rows():
+            pages = []
+            rows = []
+            y_pdf = 842.0 - 60.0
+            y_pdf -= 22
+            y_pdf -= 16
+            y_pdf -= 16
+            y_pdf -= 16
+            y_pdf -= 24
+            y_pdf -= 10
+            y_pdf -= 14
+
+            for item in itens:
+                if y_pdf < 95:
+                    pages.append(rows)
+                    rows = []
+                    y_pdf = 842.0 - 60.0
+                cidade = self._extrair_cidade_do_endereco(item.get("endereco"))
+                linha_cliente = (
+                    f"{cidade} - {item.get('cod_cliente')} - {item.get('nome_cliente')}"
+                    if cidade
+                    else f"{item.get('cod_cliente')} - {item.get('nome_cliente')}"
+                )
+                if len(linha_cliente) > 78:
+                    linha_cliente = linha_cliente[:78] + "..."
+                obs = str(item.get("obs") or "").strip()
+                obs_line = f"OBS: {fix_mojibake_text(obs)}" if obs else "OBS: ________________________________________________"
+                if len(obs_line) > 110:
+                    obs_line = obs_line[:110] + "..."
+                rows.append(
+                    {
+                        "cliente": fix_mojibake_text(linha_cliente),
+                        "caixas": str(item.get("qnt_caixas") or 0),
+                        "preco": f"{safe_float(item.get('preco'), 0.0):.2f}",
+                        "vendedor": fix_mojibake_text(str(item.get("vendedor") or "")[:12]),
+                        "pedido": fix_mojibake_text(str(item.get("pedido") or "")[:18]),
+                        "obs": obs_line,
+                    }
+                )
+                y_pdf -= 12
+                y_pdf -= 10
+                y_pdf -= 4
+            pages.append(rows)
+            return pages
+
+        def _render(_e=None):
+            canvas.delete("all")
+            cw = max(canvas.winfo_width(), 980)
+            ch = max(canvas.winfo_height(), 720)
+            pad = 24
+            ratio = 210.0 / 297.0
+            zoom = 1.0
+            try:
+                if zoom_var is not None:
+                    zoom = max(0.5, min(2.0, float(zoom_var.get()) / 100.0))
+            except Exception:
+                zoom = 1.0
+            mode = "fit_page"
+            try:
+                if mode_var is not None:
+                    mode = str(mode_var.get() or "fit_page").strip()
+            except Exception:
+                mode = "fit_page"
+
+            avail_w = max(400, cw - (2 * pad))
+            avail_h = max(500, ch - (2 * pad))
+            if mode == "fit_width":
+                page_w = avail_w
+                page_h = page_w / ratio
+            elif mode == "actual":
+                page_w = 595.0 * zoom
+                page_h = 842.0 * zoom
+            else:
+                scale = min(avail_w / 595.0, avail_h / 842.0)
+                page_w = 595.0 * scale * zoom
+                page_h = 842.0 * scale * zoom
+
+            page_gap = max(26, int(page_h * 0.04))
+            pages = _paginate_preview_rows()
+            total_h = 20 + (len(pages) * page_h) + (max(0, len(pages) - 1) * page_gap) + 24
+            canvas.configure(scrollregion=(0, 0, max(cw, page_w + 80), max(ch, total_h)))
+
+            for page_index, page_rows in enumerate(pages):
+                x0 = max(20, (cw - page_w) / 2)
+                y0 = 20 + (page_index * (page_h + page_gap))
+                x1 = x0 + page_w
+                y1 = y0 + page_h
+                canvas.create_rectangle(x0, y0, x1, y1, fill="white", outline="#C7CDD4", width=1)
+
+                def ppdf(x_pdf):
+                    return x0 + (x_pdf * (page_w / 595.0))
+
+                def qpdf(y_pdf):
+                    return y0 + (y_pdf * (page_h / 842.0))
+
+                scale_factor = page_w / 595.0
+                title_font = ("Segoe UI", _fit_font(14, scale_factor), "bold")
+                body_font = ("Segoe UI", _fit_font(10, scale_factor))
+                header_font = ("Segoe UI", _fit_font(9, scale_factor), "bold")
+                item_font = ("Consolas", _fit_font(8, scale_factor))
+                obs_font = ("Segoe UI", _fit_font(8, scale_factor), "italic")
+                body_width = max(120, ppdf(555) - ppdf(40))
+
+                y_pdf = 60
+                canvas.create_text(
+                    ppdf(40),
+                    qpdf(y_pdf),
+                    text=f"PROGRAMACAO: {fix_mojibake_text(str(meta.get('codigo') or '-'))}",
+                    anchor="w",
+                    font=title_font,
+                )
+                y_pdf += 22
+                canvas.create_text(
+                    ppdf(40),
+                    qpdf(y_pdf),
+                    text=f"Data: {meta.get('data_emissao') or datetime.now().strftime('%d/%m/%Y %H:%M')}",
+                    anchor="w",
+                    font=body_font,
+                    width=body_width,
+                )
+                y_pdf += 16
+                canvas.create_text(
+                    ppdf(40),
+                    qpdf(y_pdf),
+                    text=f"Motorista: {fix_mojibake_text(str(meta.get('motorista') or '-'))}  |  Veiculo: {fix_mojibake_text(str(meta.get('veiculo') or '-'))}",
+                    anchor="w",
+                    font=body_font,
+                    width=body_width,
+                )
+                y_pdf += 16
+                canvas.create_text(
+                    ppdf(40),
+                    qpdf(y_pdf),
+                    text=f"Equipe: {fix_mojibake_text(str(meta.get('equipe') or '-'))}",
+                    anchor="w",
+                    font=body_font,
+                    width=body_width,
+                )
+                y_pdf += 16
+                estimado_txt = (
+                    f"Estimado (FOB): {safe_int(meta.get('caixas_estimado'), 0)} CX"
+                    if upper(meta.get("tipo_estimativa") or "KG") == "CX"
+                    else f"Estimado (CIF): {safe_float(meta.get('kg_estimado'), 0.0):.2f} KG"
+                )
+                canvas.create_text(ppdf(40), qpdf(y_pdf), text=estimado_txt, anchor="w", font=body_font, width=body_width)
+                y_pdf += 16
+                canvas.create_text(
+                    ppdf(40),
+                    qpdf(y_pdf),
+                    text=f"Criado por: {fix_mojibake_text(str(meta.get('usuario_criacao') or '-'))}  |  Ultima edicao: {fix_mojibake_text(str(meta.get('usuario_ultima_edicao') or '-'))}",
+                    anchor="w",
+                    font=body_font,
+                    width=body_width,
+                )
+                y_pdf += 22
+
+                canvas.create_text(ppdf(40), qpdf(y_pdf), text="CLIENTE / ENDERECO", anchor="w", font=header_font)
+                canvas.create_text(ppdf(320), qpdf(y_pdf), text="CX", anchor="w", font=header_font)
+                canvas.create_text(ppdf(370), qpdf(y_pdf), text="PRECO", anchor="w", font=header_font)
+                canvas.create_text(ppdf(430), qpdf(y_pdf), text="VENDEDOR", anchor="w", font=header_font)
+                canvas.create_text(ppdf(520), qpdf(y_pdf), text="PEDIDO", anchor="w", font=header_font)
+                y_pdf += 10
+                canvas.create_line(ppdf(40), qpdf(y_pdf), ppdf(555), qpdf(y_pdf), fill="#222")
+                y_pdf += 14
+
+                for row in page_rows:
+                    cliente_txt = row["cliente"][:52]
+                    vendedor_txt = row["vendedor"][:11]
+                    pedido_txt = row["pedido"][:10]
+                    canvas.create_text(ppdf(40), qpdf(y_pdf), text=cliente_txt, anchor="w", font=item_font)
+                    canvas.create_text(ppdf(340), qpdf(y_pdf), text=row["caixas"], anchor="e", font=item_font)
+                    canvas.create_text(ppdf(410), qpdf(y_pdf), text=row["preco"], anchor="e", font=item_font)
+                    canvas.create_text(ppdf(430), qpdf(y_pdf), text=vendedor_txt, anchor="w", font=item_font)
+                    canvas.create_text(ppdf(520), qpdf(y_pdf), text=pedido_txt, anchor="w", font=item_font)
+                    y_pdf += 12
+                    canvas.create_text(
+                        ppdf(50),
+                        qpdf(y_pdf),
+                        text=row["obs"],
+                        anchor="w",
+                        font=obs_font,
+                        width=max(100, ppdf(285) - ppdf(50)),
+                    )
+                    y_pdf += 14
+
+                canvas.create_text(
+                    ppdf(297.5),
+                    qpdf(816),
+                    text='"Tudo posso naquele que me fortalece." (Filipenses 4:13)',
+                    anchor="center",
+                    font=("Segoe UI", _fit_font(9, scale_factor), "italic"),
+                )
+
+        canvas.bind("<Configure>", _render)
+        if zoom_var is not None:
+            zoom_var.trace_add("write", lambda *_: _render())
+        if mode_var is not None:
+            mode_var.trace_add("write", lambda *_: _render())
+        _render()
+
+    def _abrir_previsualizacao_programacao_salva(
+        self, codigo, motorista, veiculo, equipe, kg_estimado, tipo_estimativa="KG", caixas_estimado=0, usuario_criacao=""
+    ):
+        itens = [self._get_row_values(iid) for iid in self.tree.get_children()]
+        if not itens:
+            messagebox.showwarning("ATENCAO", "Sem itens na programacao.")
+            return
+
+        top = tk.Toplevel(self.app)
+        top.title(f"Pre-visualizacao da Programacao - {codigo}")
+        top.geometry("1180x760")
+        top.minsize(900, 600)
+        top.transient(self.app)
+        top.grab_set()
+        toolbar = ttk.Frame(top, padding=(8, 8, 8, 0))
+        toolbar.pack(fill="x")
+        nb = ttk.Notebook(top)
+        nb.pack(fill="both", expand=True, padx=8, pady=8)
+        footer = ttk.Frame(top, padding=(8, 0, 8, 8))
+        footer.pack(fill="x")
+        preview_zoom = tk.IntVar(value=100)
+        preview_mode = tk.StringVar(value="fit_page")
+
+        def _abrir_mesma_preview():
+            try:
+                top.destroy()
+            except Exception:
+                logging.debug("Falha ignorada")
+            self._abrir_previsualizacao_programacao_salva(
+                codigo, motorista, veiculo, equipe, kg_estimado, tipo_estimativa, caixas_estimado, usuario_criacao
+            )
+
+        meta_preview, itens_preview = self._collect_programacao_preview_payload(
+            codigo, motorista, veiculo, equipe, kg_estimado, tipo_estimativa, caixas_estimado, usuario_criacao
+        )
+
+        def _gerar_pdf():
+            return self.gerar_pdf_programacao_salva(
+                codigo,
+                motorista,
+                veiculo,
+                equipe,
+                kg_estimado,
+                tipo_estimativa,
+                caixas_estimado,
+                usuario_criacao,
+                perguntar_romaneios=True,
+                itens_override=[
+                    (
+                        item.get("cod_cliente"),
+                        item.get("nome_cliente"),
+                        "",
+                        item.get("endereco"),
+                        item.get("qnt_caixas"),
+                        0,
+                        item.get("preco"),
+                        item.get("vendedor"),
+                        item.get("pedido"),
+                        item.get("obs"),
+                    )
+                    for item in itens_preview
+                ],
+                usuario_edicao_override=meta_preview.get("usuario_ultima_edicao") or "",
+                data_emissao_override=meta_preview.get("data_emissao") or "",
+            )
+
+        ttk.Button(toolbar, text="Atualizar", style="Ghost.TButton", command=_abrir_mesma_preview).pack(side="left")
+        ttk.Button(toolbar, text="\U0001F5A8 Imprimir", style="Primary.TButton", command=_gerar_pdf).pack(side="left", padx=(8, 0))
+        ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=10)
+        ttk.Label(toolbar, text="Folha:", style="CardLabel.TLabel").pack(side="left", padx=(0, 4))
+        ttk.Radiobutton(toolbar, text="Inteira", value="fit_page", variable=preview_mode).pack(side="left")
+        ttk.Radiobutton(toolbar, text="Largura", value="fit_width", variable=preview_mode).pack(side="left", padx=(6, 0))
+        ttk.Radiobutton(toolbar, text="Real", value="actual", variable=preview_mode).pack(side="left", padx=(6, 0))
+        ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=10)
+        ttk.Label(toolbar, text="Zoom:", style="CardLabel.TLabel").pack(side="left", padx=(12, 4))
+
+        def _set_zoom(v):
+            try:
+                novo = max(50, min(200, int(v)))
+            except Exception:
+                novo = 100
+            preview_zoom.set(novo)
+            try:
+                cb_zoom.set(str(novo))
+            except Exception:
+                logging.debug("Falha ignorada")
+
+        ttk.Button(toolbar, text="-", width=3, command=lambda: _set_zoom(preview_zoom.get() - 10)).pack(side="left")
+        cb_zoom = ttk.Combobox(toolbar, state="readonly", width=6, values=["75", "90", "100", "110", "125", "150"])
+        cb_zoom.pack(side="left", padx=4)
+        cb_zoom.set("100")
+        cb_zoom.bind("<<ComboboxSelected>>", lambda _e: _set_zoom(cb_zoom.get()))
+        ttk.Button(toolbar, text="+", width=3, command=lambda: _set_zoom(preview_zoom.get() + 10)).pack(side="left")
+        ttk.Label(toolbar, text="%", style="CardLabel.TLabel").pack(side="left", padx=(2, 0))
+        ttk.Button(toolbar, text="Fechar", style="Ghost.TButton", command=top.destroy).pack(side="right")
+
+        self._create_programacao_canvas_preview_tab_local(
+            nb,
+            {"meta": meta_preview, "itens": itens_preview},
+            preview_zoom,
+            preview_mode,
+        )
+
+        tab_resumo = ttk.Frame(nb)
+        nb.add(tab_resumo, text="Resumo")
+        text = tk.Text(tab_resumo, wrap="word")
+        text.pack(fill="both", expand=True)
+        text.insert(
+            "1.0",
+            self._build_preview_programacao_salva_text(
+                codigo, motorista, veiculo, equipe, kg_estimado, tipo_estimativa, caixas_estimado, usuario_criacao
+            ),
+        )
+        text.configure(state="disabled")
+
+        ttk.Button(footer, text="Fechar", style="Ghost.TButton", command=top.destroy).pack(side="right")
+        ttk.Button(footer, text="GERAR PDF", style="Primary.TButton", command=_gerar_pdf).pack(side="right", padx=(0, 8))
 
 
     def _normalizar_preco_item(self, valor):
@@ -14697,7 +15290,7 @@ def simple_input(title, prompt, master=None, initial="", allow_empty=True, max_l
 
     win = tk.Toplevel(master) if master else tk.Toplevel()
     win.title(title)
-    win.geometry("460x190")
+    win.geometry("540x220")
     win.resizable(False, False)
     win.grab_set()
 
@@ -14717,7 +15310,7 @@ def simple_input(title, prompt, master=None, initial="", allow_empty=True, max_l
     card.grid_columnconfigure(0, weight=1)
 
     ttk.Label(card, text=title, style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
-    ttk.Label(card, text=prompt, style="CardLabel.TLabel", justify="left").grid(row=1, column=0, sticky="w", pady=(8, 8))
+    ttk.Label(card, text=prompt, style="CardLabel.TLabel", justify="left", wraplength=470).grid(row=1, column=0, sticky="w", pady=(8, 8))
 
     ent = ttk.Entry(card, style="Field.TEntry")
     ent.grid(row=2, column=0, sticky="ew")
@@ -14760,12 +15353,10 @@ def simple_input(title, prompt, master=None, initial="", allow_empty=True, max_l
     btns = ttk.Frame(card, style="Card.TFrame")
     btns.grid(row=3, column=0, sticky="ew", pady=(14, 0))
     btns.grid_columnconfigure(0, weight=1)
+    btns.grid_columnconfigure(1, weight=1)
 
-    left = ttk.Frame(btns, style="Card.TFrame")
-    left.grid(row=0, column=0, sticky="w")
-
-    ttk.Button(left, text="CONFIRMAR", style="Primary.TButton", command=ok).pack(side="left")
-    ttk.Button(left, text="CANCELAR", style="Ghost.TButton", command=cancel).pack(side="left", padx=8)
+    ttk.Button(btns, text="CONFIRMAR", style="Primary.TButton", command=ok).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+    ttk.Button(btns, text="CANCELAR", style="Ghost.TButton", command=cancel).grid(row=0, column=1, sticky="ew", padx=(6, 0))
 
     # Atalhos
     win.bind("<Return>", lambda e: ok())
@@ -17737,8 +18328,9 @@ class DespesasPage(PageBase):
         ttk.Label(entrada_frame, text="Adiantamento p/ Rota:", font=("Segoe UI", 8)).grid(row=1, column=0, sticky="w", pady=1)
         self.ent_adiantamento = ttk.Entry(entrada_frame, style="Field.TEntry", width=10)
         self.ent_adiantamento.grid(row=1, column=1, sticky="e", pady=1)
-        self.ent_adiantamento.bind("<KeyRelease>", lambda e: self._update_resumo_financeiro())
         self._bind_money_entry(self.ent_adiantamento)
+        self.ent_adiantamento.bind("<KeyRelease>", lambda e: self._update_resumo_financeiro(), add="+")
+        self.ent_adiantamento.bind("<FocusOut>", lambda e: self._update_resumo_financeiro(), add="+")
 
         ttk.Label(entrada_frame, text="Total Entradas:", font=("Segoe UI", 8, "bold")).grid(row=2, column=0, sticky="w", pady=(4, 1))
         self.lbl_total_entradas = ttk.Label(entrada_frame, text="R$ 0,00", font=("Segoe UI", 10, "bold"), foreground="#2E7D32")
@@ -17785,7 +18377,7 @@ class DespesasPage(PageBase):
         botoes = [
             ("\u2B05 VOLTAR", "Ghost.TButton", self._voltar_recebimentos),
             ("\u2795 ADICIONAR DESPESA", "Warn.TButton", self._open_registrar_rapido),
-            ("\U0001F5A8 IMPRIMIR PDF", "Ghost.TButton", self.imprimir_resumo),
+            ("\U0001F4D1 GERAR PDF", "Ghost.TButton", self.abrir_previsualizacao_prestacao),
             ("\U0001F4BE SALVAR", "Primary.TButton", self.salvar_tudo),
             ("\u270F\ufe0f EDITAR", "Warn.TButton", self._editar_linha_selecionada),
             ("\U0001F3C1 FINALIZAR", "Danger.TButton", self.finalizar_prestacao_despesas),
@@ -20731,6 +21323,37 @@ class DespesasPage(PageBase):
     # =========================================================
     # 7.7 RELATÓRIO EM TELA + IMPRESSÃO SIMULADA
     # =========================================================
+    def abrir_previsualizacao_prestacao(self):
+        prog = self._current_programacao
+        if not prog:
+            messagebox.showwarning("ATENCAO", "Selecione a Programacao primeiro.")
+            return
+
+        relatorios = None
+        if hasattr(self, "app") and hasattr(self.app, "pages"):
+            relatorios = self.app.pages.get("Relatorios")
+
+        if not relatorios or not hasattr(relatorios, "abrir_previsualizacao_relatorio"):
+            self.imprimir_resumo()
+            return
+
+        prev_tipo = relatorios.cb_tipo_rel.get().strip() if hasattr(relatorios, "cb_tipo_rel") else ""
+        prev_prog = relatorios.cb_prog.get().strip() if hasattr(relatorios, "cb_prog") else ""
+        try:
+            if hasattr(relatorios, "cb_tipo_rel"):
+                relatorios.cb_tipo_rel.set("Prestacao de Contas")
+            if hasattr(relatorios, "cb_prog"):
+                relatorios.cb_prog.set(prog)
+            relatorios.abrir_previsualizacao_relatorio()
+        finally:
+            try:
+                if hasattr(relatorios, "cb_tipo_rel"):
+                    relatorios.cb_tipo_rel.set(prev_tipo)
+                if hasattr(relatorios, "cb_prog"):
+                    relatorios.cb_prog.set(prev_prog)
+            except Exception:
+                logging.debug("Falha ignorada")
+
     def imprimir_resumo(self):
         try:
             prog = self._current_programacao
@@ -23500,21 +24123,18 @@ class RelatoriosPage(PageBase):
         ttk.Button(card, text="\U0001F4E4 EXPORTAR EXCEL", style="Warn.TButton", command=self.exportar_excel).grid(
             row=3, column=2, padx=6
         )
-        ttk.Button(card, text="\U0001F4D1 GERAR PDF", style="Primary.TButton", command=self.gerar_pdf).grid(
+        ttk.Button(card, text="\U0001F4D1 GERAR PDF", style="Primary.TButton", command=self.abrir_previsualizacao_relatorio).grid(
             row=3, column=3, padx=6
         )
-        ttk.Button(card, text="\U0001F441 PREVIEW", style="Ghost.TButton", command=self.abrir_previsualizacao_relatorio).grid(
-            row=3, column=4, padx=6
-        )
         ttk.Button(card, text="\U0001F504 ATUALIZAR", style="Ghost.TButton", command=self.refresh_comboboxes).grid(
-            row=3, column=5, padx=6
+            row=3, column=4, padx=6
         )
 
         ttk.Button(card, text="\U0001F3C1 FINALIZAR ROTA", style="Danger.TButton", command=self.finalizar_rota).grid(
-            row=3, column=6, padx=6
+            row=3, column=5, padx=6
         )
         ttk.Button(card, text="\u21A9 REABRIR ROTA", style="Warn.TButton", command=self.reabrir_rota).grid(
-            row=3, column=7, padx=6
+            row=3, column=6, padx=6
         )
 
         self.var_show_receb_detalhe = tk.BooleanVar(value=True)
@@ -24008,11 +24628,47 @@ class RelatoriosPage(PageBase):
         top.title(f"Pré-visualização - {self.cb_tipo_rel.get()}")
         top.geometry("1180x760")
         top.minsize(900, 600)
+        toolbar = ttk.Frame(top, padding=(8, 8, 8, 0))
+        toolbar.pack(fill="x")
         nb = ttk.Notebook(top)
         nb.pack(fill="both", expand=True, padx=8, pady=8)
+        footer = ttk.Frame(top, padding=(8, 0, 8, 8))
+        footer.pack(fill="x")
+        preview_zoom = tk.IntVar(value=100)
+        preview_mode = tk.StringVar(value="fit_page")
+
+        ttk.Button(toolbar, text="Atualizar", style="Ghost.TButton", command=lambda: self.abrir_previsualizacao_relatorio()).pack(side="left")
+        ttk.Button(toolbar, text="\U0001F5A8 Imprimir", style="Primary.TButton", command=self.gerar_pdf).pack(side="left", padx=(8, 0))
+        ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=10)
+        ttk.Label(toolbar, text="Folha:", style="CardLabel.TLabel").pack(side="left", padx=(0, 4))
+        ttk.Radiobutton(toolbar, text="Inteira", value="fit_page", variable=preview_mode).pack(side="left")
+        ttk.Radiobutton(toolbar, text="Largura", value="fit_width", variable=preview_mode).pack(side="left", padx=(6, 0))
+        ttk.Radiobutton(toolbar, text="Real", value="actual", variable=preview_mode).pack(side="left", padx=(6, 0))
+        ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=10)
+        ttk.Label(toolbar, text="Zoom:", style="CardLabel.TLabel").pack(side="left", padx=(12, 4))
+
+        def _set_zoom(v):
+            try:
+                novo = max(50, min(200, int(v)))
+            except Exception:
+                novo = 100
+            preview_zoom.set(novo)
+            try:
+                cb_zoom.set(str(novo))
+            except Exception:
+                logging.debug("Falha ignorada")
+
+        ttk.Button(toolbar, text="-", width=3, command=lambda: _set_zoom(preview_zoom.get() - 10)).pack(side="left")
+        cb_zoom = ttk.Combobox(toolbar, state="readonly", width=6, values=["75", "90", "100", "110", "125", "150"])
+        cb_zoom.pack(side="left", padx=4)
+        cb_zoom.set("100")
+        cb_zoom.bind("<<ComboboxSelected>>", lambda _e: _set_zoom(cb_zoom.get()))
+        ttk.Button(toolbar, text="+", width=3, command=lambda: _set_zoom(preview_zoom.get() + 10)).pack(side="left")
+        ttk.Label(toolbar, text="%", style="CardLabel.TLabel").pack(side="left", padx=(2, 0))
+        ttk.Button(toolbar, text="Fechar", style="Ghost.TButton", command=top.destroy).pack(side="right")
 
         if "PROGRAMACOES" in tipo_rel and prog:
-            self._create_a4_preview_tab(nb, "Folha Programação", self._build_preview_folha_programacao(prog))
+            self._create_programacao_canvas_preview_tab(nb, prog, preview_zoom, preview_mode)
 
         if "PRESTACAO" in tipo_rel and prog:
             self._create_a4_preview_tab(nb, "Folha Prestação", self._build_preview_folha_prestacao(prog))
@@ -24159,6 +24815,322 @@ class RelatoriosPage(PageBase):
         canvas.bind("<Configure>", _on_resize)
         _on_resize()
 
+    def _collect_programacao_payload(self, prog: str):
+        programacao_page = None
+        if hasattr(self, "app") and hasattr(self.app, "pages"):
+            programacao_page = self.app.pages.get("Programacao")
+
+        meta = {}
+        if programacao_page and hasattr(programacao_page, "_buscar_meta_programacao"):
+            try:
+                meta = programacao_page._buscar_meta_programacao(prog) or {}
+            except Exception:
+                logging.debug("Falha ao buscar metadados da programacao para preview.", exc_info=True)
+
+        itens_raw = fetch_programacao_itens(prog) or []
+        itens = []
+        for item in itens_raw:
+            if not isinstance(item, dict):
+                continue
+            itens.append(
+                {
+                    "cod_cliente": upper(item.get("cod_cliente", "")),
+                    "nome_cliente": upper(item.get("nome_cliente", "")),
+                    "endereco": upper(item.get("endereco", "")),
+                    "qnt_caixas": safe_int(item.get("caixas_atual"), safe_int(item.get("qnt_caixas"), 0)),
+                    "preco": safe_float(item.get("preco_atual"), safe_float(item.get("preco"), 0.0)),
+                    "vendedor": upper(item.get("vendedor", "")),
+                    "pedido": upper(item.get("pedido", "")),
+                    "obs": str(item.get("obs") or item.get("alteracao_detalhe") or "").strip(),
+                }
+            )
+        itens.sort(key=lambda r: (upper(r.get("nome_cliente", "")), upper(r.get("cod_cliente", ""))))
+        return programacao_page, meta, itens
+
+    def _create_programacao_canvas_preview_tab(self, notebook, prog: str, zoom_var=None, mode_var=None):
+        tab = ttk.Frame(notebook)
+        notebook.add(tab, text="Folha Programação")
+        tab.grid_rowconfigure(0, weight=1)
+        tab.grid_columnconfigure(0, weight=1)
+
+        container = ttk.Frame(tab, style="Content.TFrame")
+        container.grid(row=0, column=0, sticky="nsew")
+        container.grid_rowconfigure(0, weight=1)
+        container.grid_columnconfigure(0, weight=1)
+
+        canvas = tk.Canvas(container, bg="#ECEFF4", highlightthickness=0)
+        vsb = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        hsb = ttk.Scrollbar(container, orient="horizontal", command=canvas.xview)
+        canvas.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+
+        page, meta, itens = self._collect_programacao_payload(prog)
+        equipe_raw = str(meta.get("equipe") or "")
+        equipe_txt = (
+            page._resolve_equipe_ajudantes(equipe_raw)
+            if page and hasattr(page, "_resolve_equipe_ajudantes")
+            else (equipe_raw or "-")
+        )
+        motorista = upper(meta.get("motorista") or "-")
+        veiculo = upper(meta.get("veiculo") or "-")
+        usuario_criacao = upper(meta.get("usuario_criacao") or "-")
+        usuario_edicao = upper(meta.get("usuario_ultima_edicao") or "-")
+        tipo_estimativa = upper(meta.get("tipo_estimativa") or "KG")
+        kg_estimado = safe_float(meta.get("kg_estimado"), 0.0)
+        caixas_estimado = safe_int(meta.get("caixas_estimado"), 0)
+
+        def _render(_e=None):
+            canvas.delete("all")
+            cw = max(canvas.winfo_width(), 980)
+            ch = max(canvas.winfo_height(), 720)
+            pad = 24
+            ratio = 210.0 / 297.0
+            zoom = 1.0
+            try:
+                if zoom_var is not None:
+                    zoom = max(0.5, min(2.0, float(zoom_var.get()) / 100.0))
+            except Exception:
+                zoom = 1.0
+            mode = "fit_page"
+            try:
+                if mode_var is not None:
+                    mode = str(mode_var.get() or "fit_page").strip()
+            except Exception:
+                mode = "fit_page"
+            avail_w = max(400, cw - 2 * pad)
+            avail_h = max(500, ch - 2 * pad)
+            if mode == "fit_width":
+                page_w = avail_w
+                page_h = page_w / ratio
+            elif mode == "actual":
+                page_h = max(580, avail_h * zoom)
+                page_w = page_h * ratio
+            else:
+                page_h = avail_h
+                page_w = page_h * ratio
+                if page_w > avail_w:
+                    page_w = avail_w
+                    page_h = page_w / ratio
+                page_h *= zoom
+                page_w *= zoom
+            if page_w > avail_w and mode != "actual":
+                page_w = avail_w
+                page_h = page_w / ratio
+            x0 = max(20, (cw - page_w) / 2)
+            y0 = 20
+            x1 = x0 + page_w
+            y1 = y0 + page_h
+            canvas.create_rectangle(x0, y0, x1, y1, fill="white", outline="#C7CDD4", width=1)
+            canvas.configure(scrollregion=(0, 0, max(cw, x1 + 24), max(ch, y1 + 24)))
+
+            def px(rx):
+                return x0 + (rx * page_w)
+
+            def py(ry):
+                return y0 + (ry * page_h)
+
+            # Mantem o preview proporcional ao PDF real gerado em A4.
+            pdf_w = 595.0
+            left_margin = 40.0
+            col_cx_pdf = 340.0
+            col_preco_pdf = 410.0
+            col_vendedor_pdf = 430.0
+            col_pedido_pdf = 520.0
+
+            def ppdf(x_pdf):
+                return x0 + ((x_pdf / pdf_w) * page_w)
+
+            canvas.create_text(px(0.10), py(0.07), text=f"PROGRAMACAO: {prog}", anchor="w", font=("Segoe UI", 19, "bold"))
+            canvas.create_text(px(0.10), py(0.12), text=f"Data: {datetime.now().strftime('%d/%m/%Y %H:%M')}", anchor="w", font=("Segoe UI", 11))
+            canvas.create_text(
+                px(0.10),
+                py(0.15),
+                text=f"Motorista: {motorista}  |  Veiculo: {veiculo}  |  Equipe: {equipe_txt or '-'}",
+                anchor="w",
+                font=("Segoe UI", 11),
+            )
+            estimado_txt = (
+                f"Estimado (FOB): {caixas_estimado} CX" if tipo_estimativa == "CX" else f"Estimado (CIF): {kg_estimado:.2f} KG"
+            )
+            canvas.create_text(px(0.10), py(0.18), text=estimado_txt, anchor="w", font=("Segoe UI", 11))
+            canvas.create_text(
+                px(0.10),
+                py(0.21),
+                text=f"Criado por: {usuario_criacao}  |  Ultima edicao: {usuario_edicao}",
+                anchor="w",
+                font=("Segoe UI", 11),
+            )
+
+            header_y = py(0.27)
+            x_cliente = ppdf(left_margin)
+            x_cx = ppdf(col_cx_pdf)
+            x_preco = ppdf(col_preco_pdf)
+            x_vendedor = ppdf(col_vendedor_pdf)
+            x_pedido = ppdf(col_pedido_pdf)
+
+            canvas.create_text(x_cliente, header_y, text="CLIENTE / ENDERECO", anchor="w", font=("Segoe UI", 11, "bold"))
+            canvas.create_text(ppdf(320), header_y, text="CX", anchor="center", font=("Segoe UI", 10, "bold"))
+            canvas.create_text(ppdf(370), header_y, text="PRECO", anchor="center", font=("Segoe UI", 10, "bold"))
+            canvas.create_text(ppdf(470), header_y, text="VENDEDOR", anchor="center", font=("Segoe UI", 10, "bold"))
+            canvas.create_text(ppdf(548), header_y, text="PEDIDO", anchor="center", font=("Segoe UI", 10, "bold"))
+
+            line_y = py(0.285)
+            canvas.create_line(ppdf(40), line_y, ppdf(555), line_y, fill="#222")
+
+            y = py(0.315)
+            row_gap = page_h * 0.060
+            max_rows = 10
+            for idx, item in enumerate(itens[:max_rows]):
+                cidade = (
+                    page._extrair_cidade_do_endereco(item["endereco"])
+                    if page and hasattr(page, "_extrair_cidade_do_endereco")
+                    else ""
+                )
+                linha_cliente = f"{cidade} - {item['cod_cliente']} - {item['nome_cliente']}" if cidade else f"{item['cod_cliente']} - {item['nome_cliente']}"
+                linha_cliente = linha_cliente[:34] + "..." if len(linha_cliente) > 37 else linha_cliente
+                vendedor_txt = item["vendedor"][:11]
+                pedido_txt = str(item["pedido"])[:8]
+
+                canvas.create_text(x_cliente, y, text=linha_cliente, anchor="w", font=("Segoe UI", 8))
+                canvas.create_text(ppdf(320), y, text=str(item["qnt_caixas"]), anchor="center", font=("Segoe UI", 8))
+                canvas.create_text(ppdf(370), y, text=f"{item['preco']:.2f}", anchor="center", font=("Segoe UI", 8))
+                canvas.create_text(ppdf(470), y, text=vendedor_txt, anchor="center", font=("Segoe UI", 8))
+                canvas.create_text(ppdf(548), y, text=pedido_txt, anchor="center", font=("Segoe UI", 8))
+
+                obs_y = y + page_h * 0.018
+                canvas.create_text(ppdf(50), obs_y, text="OBS:", anchor="w", font=("Segoe UI", 8, "italic"))
+                canvas.create_line(ppdf(82), obs_y + 2, ppdf(285), obs_y + 2, fill="#222")
+                y += row_gap
+
+            if len(itens) > max_rows:
+                canvas.create_text(
+                    px(0.10),
+                    y,
+                    text=f"... e mais {len(itens) - max_rows} cliente(s) na programacao.",
+                    anchor="w",
+                    font=("Segoe UI", 10, "italic"),
+                    fill="#6B7280",
+                )
+
+        canvas.bind("<Configure>", _render)
+        if zoom_var is not None:
+            zoom_var.trace_add("write", lambda *_: _render())
+        if mode_var is not None:
+            mode_var.trace_add("write", lambda *_: _render())
+        _render()
+
+    def _gerar_pdf_programacao_relatorio(self, prog: str):
+        if not require_reportlab():
+            return
+        if not prog:
+            messagebox.showwarning("ATENCAO", "Selecione uma programacao.")
+            return
+
+        page, meta, itens = self._collect_programacao_payload(prog)
+        if not itens:
+            messagebox.showwarning("ATENCAO", "Sem itens na programacao.")
+            return
+
+        path = filedialog.asksaveasfilename(
+            title="Salvar PDF da Programacao",
+            defaultextension=".pdf",
+            filetypes=[("PDF", "*.pdf")],
+            initialfile=f"PROGRAMACAO_{prog}.pdf"
+        )
+        if not path:
+            return
+
+        try:
+            c = canvas.Canvas(path, pagesize=A4)
+            w, h = A4
+            y = h - 60
+            to_txt = lambda v: fix_mojibake_text(str(v or ""))
+
+            motorista = upper(meta.get("motorista") or "")
+            veiculo = upper(meta.get("veiculo") or "")
+            equipe_raw = str(meta.get("equipe") or "")
+            equipe_txt = (
+                page._resolve_equipe_ajudantes(equipe_raw)
+                if page and hasattr(page, "_resolve_equipe_ajudantes")
+                else (equipe_raw or "-")
+            )
+            kg_estimado = safe_float(meta.get("kg_estimado"), 0.0)
+            tipo_estimativa = upper(meta.get("tipo_estimativa") or "KG")
+            caixas_estimado = safe_int(meta.get("caixas_estimado"), 0)
+            usuario_criacao = upper(meta.get("usuario_criacao") or "")
+            usuario_edicao = upper(meta.get("usuario_ultima_edicao") or "")
+
+            c.setFont("Helvetica-Bold", 14)
+            c.drawString(40, y, f"PROGRAMACAO: {to_txt(prog)}")
+            y -= 22
+
+            c.setFont("Helvetica", 10)
+            c.drawString(40, y, f"Data: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+            y -= 16
+            c.drawString(40, y, f"Motorista: {to_txt(motorista)}  |  Veiculo: {to_txt(veiculo)}  |  Equipe: {to_txt(equipe_txt)}")
+            y -= 16
+            if tipo_estimativa == "CX":
+                c.drawString(40, y, f"Estimado (FOB): {safe_int(caixas_estimado, 0)} CX")
+            else:
+                c.drawString(40, y, f"Estimado (CIF): {safe_float(kg_estimado, 0.0):.2f} KG")
+            y -= 16
+            c.drawString(40, y, f"Criado por: {to_txt(usuario_criacao or '-')}  |  Ultima edicao: {to_txt(usuario_edicao or '-')}")
+            y -= 24
+
+            c.setFont("Helvetica-Bold", 9)
+            c.drawString(40, y, "CLIENTE / ENDERECO")
+            c.drawString(320, y, "CX")
+            c.drawString(370, y, "PRECO")
+            c.drawString(430, y, "VENDEDOR")
+            c.drawString(520, y, "PEDIDO")
+            y -= 10
+            c.line(40, y, w - 40, y)
+            y -= 14
+            c.setFont("Helvetica", 8)
+
+            for item in itens:
+                if y < 95:
+                    c.showPage()
+                    y = h - 60
+                    c.setFont("Helvetica", 8)
+
+                cidade = (
+                    page._extrair_cidade_do_endereco(item["endereco"])
+                    if page and hasattr(page, "_extrair_cidade_do_endereco")
+                    else ""
+                )
+                linha_cliente = f"{cidade} - {item['cod_cliente']} - {item['nome_cliente']}" if cidade else f"{item['cod_cliente']} - {item['nome_cliente']}"
+                if len(linha_cliente) > 78:
+                    linha_cliente = linha_cliente[:78] + "..."
+
+                c.drawString(40, y, to_txt(linha_cliente))
+                c.drawRightString(340, y, str(item["qnt_caixas"]))
+                c.drawRightString(410, y, f"{safe_float(item['preco'], 0.0):.2f}")
+                c.drawString(430, y, to_txt(item["vendedor"])[:12])
+                c.drawString(520, y, to_txt(item["pedido"])[:18])
+                y -= 12
+
+                obs_line = f"OBS: {to_txt(item['obs'])}" if item["obs"] else "OBS: ________________________________________________"
+                if len(obs_line) > 110:
+                    obs_line = obs_line[:110] + "..."
+                c.setFont("Helvetica-Oblique", 8)
+                c.drawString(50, y, obs_line)
+                c.setFont("Helvetica", 8)
+                y -= 14
+
+            if y < 40:
+                c.showPage()
+                y = h - 60
+
+            c.setFont("Helvetica-Oblique", 9)
+            c.drawCentredString(w / 2, 26, '"Tudo posso naquele que me fortalece." (Filipenses 4:13)')
+            c.save()
+            messagebox.showinfo("OK", "PDF gerado com sucesso! (A4 pronto para impressao)")
+        except Exception as e:
+            messagebox.showerror("ERRO", f"Erro ao gerar PDF: {str(e)}")
+
     def _build_preview_folha_programacao(self, prog: str) -> str:
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
         api_enabled = bool(desktop_secret and is_desktop_api_sync_enabled())
@@ -24203,9 +25175,9 @@ class RelatoriosPage(PageBase):
                 total_prev = sum(safe_float(r[2], 0.0) for r in itens)
                 tipo_estimativa = upper(tipo_estimativa or "KG")
                 if tipo_estimativa == "CX":
-                    estimativa_txt = f"CIF / CX ESTIMADO: {safe_int(caixas_estimado, 0)}"
+                    estimativa_txt = f"FOB / CX ESTIMADO: {safe_int(caixas_estimado, 0)}"
                 else:
-                    estimativa_txt = f"FOB / KG ESTIMADO: {safe_float(kg_estimado, 0.0):.2f}"
+                    estimativa_txt = f"CIF / KG ESTIMADO: {safe_float(kg_estimado, 0.0):.2f}"
                 lines = []
                 lines.append("=" * 118)
                 lines.append(f"{'FOLHA DE PROGRAMAÃ‡ÃƒO':^118}")
@@ -24303,9 +25275,9 @@ class RelatoriosPage(PageBase):
         total_prev = sum(safe_float(r[2], 0.0) for r in itens)
         tipo_estimativa = upper(tipo_estimativa or "KG")
         if tipo_estimativa == "CX":
-            estimativa_txt = f"CIF / CX ESTIMADO: {safe_int(caixas_estimado, 0)}"
+            estimativa_txt = f"FOB / CX ESTIMADO: {safe_int(caixas_estimado, 0)}"
         else:
-            estimativa_txt = f"FOB / KG ESTIMADO: {safe_float(kg_estimado, 0.0):.2f}"
+            estimativa_txt = f"CIF / KG ESTIMADO: {safe_float(kg_estimado, 0.0):.2f}"
         lines = []
         lines.append("=" * 118)
         lines.append(f"{'FOLHA DE PROGRAMAÇÃO':^118}")
@@ -25543,6 +26515,10 @@ class RelatoriosPage(PageBase):
                 despesas_page._current_programacao = prev_prog
             except Exception as e:
                 messagebox.showerror("ERRO", f"Erro ao gerar PDF da prestacao: {str(e)}")
+            return
+
+        if "PROGRAMACOES" in upper(tipo_rel):
+            self._gerar_pdf_programacao_relatorio(prog)
             return
 
         if (not is_mortalidade) and (not prog):
