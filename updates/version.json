@@ -1,9 +1,9 @@
 {
-  "version": "4.1.3",
-  "setup_url": "https://github.com/andersoncantenas-glitch/rotahub-api/releases/download/v4.1.3/RotaHubDesktop_Setup_4.1.3.exe",
+  "version": "4.1.4",
+  "setup_url": "https://github.com/andersoncantenas-glitch/rotahub-api/releases/download/v4.1.4/RotaHubDesktop_Setup_4.1.4.exe",
   "changelog_url": "https://raw.githubusercontent.com/andersoncantenas-glitch/rotahub-api/main/updates/changelog.txt",
   "release_kind": "patch",
-  "released_at": "2026-03-12 11:35:00",
+  "released_at": "2026-03-12 11:55:00",
   "alert": "",
   "alerts": [
     "Recuperacao automatica da programacao ausente no servidor em Recebimentos.",
