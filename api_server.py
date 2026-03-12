@@ -8,6 +8,7 @@ import hashlib
 import time
 import math
 import logging
+import re
 from uuid import uuid4
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Iterator
@@ -103,6 +104,11 @@ def col_exists(conn: sqlite3.Connection, table: str, col: str) -> bool:
     cur.execute(f"PRAGMA table_info({table})")
     cols = [r[1] for r in cur.fetchall()]
     return col in cols
+
+
+def table_exists(cur: sqlite3.Cursor, table: str) -> bool:
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
+    return bool(cur.fetchone())
 
 
 PBKDF2_ITERATIONS = 200_000
@@ -1775,6 +1781,8 @@ class DesktopRotaUpsertIn(BaseModel):
     caixas_carregadas: Optional[int] = None
     usuario_criacao: Optional[str] = None
     usuario_ultima_edicao: Optional[str] = None
+    linked_venda_ids: List[int] = Field(default_factory=list)
+    vendas_usada_em: Optional[str] = None
     itens: List[DesktopRotaItemIn] = Field(default_factory=list)
 
 
@@ -1833,6 +1841,12 @@ class DesktopRotaCabecalhoIn(BaseModel):
     data_chegada: Optional[str] = None
     hora_chegada: Optional[str] = None
     diaria_motorista_valor: Optional[float] = None
+    qtd_diarias: Optional[float] = None
+    qtd_ajudantes: Optional[int] = None
+    total_motorista: Optional[float] = None
+    total_ajudantes: Optional[float] = None
+    observacao_motorista: Optional[str] = None
+    observacao_ajudantes: Optional[str] = None
 
 
 class DesktopRotaFinanceiroIn(BaseModel):
@@ -1870,6 +1884,30 @@ class DesktopDiariasSyncIn(BaseModel):
     total_ajudantes: float
     observacao_motorista: Optional[str] = ""
     observacao_ajudantes: Optional[str] = ""
+
+
+def _validate_iso_date_optional(value: Optional[str], field_name: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        datetime.strptime(text, "%Y-%m-%d")
+    except Exception:
+        raise HTTPException(status_code=400, detail=f"{field_name} invalida. Use YYYY-MM-DD.")
+    return text
+
+
+def _validate_time_optional(value: Optional[str], field_name: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    for fmt in ("%H:%M", "%H:%M:%S"):
+        try:
+            datetime.strptime(text, fmt)
+            return text if fmt == "%H:%M:%S" else f"{text}:00"
+        except Exception:
+            continue
+    raise HTTPException(status_code=400, detail=f"{field_name} invalida. Use HH:MM ou HH:MM:SS.")
 
 
 class DesktopProgramacaoClienteManualIn(BaseModel):
@@ -2012,7 +2050,8 @@ def _require_desktop_secret(
     x_desktop_secret: Optional[str] = Header(default=None, alias="X-Desktop-Secret"),
 ) -> bool:
     secret = (x_desktop_secret or "").strip()
-    if not secret or secret != str(SECRET_KEY):
+    expected = str(SECRET_KEY or "")
+    if not secret or not expected or not hmac.compare_digest(secret, expected):
         raise HTTPException(status_code=401, detail="Desktop secret inválido")
     return True
 
@@ -2396,7 +2435,20 @@ def desktop_clientes_upsert(payload: DesktopClienteUpsertIn, _ok: bool = Depends
         if not cols:
             raise HTTPException(status_code=500, detail="Tabela clientes indisponivel.")
 
-        cur.execute("SELECT id FROM clientes WHERE UPPER(TRIM(cod_cliente))=? LIMIT 1", (cod_cliente,))
+        cur.execute(
+            """
+            SELECT
+                id,
+                COALESCE(nome_cliente,'') AS nome_cliente,
+                COALESCE(endereco,'') AS endereco,
+                COALESCE(telefone,'') AS telefone,
+                COALESCE(vendedor,'') AS vendedor
+            FROM clientes
+            WHERE UPPER(TRIM(cod_cliente))=?
+            LIMIT 1
+            """,
+            (cod_cliente,),
+        )
         existing = cur.fetchone()
 
         set_parts: List[str] = []
@@ -2413,8 +2465,25 @@ def desktop_clientes_upsert(payload: DesktopClienteUpsertIn, _ok: bool = Depends
             set_parts.append("vendedor=?"); params.append(vendedor)
 
         if existing:
+            endereco_final = endereco or str(existing["endereco"] or "").strip().upper()
+            telefone_final = telefone or str(existing["telefone"] or "").strip().upper()
+            vendedor_final = vendedor or str(existing["vendedor"] or "").strip().upper()
             if not set_parts:
                 return {"ok": True, "cod_cliente": cod_cliente, "updated": 0}
+            params = []
+            if "cod_cliente" in cols:
+                set_parts = ["cod_cliente=?"]
+                params.append(cod_cliente)
+            else:
+                set_parts = []
+            if "nome_cliente" in cols:
+                set_parts.append("nome_cliente=?"); params.append(nome_cliente)
+            if "endereco" in cols:
+                set_parts.append("endereco=?"); params.append(endereco_final)
+            if "telefone" in cols:
+                set_parts.append("telefone=?"); params.append(telefone_final)
+            if "vendedor" in cols:
+                set_parts.append("vendedor=?"); params.append(vendedor_final)
             params.append(int(existing["id"]))
             cur.execute(f"UPDATE clientes SET {', '.join(set_parts)} WHERE id=?", tuple(params))
             return {"ok": True, "cod_cliente": cod_cliente, "updated": int(cur.rowcount or 0)}
@@ -2445,6 +2514,9 @@ def desktop_motoristas_delete(codigo: str, _ok: bool = Depends(_require_desktop_
         raise HTTPException(status_code=400, detail="codigo obrigatorio.")
     with get_conn() as conn:
         cur = conn.cursor()
+        bloqueio = _cadastro_delete_block_reason(cur, "motoristas", codigo=cod)
+        if bloqueio:
+            raise HTTPException(status_code=409, detail=f"{bloqueio} Use status DESATIVADO.")
         cur.execute("DELETE FROM motoristas WHERE UPPER(TRIM(COALESCE(codigo,'')))=UPPER(TRIM(?))", (cod,))
         deleted = int(cur.rowcount or 0)
     return {"ok": True, "codigo": cod, "deleted": deleted}
@@ -2457,6 +2529,9 @@ def desktop_veiculos_delete(placa: str, _ok: bool = Depends(_require_desktop_sec
         raise HTTPException(status_code=400, detail="placa obrigatoria.")
     with get_conn() as conn:
         cur = conn.cursor()
+        bloqueio = _cadastro_delete_block_reason(cur, "veiculos", placa=plc)
+        if bloqueio:
+            raise HTTPException(status_code=409, detail=f"{bloqueio} Use status DESATIVADO.")
         cur.execute("DELETE FROM veiculos WHERE UPPER(TRIM(COALESCE(placa,'')))=UPPER(TRIM(?))", (plc,))
         deleted = int(cur.rowcount or 0)
     return {"ok": True, "placa": plc, "deleted": deleted}
@@ -2469,6 +2544,9 @@ def desktop_ajudantes_delete(ajudante_id: int, _ok: bool = Depends(_require_desk
         raise HTTPException(status_code=400, detail="ajudante_id invalido.")
     with get_conn() as conn:
         cur = conn.cursor()
+        bloqueio = _cadastro_delete_block_reason(cur, "ajudantes", ajudante_id=aid)
+        if bloqueio:
+            raise HTTPException(status_code=409, detail=f"{bloqueio} Use status DESATIVADO.")
         cur.execute("DELETE FROM ajudantes WHERE id=?", (aid,))
         deleted = int(cur.rowcount or 0)
     return {"ok": True, "ajudante_id": aid, "deleted": deleted}
@@ -2481,6 +2559,9 @@ def desktop_clientes_delete(cod_cliente: str, _ok: bool = Depends(_require_deskt
         raise HTTPException(status_code=400, detail="cod_cliente obrigatorio.")
     with get_conn() as conn:
         cur = conn.cursor()
+        bloqueio = _cadastro_delete_block_reason(cur, "clientes", cod_cliente=cod)
+        if bloqueio:
+            raise HTTPException(status_code=409, detail=f"{bloqueio} Use cadastro ativo/inativo em vez de excluir.")
         cur.execute("DELETE FROM clientes WHERE UPPER(TRIM(COALESCE(cod_cliente,'')))=UPPER(TRIM(?))", (cod,))
         deleted = int(cur.rowcount or 0)
     return {"ok": True, "cod_cliente": cod, "deleted": deleted}
@@ -2599,6 +2680,15 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
             if payload.caixas_carregadas is not None
             else (payload.nf_caixas or 0)
         )
+        linked_venda_ids = []
+        for raw_id in (payload.linked_venda_ids or []):
+            try:
+                rid = int(raw_id)
+            except Exception:
+                continue
+            if rid > 0 and rid not in linked_venda_ids:
+                linked_venda_ids.append(rid)
+        vendas_usada_em = str(payload.vendas_usada_em or data_criacao or "").strip() or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         if tipo_estimativa not in ("KG", "CX"):
             tipo_estimativa = "KG"
 
@@ -2636,6 +2726,7 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
         pid = int(row["id"] or 0) if row else 0
         status_atual = str((row["status"] if row else "") or "").strip().upper()
         status_op_atual = str((row["status_operacional"] if row else "") or "").strip().upper()
+        state_atual = _programacao_state(cur, codigo) if pid > 0 else None
 
         status_execucao = {"EM_ROTA", "EM ROTA", "INICIADA", "EM_ENTREGAS", "EM ENTREGAS", "CARREGADA"}
         status_fechado = {"FINALIZADA", "FINALIZADO", "CANCELADA", "CANCELADO"}
@@ -2644,6 +2735,11 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
         # Regra de negocio: desktop edita somente programação ainda não iniciada.
         # Se já está em execução, substituição deve ser via APK.
         if pid > 0:
+            if state_atual and str(state_atual.get("prestacao_status") or "").upper() == "FECHADA":
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Programacao {codigo} esta com a prestacao FECHADA e nao pode ser alterada pelo desktop.",
+                )
             st_eff = status_op_atual if status_op_atual else status_atual
             if st_eff in status_execucao:
                 raise HTTPException(
@@ -2836,6 +2932,52 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
                     str(it.pedido or "").strip().upper(),
                     str(it.produto or "").strip().upper(),
                 ),
+            )
+
+        if linked_venda_ids:
+            placeholders = ",".join(["?"] * len(linked_venda_ids))
+            cur.execute(
+                f"""
+                SELECT id,
+                       IFNULL(usada,0) AS usada,
+                       UPPER(TRIM(COALESCE(codigo_programacao,''))) AS codigo_programacao
+                FROM vendas_importadas
+                WHERE id IN ({placeholders})
+                """,
+                tuple(linked_venda_ids),
+            )
+            venda_rows = cur.fetchall() or []
+            venda_map = {int(r["id"] or 0): r for r in venda_rows}
+            missing_ids = [rid for rid in linked_venda_ids if rid not in venda_map]
+            if missing_ids:
+                raise HTTPException(
+                    status_code=409,
+                    detail="existem vendas vinculadas informadas que nao existem mais na fila de importacao.",
+                )
+            for rid in linked_venda_ids:
+                row_v = venda_map.get(rid)
+                venda_prog = str((row_v["codigo_programacao"] if row_v else "") or "").strip().upper()
+                venda_usada = int((row_v["usada"] if row_v else 0) or 0)
+                if venda_prog and venda_prog != codigo:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="existem vendas vinculadas a outra programacao; desvincule antes de salvar.",
+                    )
+                if venda_usada == 1 and venda_prog != codigo:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="existem vendas ja consumidas por outra programacao; recarregue a lista antes de salvar.",
+                    )
+            cur.executemany(
+                """
+                UPDATE vendas_importadas
+                   SET usada=1,
+                       usada_em=?,
+                       codigo_programacao=?,
+                       selecionada=0
+                 WHERE id=?
+                """,
+                [(vendas_usada_em, codigo, rid) for rid in linked_venda_ids],
             )
 
         conn.commit()
@@ -3986,6 +4128,7 @@ def desktop_criar_recebimento(
     cod = str(payload.cod_cliente or "").strip().upper()
     nome = str(payload.nome_cliente or "").strip().upper()
     forma = str(payload.forma_pagamento or "DINHEIRO").strip().upper() or "DINHEIRO"
+    formas_validas = {"DINHEIRO", "PIX", "CARTAO", "BOLETO", "OUTRO"}
     obs = str(payload.observacao or "").strip().upper()
     num_nf = str(payload.num_nf or "").strip().upper()
     valor = float(payload.valor or 0.0)
@@ -3993,9 +4136,13 @@ def desktop_criar_recebimento(
         raise HTTPException(status_code=400, detail="cod_cliente e nome_cliente obrigatorios.")
     if valor <= 0:
         raise HTTPException(status_code=400, detail="valor deve ser maior que zero.")
+    if forma not in formas_validas:
+        raise HTTPException(status_code=400, detail="forma_pagamento invalida.")
 
     with get_conn() as conn:
         cur = conn.cursor()
+        _ensure_programacao_mutable(cur, prog)
+        _ensure_programacao_has_cliente(cur, prog, cod)
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         cur.execute(
             """
@@ -4022,6 +4169,7 @@ def desktop_zerar_recebimentos_cliente(
 
     with get_conn() as conn:
         cur = conn.cursor()
+        _ensure_programacao_mutable(cur, prog)
         cur.execute(
             "DELETE FROM recebimentos WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?)) AND UPPER(TRIM(COALESCE(cod_cliente,'')))=UPPER(TRIM(?))",
             (prog, cod),
@@ -4040,8 +4188,17 @@ def desktop_atualizar_cabecalho_rota(
     if not prog:
         raise HTTPException(status_code=400, detail="codigo_programacao obrigatorio.")
 
+    data_saida = _validate_iso_date_optional(payload.data_saida, "data_saida")
+    hora_saida = _validate_time_optional(payload.hora_saida, "hora_saida")
+    data_chegada = _validate_iso_date_optional(payload.data_chegada, "data_chegada")
+    hora_chegada = _validate_time_optional(payload.hora_chegada, "hora_chegada")
+    diaria_motorista_valor = float(payload.diaria_motorista_valor or 0.0) if payload.diaria_motorista_valor is not None else None
+    if diaria_motorista_valor is not None and diaria_motorista_valor < 0:
+        raise HTTPException(status_code=400, detail="diaria_motorista_valor invalida.")
+
     with get_conn() as conn:
         cur = conn.cursor()
+        _ensure_programacao_mutable(cur, prog)
         cur.execute("PRAGMA table_info(programacoes)")
         cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
 
@@ -4049,19 +4206,19 @@ def desktop_atualizar_cabecalho_rota(
         vals: List[Any] = []
         if "data_saida" in cols_prog:
             sets.append("data_saida=?")
-            vals.append(str(payload.data_saida or "").strip())
+            vals.append(data_saida)
         if "hora_saida" in cols_prog:
             sets.append("hora_saida=?")
-            vals.append(str(payload.hora_saida or "").strip())
+            vals.append(hora_saida)
         if "data_chegada" in cols_prog:
             sets.append("data_chegada=?")
-            vals.append(str(payload.data_chegada or "").strip())
+            vals.append(data_chegada)
         if "hora_chegada" in cols_prog:
             sets.append("hora_chegada=?")
-            vals.append(str(payload.hora_chegada or "").strip())
-        if ("diaria_motorista_valor" in cols_prog) and (payload.diaria_motorista_valor is not None):
+            vals.append(hora_chegada)
+        if ("diaria_motorista_valor" in cols_prog) and (diaria_motorista_valor is not None):
             sets.append("diaria_motorista_valor=?")
-            vals.append(float(payload.diaria_motorista_valor or 0.0))
+            vals.append(diaria_motorista_valor)
 
         if not sets:
             raise HTTPException(status_code=500, detail="Colunas de cabecalho indisponiveis em programacoes.")
@@ -4074,6 +4231,51 @@ def desktop_atualizar_cabecalho_rota(
         updated = int(cur.rowcount or 0)
         if updated <= 0:
             raise HTTPException(status_code=404, detail="programacao nao encontrada.")
+
+        has_diarias_payload = any(
+            value is not None
+            for value in (
+                payload.qtd_diarias,
+                payload.qtd_ajudantes,
+                payload.total_motorista,
+                payload.total_ajudantes,
+                payload.observacao_motorista,
+                payload.observacao_ajudantes,
+            )
+        )
+        if has_diarias_payload:
+            qtd = float(payload.qtd_diarias or 0.0)
+            qtd_ajudantes = int(payload.qtd_ajudantes or 0)
+            total_mot = float(payload.total_motorista or 0.0)
+            total_ajud = float(payload.total_ajudantes or 0.0)
+            if qtd < 0 or qtd_ajudantes < 0 or total_mot < 0 or total_ajud < 0:
+                raise HTTPException(status_code=400, detail="Valores de diarias invalidos.")
+            obs_motorista = str(payload.observacao_motorista or "").strip().upper()
+            obs_ajudantes = str(payload.observacao_ajudantes or "").strip().upper()
+            now_s = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cur.execute(
+                """
+                DELETE FROM despesas
+                 WHERE codigo_programacao=?
+                   AND descricao IN ('DIARIAS MOTORISTA', 'DIARIAS AJUDANTES')
+                   AND COALESCE(categoria, '')='DIARIAS'
+                """,
+                (prog,),
+            )
+            cur.execute(
+                """
+                INSERT INTO despesas (codigo_programacao, descricao, valor, categoria, observacao, data_registro)
+                VALUES (?, ?, ?, 'DIARIAS', ?, ?)
+                """,
+                (prog, "DIARIAS MOTORISTA", total_mot, obs_motorista, now_s),
+            )
+            cur.execute(
+                """
+                INSERT INTO despesas (codigo_programacao, descricao, valor, categoria, observacao, data_registro)
+                VALUES (?, ?, ?, 'DIARIAS', ?, ?)
+                """,
+                (prog, "DIARIAS AJUDANTES", total_ajud, obs_ajudantes, now_s),
+            )
     return {"ok": True, "codigo_programacao": prog, "updated": updated}
 
 
@@ -4094,8 +4296,49 @@ def desktop_atualizar_financeiro_rota(
             sets.append(f"{col}=?")
             vals.append(caster(value))
 
+    def _ensure_non_negative(name: str, value: Optional[Any]):
+        if value is None:
+            return
+        if float(value) < 0:
+            raise HTTPException(status_code=400, detail=f"{name} invalido.")
+
+    for field_name in (
+        "nf_kg",
+        "nf_caixas",
+        "nf_kg_carregado",
+        "nf_kg_vendido",
+        "nf_saldo",
+        "nf_preco",
+        "media",
+        "nf_caixa_final",
+        "km_inicial",
+        "km_final",
+        "litros",
+        "km_rodado",
+        "media_km_l",
+        "custo_km",
+        "ced_200_qtd",
+        "ced_100_qtd",
+        "ced_50_qtd",
+        "ced_20_qtd",
+        "ced_10_qtd",
+        "ced_5_qtd",
+        "ced_2_qtd",
+        "valor_dinheiro",
+        "adiantamento",
+    ):
+        _ensure_non_negative(field_name, getattr(payload, field_name))
+
+    if payload.km_inicial is not None and payload.km_final is not None and float(payload.km_final) < float(payload.km_inicial):
+        raise HTTPException(status_code=400, detail="km_final nao pode ser menor que km_inicial.")
+    if payload.nf_kg is not None and payload.nf_kg_carregado is not None and float(payload.nf_kg_carregado) > float(payload.nf_kg):
+        raise HTTPException(status_code=400, detail="nf_kg_carregado nao pode ser maior que nf_kg.")
+    if payload.nf_kg_carregado is not None and payload.nf_kg_vendido is not None and float(payload.nf_kg_vendido) > float(payload.nf_kg_carregado):
+        raise HTTPException(status_code=400, detail="nf_kg_vendido nao pode ser maior que nf_kg_carregado.")
+
     with get_conn() as conn:
         cur = conn.cursor()
+        _ensure_programacao_mutable(cur, prog)
         cur.execute("PRAGMA table_info(programacoes)")
         cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
 
@@ -4197,6 +4440,7 @@ def desktop_sync_diarias_despesas(
 
     with get_conn() as conn:
         cur = conn.cursor()
+        _ensure_programacao_mutable(cur, prog)
         cur.execute(
             """
             DELETE FROM despesas
@@ -4245,6 +4489,7 @@ def desktop_upsert_cliente_manual_programacao(
 
     with get_conn() as conn:
         cur = conn.cursor()
+        _ensure_programacao_mutable(cur, prog)
         cur.execute(
             """
             SELECT COUNT(1) AS n
@@ -4322,6 +4567,30 @@ def desktop_listar_despesas(
     return {"ok": True, "codigo_programacao": prog, "despesas": out}
 
 
+@app.get("/desktop/rotas/{codigo_programacao}/bundle")
+def desktop_rota_bundle(
+    codigo_programacao: str,
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    prog = (codigo_programacao or "").strip().upper()
+    if not prog:
+        raise HTTPException(status_code=400, detail="codigo_programacao obrigatorio.")
+
+    detalhe = rota_detalhe_desktop(prog, _ok=True)
+    receb = desktop_listar_recebimentos(prog, _ok=True)
+    desp = desktop_listar_despesas(prog, _ok=True)
+    logistica = desktop_rota_logistica(prog, _ok=True)
+    return {
+        "ok": True,
+        "codigo_programacao": prog,
+        "rota": detalhe.get("rota") if isinstance(detalhe, dict) else None,
+        "clientes": detalhe.get("clientes") if isinstance(detalhe, dict) else [],
+        "recebimentos": receb.get("recebimentos") if isinstance(receb, dict) else [],
+        "despesas": desp.get("despesas") if isinstance(desp, dict) else [],
+        "logistica": logistica.get("logistica") if isinstance(logistica, dict) else {},
+    }
+
+
 @app.post("/desktop/rotas/{codigo_programacao}/despesas")
 def desktop_criar_despesa(
     codigo_programacao: str,
@@ -4343,6 +4612,7 @@ def desktop_criar_despesa(
 
     with get_conn() as conn:
         cur = conn.cursor()
+        _ensure_programacao_mutable(cur, prog)
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         cur.execute(
             """
@@ -4423,6 +4693,7 @@ def desktop_atualizar_despesa(
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="despesa nao encontrada.")
+        _ensure_programacao_mutable(cur, str(row["codigo_programacao"] or ""))
         cur.execute(
             "UPDATE despesas SET descricao=?, valor=?, categoria=?, observacao=? WHERE id=?",
             (desc, val, cat, obs, did),
@@ -4445,11 +4716,17 @@ def desktop_excluir_despesa(
     with get_conn() as conn:
         cur = conn.cursor()
         if prog:
+            _ensure_programacao_mutable(cur, prog)
             cur.execute(
                 "DELETE FROM despesas WHERE id=? AND UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))",
                 (did, prog),
             )
         else:
+            cur.execute("SELECT codigo_programacao FROM despesas WHERE id=? LIMIT 1", (did,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="despesa nao encontrada.")
+            _ensure_programacao_mutable(cur, str(row["codigo_programacao"] or ""))
             cur.execute("DELETE FROM despesas WHERE id=?", (did,))
         deleted = int(cur.rowcount or 0)
     if deleted <= 0:
@@ -4469,6 +4746,7 @@ def desktop_atualizar_status_rota(
 
     with get_conn() as conn:
         cur = conn.cursor()
+        _ensure_programacao_mutable(cur, prog)
         cur.execute("PRAGMA table_info(programacoes)")
         cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
 
@@ -4502,6 +4780,187 @@ def desktop_atualizar_status_rota(
     return {"ok": True, "codigo_programacao": prog, "updated": updated}
 
 
+@app.delete("/desktop/rotas/{codigo_programacao}")
+def desktop_excluir_programacao(
+    codigo_programacao: str,
+    delete_vendas: int = Query(0, description="1 para apagar vendas vinculadas; 0 para devolver a Importar Vendas"),
+    _ok: bool = Depends(_require_desktop_secret),
+):
+    prog = (codigo_programacao or "").strip().upper()
+    if not prog:
+        raise HTTPException(status_code=400, detail="codigo_programacao obrigatorio.")
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        state = _programacao_state(cur, prog)
+        if not state:
+            raise HTTPException(status_code=404, detail="programacao nao encontrada.")
+        if state["prestacao_status"] == "FECHADA":
+            raise HTTPException(status_code=409, detail="prestacao fechada; exclusao da programacao esta bloqueada.")
+
+        st_eff = str(state.get("status_operacional") or state.get("status") or "").strip().upper()
+        if st_eff not in {"", "ATIVA", "ABERTA", "PENDENTE", "PROGRAMADA"}:
+            raise HTTPException(
+                status_code=409,
+                detail=f"programacao {prog} esta em estado {st_eff or '-'} e nao pode ser excluida.",
+            )
+
+        if int(delete_vendas or 0) == 1:
+            cur.execute("DELETE FROM vendas_importadas WHERE UPPER(COALESCE(codigo_programacao,''))=UPPER(?)", (prog,))
+        else:
+            cur.execute(
+                """
+                UPDATE vendas_importadas
+                   SET usada=0,
+                       usada_em='',
+                       codigo_programacao='',
+                       selecionada=0
+                 WHERE UPPER(COALESCE(codigo_programacao,''))=UPPER(?)
+                """,
+                (prog,),
+            )
+
+        for table_name in (
+            "programacao_itens_log",
+            "programacao_itens_controle",
+            "programacao_itens",
+            "recebimentos",
+            "despesas",
+            "rota_gps_pings",
+            "rota_substituicoes",
+            "cliente_localizacao_amostras",
+        ):
+            if table_exists(cur, table_name):
+                cur.execute(f"DELETE FROM {table_name} WHERE UPPER(COALESCE(codigo_programacao,''))=UPPER(?)", (prog,))
+
+        if table_exists(cur, "transferencias"):
+            cur.execute(
+                """
+                DELETE FROM transferencias
+                WHERE UPPER(COALESCE(codigo_origem,''))=UPPER(?)
+                   OR UPPER(COALESCE(codigo_destino,''))=UPPER(?)
+                """,
+                (prog, prog),
+            )
+
+        cur.execute("DELETE FROM programacoes WHERE UPPER(COALESCE(codigo_programacao,''))=UPPER(?)", (prog,))
+        deleted = int(cur.rowcount or 0)
+        if deleted <= 0:
+            raise HTTPException(status_code=404, detail="programacao nao encontrada.")
+
+    return {"ok": True, "codigo_programacao": prog, "deleted": deleted}
+
+
+def _collect_desktop_logistica(cur: sqlite3.Cursor, prog: str) -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        "pend_substituicao": 0,
+        "pend_transferencia": 0,
+        "transf_out": 0,
+        "transf_in": 0,
+        "base_cx": 0,
+        "atual_cx": 0,
+        "esperado_cx": 0,
+        "delta_cx": 0,
+        "itens_ok": True,
+        "resumo": [],
+    }
+
+    if table_exists(cur, "rota_substituicoes"):
+        cur.execute(
+            """
+            SELECT COUNT(1) AS n
+            FROM rota_substituicoes
+            WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))
+              AND UPPER(TRIM(COALESCE(status,'')))='PENDENTE'
+            """,
+            (prog,),
+        )
+        row = cur.fetchone()
+        out["pend_substituicao"] = int((row["n"] if row else 0) or 0)
+
+    if table_exists(cur, "transferencias"):
+        cur.execute(
+            """
+            SELECT
+                SUM(CASE
+                        WHEN UPPER(TRIM(COALESCE(status,'')))='PENDENTE'
+                         AND (UPPER(TRIM(COALESCE(codigo_origem,'')))=UPPER(TRIM(?))
+                           OR UPPER(TRIM(COALESCE(codigo_destino,'')))=UPPER(TRIM(?)))
+                        THEN 1 ELSE 0
+                    END) AS pend,
+                SUM(CASE
+                        WHEN UPPER(TRIM(COALESCE(codigo_origem,'')))=UPPER(TRIM(?))
+                         AND UPPER(TRIM(COALESCE(status,''))) IN ('PENDENTE','ACEITA','CONVERTIDA')
+                        THEN COALESCE(qtd_caixas,0) ELSE 0
+                    END) AS out_cx,
+                SUM(CASE
+                        WHEN UPPER(TRIM(COALESCE(codigo_destino,'')))=UPPER(TRIM(?))
+                         AND UPPER(TRIM(COALESCE(status,''))) IN ('PENDENTE','ACEITA','CONVERTIDA')
+                        THEN COALESCE(qtd_caixas,0) ELSE 0
+                    END) AS in_cx
+            FROM transferencias
+            """,
+            (prog, prog, prog, prog),
+        )
+        row = cur.fetchone()
+        out["pend_transferencia"] = int((row["pend"] if row else 0) or 0)
+        out["transf_out"] = int((row["out_cx"] if row else 0) or 0)
+        out["transf_in"] = int((row["in_cx"] if row else 0) or 0)
+
+    if table_exists(cur, "programacao_itens"):
+        cur.execute("PRAGMA table_info(programacao_itens)")
+        cols_it = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+        has_cx_atual = "caixas_atual" in cols_it
+        cur.execute(
+            f"""
+            SELECT
+                COALESCE(SUM(COALESCE(qnt_caixas,0)),0) AS base_cx,
+                COALESCE(SUM(COALESCE({"caixas_atual" if has_cx_atual else "qnt_caixas"},0)),0) AS atual_cx
+            FROM programacao_itens
+            WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))
+            """,
+            (prog,),
+        )
+        row = cur.fetchone()
+        out["base_cx"] = int((row["base_cx"] if row else 0) or 0)
+        atual_calc = int((row["atual_cx"] if row else 0) or 0)
+
+        if (not has_cx_atual) and table_exists(cur, "programacao_itens_controle"):
+            try:
+                cur.execute("PRAGMA table_info(programacao_itens_controle)")
+                cols_ctl = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+                if "caixas_atual" in cols_ctl:
+                    cur.execute(
+                        """
+                        SELECT COALESCE(SUM(COALESCE(caixas_atual,0)),0) AS cx
+                        FROM programacao_itens_controle
+                        WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))
+                        """,
+                        (prog,),
+                    )
+                    rr = cur.fetchone()
+                    atual_calc = int((rr["cx"] if rr else 0) or 0)
+            except Exception:
+                logging.debug("Falha ao calcular caixas_atual via controle", exc_info=True)
+
+        out["atual_cx"] = max(int(atual_calc), 0)
+        out["esperado_cx"] = 0
+        out["delta_cx"] = int(out["atual_cx"]) - int(out["esperado_cx"])
+        out["itens_ok"] = bool(out["atual_cx"] == 0)
+
+    out["resumo"] = [
+        f"Substituicoes pendentes: {out['pend_substituicao']}",
+        f"Transferencias pendentes: {out['pend_transferencia']}",
+        f"Transferencia caixas (origem): {out['transf_out']} cx",
+        f"Transferencia caixas (destino): {out['transf_in']} cx",
+        f"Caixas base: {out['base_cx']} cx",
+        f"Caixas atuais: {out['atual_cx']} cx",
+        f"Caixas esperadas no fechamento: {out['esperado_cx']} cx",
+        f"Delta caixas: {out['delta_cx']} cx",
+    ]
+    return out
+
+
 def _is_allowed_desktop_sql_mutation(sql: str) -> bool:
     s = str(sql or "").strip()
     if not s:
@@ -4509,8 +4968,217 @@ def _is_allowed_desktop_sql_mutation(sql: str) -> bool:
     s_up = s.upper()
     if s_up.startswith("INSERT ") or s_up.startswith("UPDATE ") or s_up.startswith("DELETE ") or s_up.startswith("REPLACE "):
         banned = ("PRAGMA ", "ATTACH ", "DETACH ", "VACUUM ", "ALTER ", "DROP ", "CREATE ", "sqlite_master")
-        return not any(tok in s_up for tok in banned)
+        if any(tok in s_up for tok in banned):
+            return False
+        allowed_tables = {
+            "USUARIOS",
+            "MOTORISTAS",
+            "VEICULOS",
+            "AJUDANTES",
+            "EQUIPES",
+            "CLIENTES",
+            "PROGRAMACOES",
+            "PROGRAMACAO_ITENS",
+            "PROGRAMACAO_ITENS_CONTROLE",
+            "PROGRAMACAO_ITENS_LOG",
+            "RECEBIMENTOS",
+            "DESPESAS",
+            "VENDAS_IMPORTADAS",
+            "CENTRO_CUSTOS",
+            "ROTAS",
+            "TRANSFERENCIAS",
+            "ROTA_SUBSTITUICOES",
+            "ROTA_GPS_PINGS",
+            "CLIENTE_LOCALIZACAO_AMOSTRAS",
+        }
+        match = (
+            re.match(r"^(?:INSERT\s+INTO|REPLACE\s+INTO)\s+([A-Z0-9_]+)\b", s_up)
+            or re.match(r"^UPDATE\s+([A-Z0-9_]+)\b", s_up)
+            or re.match(r"^DELETE\s+FROM\s+([A-Z0-9_]+)\b", s_up)
+        )
+        table_name = str(match.group(1) if match else "").upper()
+        return table_name in allowed_tables
     return False
+
+
+def _programacao_state(cur, codigo_programacao: str) -> Optional[Dict[str, Any]]:
+    prog = (codigo_programacao or "").strip().upper()
+    if not prog:
+        return None
+
+    cur.execute("PRAGMA table_info(programacoes)")
+    cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+    if not cols_prog:
+        return None
+
+    prest_expr = "UPPER(TRIM(COALESCE(prestacao_status,'PENDENTE')))" if "prestacao_status" in cols_prog else "'PENDENTE'"
+    status_expr = "UPPER(TRIM(COALESCE(status,'')))" if "status" in cols_prog else "''"
+    status_op_expr = "UPPER(TRIM(COALESCE(status_operacional,'')))" if "status_operacional" in cols_prog else "''"
+    cur.execute(
+        f"""
+        SELECT
+            codigo_programacao,
+            {prest_expr} AS prestacao_status,
+            {status_expr} AS status,
+            {status_op_expr} AS status_operacional
+        FROM programacoes
+        WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (prog,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "codigo_programacao": str(row["codigo_programacao"] or "").strip().upper(),
+        "prestacao_status": str(row["prestacao_status"] or "PENDENTE").strip().upper(),
+        "status": str(row["status"] or "").strip().upper(),
+        "status_operacional": str(row["status_operacional"] or "").strip().upper(),
+    }
+
+
+def _ensure_programacao_mutable(cur, codigo_programacao: str) -> Dict[str, Any]:
+    state = _programacao_state(cur, codigo_programacao)
+    if not state:
+        raise HTTPException(status_code=404, detail="programacao nao encontrada.")
+    if state["prestacao_status"] == "FECHADA":
+        raise HTTPException(
+            status_code=409,
+            detail="prestacao fechada; alteracoes de recebimentos, despesas e cabecalho estao bloqueadas.",
+        )
+    return state
+
+
+def _ensure_programacao_has_cliente(cur: sqlite3.Cursor, codigo_programacao: str, cod_cliente: str) -> None:
+    prog = (codigo_programacao or "").strip().upper()
+    cod = (cod_cliente or "").strip().upper()
+    if not prog or not cod:
+        raise HTTPException(status_code=400, detail="codigo_programacao e cod_cliente obrigatorios.")
+    if not table_exists(cur, "programacao_itens"):
+        return
+    cur.execute(
+        """
+        SELECT 1
+        FROM programacao_itens
+        WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))
+          AND UPPER(TRIM(COALESCE(cod_cliente,'')))=UPPER(TRIM(?))
+        LIMIT 1
+        """,
+        (prog, cod),
+    )
+    if not cur.fetchone():
+        raise HTTPException(
+            status_code=409,
+            detail="cliente nao vinculado a programacao; inclua o cliente na rota antes de lancar recebimento.",
+        )
+
+
+def _cadastro_delete_block_reason(
+    cur: sqlite3.Cursor,
+    table: str,
+    *,
+    codigo: str = "",
+    placa: str = "",
+    ajudante_id: int = 0,
+    cod_cliente: str = "",
+) -> str:
+    try:
+        if table == "motoristas":
+            cod = (codigo or "").strip().upper()
+            if not cod or not table_exists(cur, "programacoes"):
+                return ""
+            cur.execute("PRAGMA table_info(programacoes)")
+            cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+            conds: List[str] = []
+            params: List[Any] = []
+            for col in ("motorista_codigo", "codigo_motorista", "motorista"):
+                if col in cols:
+                    conds.append(f"UPPER(TRIM(COALESCE({col},'')))=UPPER(TRIM(?))")
+                    params.append(cod)
+            if not conds:
+                return ""
+            cur.execute(f"SELECT COUNT(*) AS qtd FROM programacoes WHERE {' OR '.join(conds)}", tuple(params))
+            if int((cur.fetchone() or [0])[0] or 0) > 0:
+                return "Motorista vinculado a programacao/rota."
+            return ""
+
+        if table == "veiculos":
+            plc = (placa or "").strip().upper()
+            if not plc or not table_exists(cur, "programacoes"):
+                return ""
+            cur.execute("SELECT COUNT(*) AS qtd FROM programacoes WHERE UPPER(TRIM(COALESCE(veiculo,'')))=UPPER(TRIM(?))", (plc,))
+            if int((cur.fetchone() or [0])[0] or 0) > 0:
+                return "Veiculo vinculado a programacao/rota."
+            return ""
+
+        if table == "clientes":
+            cod = (cod_cliente or "").strip().upper()
+            if not cod:
+                return ""
+            if table_exists(cur, "programacao_itens"):
+                cur.execute("SELECT COUNT(*) AS qtd FROM programacao_itens WHERE UPPER(TRIM(COALESCE(cod_cliente,'')))=UPPER(TRIM(?))", (cod,))
+                if int((cur.fetchone() or [0])[0] or 0) > 0:
+                    return "Cliente vinculado a programacao."
+            if table_exists(cur, "recebimentos"):
+                cur.execute("SELECT COUNT(*) AS qtd FROM recebimentos WHERE UPPER(TRIM(COALESCE(cod_cliente,'')))=UPPER(TRIM(?))", (cod,))
+                if int((cur.fetchone() or [0])[0] or 0) > 0:
+                    return "Cliente vinculado a recebimentos."
+            return ""
+
+        if table == "ajudantes":
+            aid = int(ajudante_id or 0)
+            if aid <= 0 or not table_exists(cur, "ajudantes"):
+                return ""
+            cur.execute("SELECT COALESCE(nome,'') AS nome, COALESCE(sobrenome,'') AS sobrenome FROM ajudantes WHERE id=? LIMIT 1", (aid,))
+            row = cur.fetchone()
+            nome = str(row["nome"] or "").strip().upper() if row else ""
+            sobrenome = str(row["sobrenome"] or "").strip().upper() if row else ""
+            alvo = f"{nome} {sobrenome}".strip()
+            if table_exists(cur, "equipes"):
+                cur.execute("PRAGMA table_info(equipes)")
+                cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+                conds = []
+                params = []
+                for col in ("ajudante1", "ajudante2", "ajudante_1", "ajudante_2"):
+                    if col in cols:
+                        conds.append(f"UPPER(TRIM(COALESCE({col},'')))=UPPER(TRIM(?))")
+                        params.append(str(aid))
+                        if nome:
+                            conds.append(f"UPPER(TRIM(COALESCE({col},'')))=UPPER(TRIM(?))")
+                            params.append(nome)
+                        if alvo:
+                            conds.append(f"UPPER(TRIM(COALESCE({col},'')))=UPPER(TRIM(?))")
+                            params.append(alvo)
+                if conds:
+                    cur.execute(f"SELECT COUNT(*) AS qtd FROM equipes WHERE {' OR '.join(conds)}", tuple(params))
+                    if int((cur.fetchone() or [0])[0] or 0) > 0:
+                        return "Ajudante vinculado a equipe."
+            if nome and table_exists(cur, "programacoes"):
+                cur.execute("PRAGMA table_info(programacoes)")
+                cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+                if "equipe" in cols:
+                    expr = "UPPER(TRIM(COALESCE(equipe,'')))"
+                    cur.execute(
+                        f"""
+                        SELECT COUNT(*) AS qtd
+                        FROM programacoes
+                        WHERE
+                            {expr}=UPPER(TRIM(?))
+                            OR {expr}=UPPER(TRIM(?))
+                            OR {expr} LIKE UPPER(TRIM(?))
+                            OR {expr} LIKE UPPER(TRIM(?))
+                            OR {expr} LIKE UPPER(TRIM(?))
+                        """,
+                        (nome, alvo, f"{nome}|%", f"%|{nome}", f"%|{nome}|%"),
+                    )
+                    if int((cur.fetchone() or [0])[0] or 0) > 0:
+                        return "Ajudante vinculado a programacao."
+            return ""
+    except Exception:
+        logging.debug("Falha ao validar vinculos antes da exclusao de cadastro", exc_info=True)
+    return ""
 
 
 def _normalize_desktop_sql_params(params: Any):
@@ -4568,10 +5236,17 @@ def desktop_overview(_ok: bool = Depends(_require_desktop_secret)):
     with get_conn() as conn:
         cur = conn.cursor()
         where_not_finalizadas = _rotas_not_finalizadas_clause(conn, "p")
+        try:
+            cur.execute("PRAGMA table_info(programacoes)")
+            cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+        except Exception:
+            cols_prog = set()
 
         total_prog = 0
         total_vendas = 0
         total_clientes_ativos = 0
+        prestacao_pendente = 0
+        sem_despesa = 0
         rotas: List[Dict[str, Any]] = []
 
         try:
@@ -4608,6 +5283,40 @@ def desktop_overview(_ok: bool = Depends(_require_desktop_secret)):
             total_clientes_ativos = 0
 
         try:
+            status_col = "status_operacional" if "status_operacional" in cols_prog else "status"
+            status_expr = f"UPPER(TRIM(COALESCE({status_col}, '')))"
+            where_final = f"{status_expr} IN ('FINALIZADA', 'FINALIZADO')"
+            if "prestacao_status" in cols_prog:
+                where_prest = "UPPER(TRIM(COALESCE(prestacao_status, 'PENDENTE'))) <> 'FECHADA'"
+            else:
+                where_prest = "1=1"
+            where_base = f"{where_final} AND {where_prest}"
+            cur.execute(f"SELECT COUNT(*) AS n FROM programacoes WHERE {where_base}")
+            row = cur.fetchone()
+            prestacao_pendente = int((row["n"] if row else 0) or 0)
+        except Exception:
+            prestacao_pendente = 0
+
+        try:
+            cur.execute(
+                f"""
+                SELECT COUNT(*) AS n
+                FROM programacoes p
+                WHERE {where_base}
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM despesas d
+                      WHERE UPPER(TRIM(COALESCE(d.codigo_programacao, '')))
+                          = UPPER(TRIM(COALESCE(p.codigo_programacao, '')))
+                  )
+                """
+            )
+            row = cur.fetchone()
+            sem_despesa = int((row["n"] if row else 0) or 0)
+        except Exception:
+            sem_despesa = 0
+
+        try:
             cur.execute(
                 """
                 SELECT
@@ -4642,6 +5351,11 @@ def desktop_overview(_ok: bool = Depends(_require_desktop_secret)):
         "total_programacoes_ativas": total_prog,
         "total_vendas_importadas": total_vendas,
         "total_clientes_ativos": total_clientes_ativos,
+        "pendencias": {
+            "rotas_abertas": total_prog,
+            "prestacao_pendente": prestacao_pendente,
+            "sem_despesa": sem_despesa,
+        },
         "rotas": rotas,
     }
 
@@ -4851,7 +5565,14 @@ def desktop_relatorio_rotina_motoristas(
         cur.execute("PRAGMA table_info(programacoes)")
         cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
         km_expr = "COALESCE(km_rodado,0)" if "km_rodado" in cols else "0"
-        kg_expr = "COALESCE(kg_vendido,0)" if "kg_vendido" in cols else "0"
+        if "nf_kg_vendido" in cols and "kg_vendido" in cols:
+            kg_expr = "COALESCE(nf_kg_vendido, kg_vendido, 0)"
+        elif "nf_kg_vendido" in cols:
+            kg_expr = "COALESCE(nf_kg_vendido,0)"
+        elif "kg_vendido" in cols:
+            kg_expr = "COALESCE(kg_vendido,0)"
+        else:
+            kg_expr = "0"
         sql = f"""
             SELECT
                 COALESCE(codigo_programacao,'') AS codigo_programacao,
@@ -5076,119 +5797,9 @@ def desktop_rota_logistica(
     if not prog:
         raise HTTPException(status_code=400, detail="codigo_programacao obrigatorio.")
 
-    out: Dict[str, Any] = {
-        "pend_substituicao": 0,
-        "pend_transferencia": 0,
-        "transf_out": 0,
-        "transf_in": 0,
-        "base_cx": 0,
-        "atual_cx": 0,
-        "esperado_cx": 0,
-        "delta_cx": 0,
-        "itens_ok": True,
-        "resumo": [],
-    }
-
     with get_conn() as conn:
         cur = conn.cursor()
-
-        def _has_table(tn: str) -> bool:
-            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (tn,))
-            return bool(cur.fetchone())
-
-        if _has_table("rota_substituicoes"):
-            cur.execute(
-                """
-                SELECT COUNT(1) AS n
-                FROM rota_substituicoes
-                WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))
-                  AND UPPER(TRIM(COALESCE(status,'')))='PENDENTE'
-                """,
-                (prog,),
-            )
-            row = cur.fetchone()
-            out["pend_substituicao"] = int((row["n"] if row else 0) or 0)
-
-        if _has_table("transferencias"):
-            cur.execute(
-                """
-                SELECT
-                    SUM(CASE
-                            WHEN UPPER(TRIM(COALESCE(status,'')))='PENDENTE'
-                             AND (UPPER(TRIM(COALESCE(codigo_origem,'')))=UPPER(TRIM(?))
-                               OR UPPER(TRIM(COALESCE(codigo_destino,'')))=UPPER(TRIM(?)))
-                            THEN 1 ELSE 0
-                        END) AS pend,
-                    SUM(CASE
-                            WHEN UPPER(TRIM(COALESCE(codigo_origem,'')))=UPPER(TRIM(?))
-                             AND UPPER(TRIM(COALESCE(status,''))) IN ('PENDENTE','ACEITA','CONVERTIDA')
-                            THEN COALESCE(qtd_caixas,0) ELSE 0
-                        END) AS out_cx,
-                    SUM(CASE
-                            WHEN UPPER(TRIM(COALESCE(codigo_destino,'')))=UPPER(TRIM(?))
-                             AND UPPER(TRIM(COALESCE(status,''))) IN ('PENDENTE','ACEITA','CONVERTIDA')
-                            THEN COALESCE(qtd_caixas,0) ELSE 0
-                        END) AS in_cx
-                FROM transferencias
-                """,
-                (prog, prog, prog, prog),
-            )
-            row = cur.fetchone()
-            out["pend_transferencia"] = int((row["pend"] if row else 0) or 0)
-            out["transf_out"] = int((row["out_cx"] if row else 0) or 0)
-            out["transf_in"] = int((row["in_cx"] if row else 0) or 0)
-
-        if _has_table("programacao_itens"):
-            cur.execute("PRAGMA table_info(programacao_itens)")
-            cols_it = {str(r[1]).lower() for r in (cur.fetchall() or [])}
-            has_cx_atual = "caixas_atual" in cols_it
-            cur.execute(
-                f"""
-                SELECT
-                    COALESCE(SUM(COALESCE(qnt_caixas,0)),0) AS base_cx,
-                    COALESCE(SUM(COALESCE({"caixas_atual" if has_cx_atual else "qnt_caixas"},0)),0) AS atual_cx
-                FROM programacao_itens
-                WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))
-                """,
-                (prog,),
-            )
-            row = cur.fetchone()
-            out["base_cx"] = int((row["base_cx"] if row else 0) or 0)
-            atual_calc = int((row["atual_cx"] if row else 0) or 0)
-
-            if (not has_cx_atual) and _has_table("programacao_itens_controle"):
-                try:
-                    cur.execute("PRAGMA table_info(programacao_itens_controle)")
-                    cols_ctl = {str(r[1]).lower() for r in (cur.fetchall() or [])}
-                    if "caixas_atual" in cols_ctl:
-                        cur.execute(
-                            """
-                            SELECT COALESCE(SUM(COALESCE(caixas_atual,0)),0) AS cx
-                            FROM programacao_itens_controle
-                            WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))
-                            """,
-                            (prog,),
-                        )
-                        rr = cur.fetchone()
-                        atual_calc = int((rr["cx"] if rr else 0) or 0)
-                except Exception:
-                    logging.debug("Falha ao calcular caixas_atual via controle", exc_info=True)
-
-            out["atual_cx"] = max(int(atual_calc), 0)
-            out["esperado_cx"] = 0
-            out["delta_cx"] = int(out["atual_cx"]) - int(out["esperado_cx"])
-            out["itens_ok"] = bool(out["atual_cx"] == 0)
-
-    out["resumo"] = [
-        f"Substituicoes pendentes: {out['pend_substituicao']}",
-        f"Transferencias pendentes: {out['pend_transferencia']}",
-        f"Transferencia caixas (origem): {out['transf_out']} cx",
-        f"Transferencia caixas (destino): {out['transf_in']} cx",
-        f"Caixas base: {out['base_cx']} cx",
-        f"Caixas atuais: {out['atual_cx']} cx",
-        f"Caixas esperadas no fechamento: {out['esperado_cx']} cx",
-        f"Delta caixas: {out['delta_cx']} cx",
-    ]
+        out = _collect_desktop_logistica(cur, prog)
     return {"ok": True, "codigo_programacao": prog, "logistica": out}
 
 
@@ -5438,7 +6049,7 @@ def salvar_controle_cliente(
                 status = "PENDENTE"
 
         evento_em = _evento_iso_or_now(payload.evento_em)
-        alterado_em = evento_em if status == "ALTERADO" else None
+        alterado_em = evento_em if status in {"ALTERADO", "ENTREGUE", "CANCELADO"} else None
 
         # valida faixa de caixas para evitar manipulação indevida
         if caixas_atual is not None:
@@ -5566,7 +6177,7 @@ def salvar_controle_cliente(
             params.append(alteracao_detalhe)
             sets.append("alteracao_detalhe=?")
         if "caixas_atual" in cols:
-            params.append(caixas_atual if caixas_atual is not None else base_caixas)
+            params.append(caixas_eff)
             sets.append("caixas_atual=?")
         if "preco_atual" in cols:
             params.append(preco_atual if preco_atual is not None else base_preco)
@@ -7454,6 +8065,12 @@ def desktop_listar_vendas_importadas(
     term = (busca or "").strip()
     codigo_filtro = str(codigo_programacao or "").strip().upper()
     like = f"%{term}%"
+    where_codigo = (
+        "UPPER(COALESCE(codigo_programacao,''))=?"
+        if codigo_filtro
+        else "TRIM(COALESCE(codigo_programacao,''))=''"
+    )
+    params_base: Tuple[Any, ...] = ((codigo_filtro,) if codigo_filtro else ())
     with get_conn() as conn:
         ensure_core_schema(conn)
         cur = conn.cursor()
@@ -7468,14 +8085,14 @@ def desktop_listar_vendas_importadas(
                        COALESCE(codigo_programacao,'') AS codigo_programacao
                 FROM vendas_importadas
                 WHERE IFNULL(usada,0)=0
-                  AND (?='' OR UPPER(COALESCE(codigo_programacao,''))=?)
+                  AND {where_codigo}
                   AND (
                     pedido LIKE ? OR cliente LIKE ? OR nome_cliente LIKE ? OR vendedor LIKE ? OR produto LIKE ?
                   )
                 ORDER BY id DESC
                 LIMIT ?
                 """,
-                (codigo_filtro, codigo_filtro, like, like, like, like, like, int(limit)),
+                (*params_base, like, like, like, like, like, int(limit)),
             )
         else:
             cur.execute(
@@ -7488,11 +8105,11 @@ def desktop_listar_vendas_importadas(
                        COALESCE(codigo_programacao,'') AS codigo_programacao
                 FROM vendas_importadas
                 WHERE IFNULL(usada,0)=0
-                  AND (?='' OR UPPER(COALESCE(codigo_programacao,''))=?)
+                  AND {where_codigo}
                 ORDER BY id DESC
                 LIMIT ?
                 """,
-                (codigo_filtro, codigo_filtro, int(limit)),
+                (*params_base, int(limit)),
             )
         out = []
         for r in (cur.fetchall() or []):
@@ -7594,7 +8211,7 @@ def desktop_toggle_venda_importada_selecao(venda_id: int, _ok: bool = Depends(_r
             """
             UPDATE vendas_importadas
                SET selecionada = CASE WHEN selecionada=1 THEN 0 ELSE 1 END
-             WHERE id=? AND IFNULL(usada,0)=0
+             WHERE id=? AND IFNULL(usada,0)=0 AND TRIM(COALESCE(codigo_programacao,''))=''
             """,
             (rid,),
         )
@@ -7610,7 +8227,10 @@ def desktop_marcar_todas_vendas_importadas(
     with get_conn() as conn:
         ensure_core_schema(conn)
         cur = conn.cursor()
-        cur.execute("UPDATE vendas_importadas SET selecionada=? WHERE IFNULL(usada,0)=0", (int(selected),))
+        cur.execute(
+            "UPDATE vendas_importadas SET selecionada=? WHERE IFNULL(usada,0)=0 AND TRIM(COALESCE(codigo_programacao,''))=''",
+            (int(selected),),
+        )
         updated = int(cur.rowcount or 0)
     return {"ok": True, "updated": updated, "selected": int(selected)}
 
@@ -7636,7 +8256,7 @@ def desktop_marcar_ids_vendas_importadas(
         ensure_core_schema(conn)
         cur = conn.cursor()
         cur.executemany(
-            "UPDATE vendas_importadas SET selecionada=1 WHERE id=? AND IFNULL(usada,0)=0",
+            "UPDATE vendas_importadas SET selecionada=1 WHERE id=? AND IFNULL(usada,0)=0 AND TRIM(COALESCE(codigo_programacao,''))=''",
             [(rid,) for rid in id_list],
         )
         updated = int(cur.rowcount or 0)
@@ -7651,6 +8271,8 @@ def desktop_consumir_vendas_importadas(
     ids_raw = payload.get("ids") if isinstance(payload, dict) else []
     codigo_programacao = str((payload or {}).get("codigo_programacao") or "").strip().upper()
     usada_em = str((payload or {}).get("usada_em") or "").strip()
+    if not codigo_programacao:
+        raise HTTPException(status_code=400, detail="codigo_programacao obrigatorio.")
     if not isinstance(ids_raw, list):
         ids_raw = []
 
@@ -7671,6 +8293,7 @@ def desktop_consumir_vendas_importadas(
     with get_conn() as conn:
         ensure_core_schema(conn)
         cur = conn.cursor()
+        _ensure_programacao_mutable(cur, codigo_programacao)
         cur.executemany(
             """
             UPDATE vendas_importadas
@@ -7712,6 +8335,25 @@ def desktop_vincular_vendas_importadas(
     with get_conn() as conn:
         ensure_core_schema(conn)
         cur = conn.cursor()
+        _ensure_programacao_mutable(cur, codigo_programacao)
+        placeholders = ",".join(["?"] * len(ids))
+        cur.execute(
+            f"""
+            SELECT COUNT(1) AS n
+            FROM vendas_importadas
+            WHERE id IN ({placeholders})
+              AND IFNULL(usada,0)=0
+              AND TRIM(COALESCE(codigo_programacao,'')) <> ''
+              AND UPPER(TRIM(COALESCE(codigo_programacao,''))) <> UPPER(TRIM(?))
+            """,
+            (*ids, codigo_programacao),
+        )
+        conflito = int((cur.fetchone() or {}).get("n") or 0)
+        if conflito > 0:
+            raise HTTPException(
+                status_code=409,
+                detail="existem vendas ja vinculadas a outra programacao; desvincule antes de mover.",
+            )
         cur.executemany(
             """
             UPDATE vendas_importadas
@@ -7730,7 +8372,20 @@ def desktop_apagar_vendas_importadas(_ok: bool = Depends(_require_desktop_secret
     with get_conn() as conn:
         ensure_core_schema(conn)
         cur = conn.cursor()
-        cur.execute("DELETE FROM vendas_importadas")
+        cur.execute(
+            """
+            SELECT COUNT(1) AS n
+            FROM vendas_importadas
+            WHERE IFNULL(usada,0)=1 OR TRIM(COALESCE(codigo_programacao,''))<>''
+            """
+        )
+        protegidas = int((cur.fetchone() or {}).get("n") or 0)
+        if protegidas > 0:
+            raise HTTPException(
+                status_code=409,
+                detail="existem vendas ja vinculadas ou consumidas; limpe apenas a fila livre de importacao.",
+            )
+        cur.execute("DELETE FROM vendas_importadas WHERE IFNULL(usada,0)=0 AND TRIM(COALESCE(codigo_programacao,''))=''")
         deleted = int(cur.rowcount or 0)
     return {"ok": True, "deleted": deleted}
 
@@ -7755,8 +8410,24 @@ def desktop_apagar_ids_vendas_importadas(
     with get_conn() as conn:
         ensure_core_schema(conn)
         cur = conn.cursor()
+        placeholders = ",".join(["?"] * len(id_list))
+        cur.execute(
+            f"""
+            SELECT COUNT(1) AS n
+            FROM vendas_importadas
+            WHERE id IN ({placeholders})
+              AND (IFNULL(usada,0)=1 OR TRIM(COALESCE(codigo_programacao,''))<>'')
+            """,
+            tuple(id_list),
+        )
+        protegidas = int((cur.fetchone() or {}).get("n") or 0)
+        if protegidas > 0:
+            raise HTTPException(
+                status_code=409,
+                detail="existem vendas selecionadas ja vinculadas ou consumidas; exclusao bloqueada.",
+            )
         cur.executemany(
-            "DELETE FROM vendas_importadas WHERE id=? AND IFNULL(usada,0)=0",
+            "DELETE FROM vendas_importadas WHERE id=? AND IFNULL(usada,0)=0 AND TRIM(COALESCE(codigo_programacao,''))=''",
             [(rid,) for rid in id_list],
         )
         deleted = int(cur.rowcount or 0)

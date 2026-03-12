@@ -142,3 +142,7 @@ Versao 9.0.0
 - Estrutura de manifest/changelog para atualizacao automatica.
 - Painel "Informacoes do Sistema" com verificacao de atualizacoes.
 - Indicador de status da API na Home.
+2026-03-12 09:10:00 - v4.1.0
+- Release automatizada (minor).
+- Versao anterior: v4.0.17.
+- Auditoria ampla do fluxo desktop/API/APK, endurecimento de seguranca, consolidacao do bundle remoto e correcoes de prestacao, recebimentos, despesas e relatorios.

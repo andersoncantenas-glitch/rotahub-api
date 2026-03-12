@@ -39,7 +39,7 @@ import hmac
 import secrets
 import ctypes
 import time
-from database_runtime import enqueue_sql_statements, log_startup_diagnostics, process_sync_queue
+from database_runtime import enqueue_sql_statements, log_startup_diagnostics, process_sync_queue, validate_database_identity
 from runtime_config import apply_process_environment, ensure_runtime_files, load_app_config
 
 # =========================================================
@@ -1178,6 +1178,20 @@ def _call_api(method: str, path: str, payload=None, token: str = None, extra_hea
         logging.warning("API %s %s | erro inesperado | %.0f ms", method, path, elapsed_ms)
         raise SyncError(f"Erro inesperado ao chamar a API de sincronização: {exc}")
     return None
+
+
+def _friendly_sync_error(exc: Exception, default_message: str = "Falha na operação com a API central.") -> str:
+    msg = str(exc or "").strip()
+    if not msg:
+        return default_message
+    prefixes = (
+        "Erro inesperado ao chamar a API de sincronização:",
+        "Falha ao conectar-se a",
+    )
+    for prefix in prefixes:
+        if msg.startswith(prefix):
+            msg = msg[len(prefix):].strip(" :")
+    return msg or default_message
 
 
 def run_async_ui(widget, work, on_success, on_error=None):
@@ -2614,198 +2628,16 @@ class CadastroCRUD(ttk.Frame):
         self._set_form_mode("view")
         self._update_password_controls()
 
-    def vincular_selecionadas_programacao(self):
-        prog = upper((self.cb_prog_vinculo.get() or "").strip())
-        if not prog:
-            messagebox.showwarning("ATENÇÃO", "Selecione a programação ativa para vincular as vendas.")
-            return
-
-        ids = self._collect_vinculo_target_ids()
-        if not ids:
-            messagebox.showwarning("ATENÇÃO", "Selecione uma ou mais vendas para vincular.")
-            return
-
-        rows = self._fetch_vinculo_rows_from_tree(ids)
-        if not rows:
-            messagebox.showwarning("ATENÇÃO", "Não foi possível carregar os dados das vendas selecionadas.")
-            return
-        rows = self._collect_vinculo_caixas(rows)
-        if rows is None:
-            self.set_status("STATUS: Vínculo cancelado pelo usuário antes de definir as caixas.")
-            return
-
-        snapshot = self._fetch_programacao_vinculo_snapshot(prog)
-        if not snapshot:
-            messagebox.showwarning("ATENÇÃO", f"Programação não encontrada para vínculo: {prog}.")
-            return
-
-        endereco_map = self._resolve_clientes_endereco_map([(r or {}).get("cliente") for r in rows])
-        novos_itens = [self._row_venda_to_programacao_item(row, endereco_map) for row in (rows or [])]
-        itens_merged = self._merge_programacao_items((snapshot or {}).get("itens") or [], novos_itens)
-        if not itens_merged:
-            messagebox.showwarning("ATENÇÃO", "Nenhum item válido foi preparado para a programação.")
-            return
-
-        meta = dict((snapshot or {}).get("meta") or {})
-        meta["codigo_programacao"] = prog
-        total_caixas = sum(safe_int(it.get("qnt_caixas"), 0) for it in itens_merged)
-        total_quilos = round(sum(safe_float(it.get("kg"), 0.0) for it in itens_merged), 2)
-        if total_caixas <= 0:
-            total_caixas = max(safe_int(meta.get("caixas_estimado"), 0), 0)
-        if total_quilos <= 0 and upper(str(meta.get("tipo_estimativa") or "KG").strip()) == "KG":
-            total_quilos = round(max(safe_float(meta.get("kg_estimado"), 0.0), 0.0), 2)
-        nf_kg_sync = total_quilos if upper(str(meta.get("tipo_estimativa") or "KG").strip()) == "KG" else 0.0
-        nf_caixas_sync = max(safe_int(total_caixas, 0), 0)
-        usada_em = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-
-        if desktop_secret and is_desktop_api_sync_enabled():
-            try:
-                _call_api(
-                    "POST",
-                    "desktop/rotas/upsert",
-                    payload={
-                        "codigo_programacao": prog,
-                        "data_criacao": str(meta.get("data_criacao") or usada_em),
-                        "motorista": upper(str(meta.get("motorista") or "")),
-                        "motorista_id": safe_int(meta.get("motorista_id"), 0),
-                        "motorista_codigo": upper(str(meta.get("motorista_codigo") or meta.get("codigo_motorista") or "")),
-                        "codigo_motorista": upper(str(meta.get("codigo_motorista") or meta.get("motorista_codigo") or "")),
-                        "veiculo": upper(str(meta.get("veiculo") or "")),
-                        "equipe": upper(str(meta.get("equipe") or "")),
-                        "kg_estimado": safe_float(meta.get("kg_estimado"), 0.0),
-                        "tipo_estimativa": upper(str(meta.get("tipo_estimativa") or "KG").strip()) or "KG",
-                        "caixas_estimado": safe_int(meta.get("caixas_estimado"), 0),
-                        "status": upper(str(meta.get("status") or "ATIVA").strip()) or "ATIVA",
-                        "local_rota": upper(str(meta.get("local_rota") or "")),
-                        "local_carregamento": upper(str(meta.get("local_carregamento") or "")),
-                        "local_carregado": upper(str(meta.get("local_carregamento") or "")),
-                        "adiantamento": safe_float(meta.get("adiantamento"), 0.0),
-                        "total_caixas": total_caixas,
-                        "quilos": total_quilos,
-                        "nf_kg": nf_kg_sync,
-                        "nf_caixas": nf_caixas_sync,
-                        "caixas_carregadas": nf_caixas_sync,
-                        "usuario_criacao": upper(str(meta.get("usuario_criacao") or "").strip()),
-                        "usuario_ultima_edicao": upper(str(meta.get("usuario_ultima_edicao") or meta.get("usuario_criacao") or "").strip()),
-                        "itens": itens_merged,
-                    },
-                    extra_headers={"X-Desktop-Secret": desktop_secret},
-                )
-                _call_api(
-                    "POST",
-                    "desktop/vendas-importadas/consumir",
-                    payload={"ids": ids, "codigo_programacao": prog, "usada_em": usada_em},
-                    extra_headers={"X-Desktop-Secret": desktop_secret},
-                )
-            except Exception:
-                logging.debug("Falha ao anexar vendas diretamente à programação via API; usando fallback local.", exc_info=True)
-                self._persist_vinculo_programacao_local(meta, itens_merged, ids, usada_em)
-        else:
-            self._persist_vinculo_programacao_local(meta, itens_merged, ids, usada_em)
-
-        self.carregar()
-        self.refresh_programacoes_vinculo()
-        self.set_status(
-            f"STATUS: {len(ids)} venda(s) anexada(s) à programação {prog}. "
-            "As vendas vinculadas saíram da lista e a rota já pode refletir os clientes."
-        )
+    def _legacy_vincular_selecionadas_programacao_api_only(self):
+        # Mantido apenas por compatibilidade com binds legados.
+        return self.vincular_selecionadas_programacao()
 
     # -------------------------
     # Helpers
     # -------------------------
-    def vincular_selecionadas_programacao(self):
-        prog = upper((self.cb_prog_vinculo.get() or "").strip())
-        if not prog:
-            messagebox.showwarning("ATENÇÃO", "Selecione a programação ativa para vincular as vendas.")
-            return
-
-        ids = self._collect_vinculo_target_ids()
-        if not ids:
-            messagebox.showwarning("ATENÇÃO", "Selecione uma ou mais vendas para vincular.")
-            return
-
-        rows = self._fetch_vinculo_rows_from_tree(ids)
-        if not rows:
-            messagebox.showwarning("ATENÇÃO", "Não foi possível carregar os dados das vendas selecionadas.")
-            return
-
-        snapshot = self._fetch_programacao_vinculo_snapshot(prog)
-        if not snapshot:
-            messagebox.showwarning("ATENÇÃO", f"Programação não encontrada para vínculo: {prog}.")
-            return
-
-        endereco_map = self._resolve_clientes_endereco_map([(r or {}).get("cliente") for r in rows])
-        novos_itens = [self._row_venda_to_programacao_item(row, endereco_map) for row in (rows or [])]
-        itens_merged = self._merge_programacao_items((snapshot or {}).get("itens") or [], novos_itens)
-        if not itens_merged:
-            messagebox.showwarning("ATENÇÃO", "Nenhum item válido foi preparado para a programação.")
-            return
-
-        meta = dict((snapshot or {}).get("meta") or {})
-        meta["codigo_programacao"] = prog
-        total_caixas = sum(safe_int(it.get("qnt_caixas"), 0) for it in itens_merged)
-        total_quilos = round(sum(safe_float(it.get("kg"), 0.0) for it in itens_merged), 2)
-        if total_caixas <= 0:
-            total_caixas = max(safe_int(meta.get("caixas_estimado"), 0), 0)
-        if total_quilos <= 0 and upper(str(meta.get("tipo_estimativa") or "KG").strip()) == "KG":
-            total_quilos = round(max(safe_float(meta.get("kg_estimado"), 0.0), 0.0), 2)
-        nf_kg_sync = total_quilos if upper(str(meta.get("tipo_estimativa") or "KG").strip()) == "KG" else 0.0
-        nf_caixas_sync = max(safe_int(total_caixas, 0), 0)
-        usada_em = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-
-        if desktop_secret and is_desktop_api_sync_enabled():
-            try:
-                _call_api(
-                    "POST",
-                    "desktop/rotas/upsert",
-                    payload={
-                        "codigo_programacao": prog,
-                        "data_criacao": str(meta.get("data_criacao") or usada_em),
-                        "motorista": upper(str(meta.get("motorista") or "")),
-                        "motorista_id": safe_int(meta.get("motorista_id"), 0),
-                        "motorista_codigo": upper(str(meta.get("motorista_codigo") or meta.get("codigo_motorista") or "")),
-                        "codigo_motorista": upper(str(meta.get("codigo_motorista") or meta.get("motorista_codigo") or "")),
-                        "veiculo": upper(str(meta.get("veiculo") or "")),
-                        "equipe": upper(str(meta.get("equipe") or "")),
-                        "kg_estimado": safe_float(meta.get("kg_estimado"), 0.0),
-                        "tipo_estimativa": upper(str(meta.get("tipo_estimativa") or "KG").strip()) or "KG",
-                        "caixas_estimado": safe_int(meta.get("caixas_estimado"), 0),
-                        "status": upper(str(meta.get("status") or "ATIVA").strip()) or "ATIVA",
-                        "local_rota": upper(str(meta.get("local_rota") or "")),
-                        "local_carregamento": upper(str(meta.get("local_carregamento") or "")),
-                        "local_carregado": upper(str(meta.get("local_carregamento") or "")),
-                        "adiantamento": safe_float(meta.get("adiantamento"), 0.0),
-                        "total_caixas": total_caixas,
-                        "quilos": total_quilos,
-                        "nf_kg": nf_kg_sync,
-                        "nf_caixas": nf_caixas_sync,
-                        "caixas_carregadas": nf_caixas_sync,
-                        "usuario_criacao": upper(str(meta.get("usuario_criacao") or "").strip()),
-                        "usuario_ultima_edicao": upper(str(meta.get("usuario_ultima_edicao") or meta.get("usuario_criacao") or "").strip()),
-                        "itens": itens_merged,
-                    },
-                    extra_headers={"X-Desktop-Secret": desktop_secret},
-                )
-                _call_api(
-                    "POST",
-                    "desktop/vendas-importadas/consumir",
-                    payload={"ids": ids, "codigo_programacao": prog, "usada_em": usada_em},
-                    extra_headers={"X-Desktop-Secret": desktop_secret},
-                )
-            except Exception:
-                logging.debug("Falha ao anexar vendas diretamente à programação via API; usando fallback local.", exc_info=True)
-                self._persist_vinculo_programacao_local(meta, itens_merged, ids, usada_em)
-        else:
-            self._persist_vinculo_programacao_local(meta, itens_merged, ids, usada_em)
-
-        self.carregar()
-        self.refresh_programacoes_vinculo()
-        self.set_status(
-            f"STATUS: {len(ids)} venda(s) anexada(s) à programação {prog}. "
-            "As vendas vinculadas saíram da lista e a rota já pode refletir os clientes."
-        )
+    def _legacy_vincular_selecionadas_programacao_sem_caixas(self):
+        # Mantido apenas por compatibilidade com binds legados.
+        return self.vincular_selecionadas_programacao()
 
     def _norm(self, v):
         return upper(str(v or "").strip())
@@ -3553,6 +3385,9 @@ class CadastroCRUD(ttk.Frame):
             for k in list(data.keys()):
                 data[k] = self._norm(data[k])
 
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        api_sync_enabled = bool(desktop_secret and is_desktop_api_sync_enabled())
+
         if self._edit_mode == "status":
             if not self.selected_id:
                 messagebox.showwarning("ATENCAO", "Selecione um cadastro para alterar o status.")
@@ -3572,6 +3407,21 @@ class CadastroCRUD(ttk.Frame):
                     return
                 data["status"] = novo_status
 
+            if api_sync_enabled and self.table in {"motoristas", "ajudantes"}:
+                try:
+                    if self.table == "motoristas":
+                        self._sync_motorista_upsert_api(data)
+                    elif self.table == "ajudantes":
+                        self._sync_ajudante_upsert_api(data)
+                except Exception as e:
+                    messagebox.showerror(
+                        "ERRO",
+                        "Falha ao salvar status na API central.\n"
+                        "Nenhuma alteração local foi aplicada.\n\n"
+                        f"Detalhe: {e}",
+                    )
+                    return
+
             try:
                 with get_db() as conn:
                     cur = conn.cursor()
@@ -3579,20 +3429,6 @@ class CadastroCRUD(ttk.Frame):
             except Exception as e:
                 messagebox.showerror("ERRO", str(e))
                 return
-
-            desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-            if desktop_secret and is_desktop_api_sync_enabled():
-                try:
-                    if self.table == "motoristas":
-                        self._sync_motorista_upsert_api(data)
-                    elif self.table == "ajudantes":
-                        self._sync_ajudante_upsert_api(data)
-                except Exception as e:
-                    messagebox.showwarning(
-                        "Sincronizacao",
-                        "Status salvo localmente, mas falhou ao sincronizar com a API.\n"
-                        f"Detalhe: {e}",
-                    )
 
             self.carregar()
             self.limpar()
@@ -3836,8 +3672,7 @@ class CadastroCRUD(ttk.Frame):
                 # -------------------------
                 # SALVAR (UPDATE/INSERT)
                 # -------------------------
-                desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-                if self.table in {"motoristas", "veiculos", "ajudantes"} and desktop_secret and is_desktop_api_sync_enabled():
+                if self.table in {"motoristas", "veiculos", "ajudantes"} and api_sync_enabled:
                     try:
                         if self.table == "motoristas":
                             self._sync_motorista_upsert_api(data)
@@ -3846,8 +3681,11 @@ class CadastroCRUD(ttk.Frame):
                         elif self.table == "ajudantes":
                             self._sync_ajudante_upsert_api(data)
                         saved_via_api = True
-                    except Exception:
-                        logging.debug("Falha ao salvar cadastro via API; usando fallback local.", exc_info=True)
+                    except Exception as e:
+                        raise RuntimeError(
+                            "Falha ao salvar cadastro na API central. "
+                            "Nenhuma alteração local foi aplicada."
+                        ) from e
 
                 if not saved_via_api:
                     if self.selected_id:
@@ -3938,8 +3776,26 @@ class CadastroCRUD(ttk.Frame):
                     if self.app:
                         self.app.refresh_programacao_comboboxes()
                     return
+            except SyncError as e:
+                msg = str(e)
+                if msg.startswith("409 "):
+                    messagebox.showwarning("ATENÇÃO", msg.split(":", 1)[-1].strip() or msg)
+                else:
+                    messagebox.showerror(
+                        "ERRO",
+                        "Nao foi possivel excluir o cadastro na API central.\n\n"
+                        "A exclusao local foi bloqueada para evitar divergencia entre servidor e desktop.\n\n"
+                        f"Detalhe: {msg}",
+                    )
+                return
             except Exception:
-                logging.debug("Falha ao excluir cadastro via API; usando fallback local.", exc_info=True)
+                logging.debug("Falha ao excluir cadastro via API.", exc_info=True)
+                messagebox.showerror(
+                    "ERRO",
+                    "Nao foi possivel excluir o cadastro na API central.\n\n"
+                    "A exclusao local foi bloqueada para evitar divergencia entre servidor e desktop.",
+                )
+                return
 
         with get_db() as conn:
             cur = conn.cursor()
@@ -4038,9 +3894,9 @@ class CadastroCRUD(ttk.Frame):
                         VALUES (?, ?, ?, ?, ?)
                         ON CONFLICT(cod_cliente) DO UPDATE SET
                             nome_cliente=excluded.nome_cliente,
-                            endereco=excluded.endereco,
-                            telefone=excluded.telefone,
-                            vendedor=excluded.vendedor
+                            endereco=COALESCE(NULLIF(excluded.endereco,''), clientes.endereco),
+                            telefone=COALESCE(NULLIF(excluded.telefone,''), clientes.telefone),
+                            vendedor=COALESCE(NULLIF(excluded.vendedor,''), clientes.vendedor)
                     """, (upper(cod), upper(nome), upper(endereco), upper(telefone), upper(vendedor)))
                     total += 1
                     try:
@@ -4122,12 +3978,12 @@ class CadastroCRUD(ttk.Frame):
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(cod_cliente) DO UPDATE SET
                             nome_cliente=excluded.nome_cliente,
-                            endereco=excluded.endereco,
-                            bairro=excluded.bairro,
-                            cidade=excluded.cidade,
-                            uf=excluded.uf,
-                            telefone=excluded.telefone,
-                            rota=excluded.rota
+                            endereco=COALESCE(NULLIF(excluded.endereco,''), clientes.endereco),
+                            bairro=COALESCE(NULLIF(excluded.bairro,''), clientes.bairro),
+                            cidade=COALESCE(NULLIF(excluded.cidade,''), clientes.cidade),
+                            uf=COALESCE(NULLIF(excluded.uf,''), clientes.uf),
+                            telefone=COALESCE(NULLIF(excluded.telefone,''), clientes.telefone),
+                            rota=COALESCE(NULLIF(excluded.rota,''), clientes.rota)
                     """, (
                         upper(cod),
                         upper(nome),
@@ -5834,6 +5690,7 @@ class HomePage(PageBase):
                 "total_prog": safe_int(resp.get("total_programacoes_ativas"), 0),
                 "total_vendas": safe_int(resp.get("total_vendas_importadas"), 0),
                 "total_clientes_ativos": safe_int(resp.get("total_clientes_ativos"), 0),
+                "pending": resp.get("pendencias") if isinstance(resp.get("pendencias"), dict) else None,
                 "rotas": resp.get("rotas") if isinstance(resp.get("rotas"), list) else [],
             }
         except Exception:
@@ -5887,20 +5744,24 @@ class HomePage(PageBase):
             except Exception:
                 out["prestacao_pendente"] = 0
             try:
-                cur.execute(
-                    f"""
-                    SELECT COUNT(*)
-                    FROM programacoes p
-                    WHERE {where_base}
-                      AND NOT EXISTS (
-                          SELECT 1
-                          FROM despesas d
-                          WHERE UPPER(TRIM(COALESCE(d.codigo_programacao, '')))
-                              = UPPER(TRIM(COALESCE(p.codigo_programacao, '')))
-                      )
-                    """
-                )
-                out["sem_despesa"] = safe_int((cur.fetchone() or [0])[0], 0)
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='despesas'")
+                if cur.fetchone():
+                    cur.execute(
+                        f"""
+                        SELECT COUNT(*)
+                        FROM programacoes p
+                        WHERE {where_base}
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM despesas d
+                              WHERE UPPER(TRIM(COALESCE(d.codigo_programacao, '')))
+                                  = UPPER(TRIM(COALESCE(p.codigo_programacao, '')))
+                          )
+                        """
+                    )
+                    out["sem_despesa"] = safe_int((cur.fetchone() or [0])[0], 0)
+                else:
+                    out["sem_despesa"] = 0
             except Exception:
                 out["sem_despesa"] = 0
         return out
@@ -5943,7 +5804,7 @@ class HomePage(PageBase):
             total_clientes_ativos = safe_int(api_overview.get("total_clientes_ativos"), 0)
             rows = api_overview.get("rotas") or []
             source = "API CENTRAL"
-            pending = self._load_pending_counts(total_prog_hint=total_prog)
+            pending = api_overview.get("pending") or self._load_pending_counts(total_prog_hint=total_prog)
             return {
                 "total_prog": total_prog,
                 "total_vendas": total_vendas,
@@ -6002,9 +5863,10 @@ class HomePage(PageBase):
                 total_prog = len(api_rows)
                 source = "API CENTRAL"
             else:
+                data_row_expr = "COALESCE(data_criacao,'')" if "data_criacao" in cols_prog else ("COALESCE(data,'')" if "data" in cols_prog else "''")
                 try:
-                    cur.execute("""
-                        SELECT codigo_programacao, motorista, veiculo, data_criacao
+                    cur.execute(f"""
+                        SELECT codigo_programacao, COALESCE(motorista,''), COALESCE(veiculo,''), {data_row_expr} AS data_criacao
                         FROM programacoes
                         WHERE """ + where_ativas + """
                         ORDER BY id DESC
@@ -6013,8 +5875,8 @@ class HomePage(PageBase):
                     rows = cur.fetchall() or []
                 except Exception:
                     try:
-                        cur.execute("""
-                            SELECT codigo_programacao, motorista, veiculo, data_criacao
+                        cur.execute(f"""
+                            SELECT codigo_programacao, COALESCE(motorista,''), COALESCE(veiculo,''), {data_row_expr} AS data_criacao
                             FROM programacoes
                             ORDER BY id DESC
                             LIMIT 80
@@ -8481,42 +8343,41 @@ def fetch_programacoes_ativas(limit: int = 400):
         with get_db() as conn:
             cur = conn.cursor()
 
-            has_status = db_has_column(cur, "programacoes", "status")
-            has_data = db_has_column(cur, "programacoes", "data_criacao")
-
-            if has_status:
-                if has_data:
-                    cur.execute("""
-                        SELECT codigo_programacao, motorista, veiculo, equipe, data_criacao, status
-                        FROM programacoes
-                        WHERE status='ATIVA'
-                        ORDER BY id DESC
-                        LIMIT ?
-                    """, (limit,))
-                else:
-                    cur.execute("""
-                        SELECT codigo_programacao, motorista, veiculo, equipe, '' as data_criacao, status
-                        FROM programacoes
-                        WHERE status='ATIVA'
-                        ORDER BY id DESC
-                        LIMIT ?
-                    """, (limit,))
-            else:
-                # base antiga sem status: pega as últimas como "ativas"
-                if has_data:
-                    cur.execute("""
-                        SELECT codigo_programacao, motorista, veiculo, equipe, data_criacao, 'ATIVA' as status
-                        FROM programacoes
-                        ORDER BY id DESC
-                        LIMIT ?
-                    """, (limit,))
-                else:
-                    cur.execute("""
-                        SELECT codigo_programacao, motorista, veiculo, equipe, '' as data_criacao, 'ATIVA' as status
-                        FROM programacoes
-                        ORDER BY id DESC
-                        LIMIT ?
-                    """, (limit,))
+            cols_prog = {str(r[1]).lower() for r in (cur.execute("PRAGMA table_info(programacoes)").fetchall() or [])}
+            data_expr = "COALESCE(data_criacao,'')" if "data_criacao" in cols_prog else ("COALESCE(data,'')" if "data" in cols_prog else "''")
+            status_expr = (
+                "COALESCE(NULLIF(TRIM(status_operacional), ''), COALESCE(status, ''))"
+                if "status_operacional" in cols_prog
+                else ("COALESCE(status,'')" if "status" in cols_prog else "'ATIVA'")
+            )
+            where_parts = []
+            if "status_operacional" in cols_prog or "status" in cols_prog:
+                where_parts.append(
+                    "UPPER(TRIM(COALESCE("
+                    + ("NULLIF(status_operacional, '')" if "status_operacional" in cols_prog else "status")
+                    + ", COALESCE(status, 'ATIVA')))) NOT IN ('FINALIZADA', 'FINALIZADO', 'CANCELADA', 'CANCELADO')"
+                    if "status_operacional" in cols_prog
+                    else "UPPER(TRIM(COALESCE(status,'ATIVA'))) NOT IN ('FINALIZADA', 'FINALIZADO', 'CANCELADA', 'CANCELADO')"
+                )
+            if "finalizada_no_app" in cols_prog:
+                where_parts.append("COALESCE(finalizada_no_app,0)=0")
+            where_sql = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+            cur.execute(
+                f"""
+                SELECT
+                    COALESCE(codigo_programacao,''),
+                    COALESCE(motorista,''),
+                    COALESCE(veiculo,''),
+                    COALESCE(equipe,''),
+                    {data_expr} as data_criacao,
+                    {status_expr} as status
+                FROM programacoes
+                {where_sql}
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
 
             rows = cur.fetchall()
 
@@ -8646,25 +8507,29 @@ def fetch_programacao_itens(codigo_programacao: str, limit: int = 8000):
             has_ctrl_alt_detalhe = has_ctrl and db_has_column(cur, "programacao_itens_controle", "alteracao_detalhe")
 
             status_expr = ("pi.status_pedido" if has_status else "''")
-            caixas_atual_expr = ("pi.caixas_atual" if has_caixas_atual else "0")
-            preco_atual_expr = ("pi.preco_atual" if has_preco_atual else "0")
-            alterado_em_expr = ("pi.alterado_em" if has_alt_em else "''")
-            alterado_por_expr = ("pi.alterado_por" if has_alt_por else "''")
+            caixas_atual_expr = ("pi.caixas_atual" if has_caixas_atual else "NULL")
+            preco_atual_expr = ("pi.preco_atual" if has_preco_atual else "NULL")
+            alterado_em_expr = ("pi.alterado_em" if has_alt_em else "NULL")
+            alterado_por_expr = ("pi.alterado_por" if has_alt_por else "NULL")
 
             if has_ctrl:
-                status_expr = "COALESCE(NULLIF(" + status_expr + ", ''), NULLIF(pc.status_pedido, ''), 'PENDENTE')"
+                status_expr = "COALESCE(NULLIF(TRIM(pc.status_pedido), ''), NULLIF(TRIM(" + status_expr + "), ''), 'PENDENTE')"
                 caixas_atual_expr = (
                     "CASE "
-                    "WHEN COALESCE(pc.caixas_atual, 0) > 0 THEN pc.caixas_atual "
-                    "WHEN COALESCE(" + caixas_atual_expr + ", 0) > 0 THEN " + caixas_atual_expr + " "
+                    "WHEN pc.caixas_atual IS NOT NULL THEN pc.caixas_atual "
+                    "WHEN " + caixas_atual_expr + " IS NOT NULL THEN " + caixas_atual_expr + " "
                     "ELSE COALESCE(pi.qnt_caixas, 0) "
                     "END"
                 )
-                preco_atual_expr = "COALESCE(" + preco_atual_expr + ", pc.preco_atual, 0)"
-                alterado_em_expr = "COALESCE(" + alterado_em_expr + ", pc.alterado_em, '')"
-                alterado_por_expr = "COALESCE(" + alterado_por_expr + ", pc.alterado_por, '')"
+                preco_atual_expr = "COALESCE(pc.preco_atual, " + preco_atual_expr + ", 0)"
+                alterado_em_expr = "COALESCE(NULLIF(TRIM(pc.alterado_em), ''), NULLIF(TRIM(" + alterado_em_expr + "), ''), '')"
+                alterado_por_expr = "COALESCE(NULLIF(TRIM(pc.alterado_por), ''), NULLIF(TRIM(" + alterado_por_expr + "), ''), '')"
             else:
-                status_expr = "COALESCE(NULLIF(" + status_expr + ", ''), 'PENDENTE')"
+                status_expr = "COALESCE(NULLIF(TRIM(" + status_expr + "), ''), 'PENDENTE')"
+                caixas_atual_expr = "COALESCE(" + caixas_atual_expr + ", COALESCE(pi.qnt_caixas, 0))"
+                preco_atual_expr = "COALESCE(" + preco_atual_expr + ", 0)"
+                alterado_em_expr = "COALESCE(NULLIF(TRIM(" + alterado_em_expr + "), ''), '')"
+                alterado_por_expr = "COALESCE(NULLIF(TRIM(" + alterado_por_expr + "), ''), '')"
 
             select_cols = [
                 "pi.cod_cliente",
@@ -8754,6 +8619,349 @@ def fetch_programacao_itens(codigo_programacao: str, limit: int = 8000):
 
     except Exception:
         return []
+
+
+def fetch_programacao_meta_relatorio(codigo_programacao: str) -> dict:
+    codigo_programacao = upper(str(codigo_programacao or "").strip())
+    if not codigo_programacao:
+        return {}
+
+    desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+    if desktop_secret and is_desktop_api_sync_enabled():
+        try:
+            resp = _call_api(
+                "GET",
+                f"desktop/rotas/{urllib.parse.quote(codigo_programacao)}",
+                extra_headers={"X-Desktop-Secret": desktop_secret},
+            )
+            rota = resp.get("rota") if isinstance(resp, dict) else None
+            if isinstance(rota, dict):
+                return dict(rota)
+        except Exception:
+            logging.debug("Falha ao buscar meta da programacao via API", exc_info=True)
+
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(programacoes)")
+            cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+
+            def _expr(*names, default="''"):
+                for name in names:
+                    if name.lower() in cols:
+                        return f"COALESCE({name}, '')"
+                return default
+
+            def _expr_num(*names, default="0"):
+                for name in names:
+                    if name.lower() in cols:
+                        return f"COALESCE({name}, 0)"
+                return default
+
+            cur.execute(
+                f"""
+                SELECT
+                    {_expr('codigo_programacao')} as codigo_programacao,
+                    {_expr('data_criacao')} as data_criacao,
+                    {_expr('motorista')} as motorista,
+                    {_expr('veiculo')} as veiculo,
+                    {_expr('equipe')} as equipe,
+                    {_expr('status')} as status,
+                    {_expr('status_operacional')} as status_operacional,
+                    {_expr('prestacao_status')} as prestacao_status,
+                    {_expr('num_nf', 'nf_numero')} as num_nf,
+                    {_expr('local_rota', 'tipo_rota')} as local_rota,
+                    {_expr('local_carregamento', 'granja_carregada', 'local_carregado')} as local_carregamento,
+                    {_expr('data_saida')} as data_saida,
+                    {_expr('hora_saida')} as hora_saida,
+                    {_expr('data_chegada')} as data_chegada,
+                    {_expr('hora_chegada')} as hora_chegada,
+                    {_expr_num('nf_kg')} as nf_kg,
+                    {_expr_num('nf_caixas', 'caixas_carregadas')} as nf_caixas,
+                    {_expr_num('nf_kg_carregado', 'kg_carregado')} as nf_kg_carregado,
+                    {_expr_num('nf_kg_vendido')} as nf_kg_vendido,
+                    {_expr_num('nf_saldo')} as nf_saldo,
+                    {_expr_num('nf_preco')} as nf_preco,
+                    {_expr_num('media')} as media,
+                    {_expr_num('aves_caixa_final', 'qnt_aves_caixa_final')} as aves_caixa_final,
+                    {_expr_num('mortalidade_transbordo_aves')} as mortalidade_transbordo_aves,
+                    {_expr_num('mortalidade_transbordo_kg')} as mortalidade_transbordo_kg,
+                    {_expr('obs_transbordo')} as obs_transbordo
+                FROM programacoes
+                WHERE UPPER(COALESCE(codigo_programacao,''))=UPPER(?)
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (codigo_programacao,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return {}
+
+            keys = [
+                "codigo_programacao",
+                "data_criacao",
+                "motorista",
+                "veiculo",
+                "equipe",
+                "status",
+                "status_operacional",
+                "prestacao_status",
+                "num_nf",
+                "local_rota",
+                "local_carregamento",
+                "data_saida",
+                "hora_saida",
+                "data_chegada",
+                "hora_chegada",
+                "nf_kg",
+                "nf_caixas",
+                "nf_kg_carregado",
+                "nf_kg_vendido",
+                "nf_saldo",
+                "nf_preco",
+                "media",
+                "aves_caixa_final",
+                "mortalidade_transbordo_aves",
+                "mortalidade_transbordo_kg",
+                "obs_transbordo",
+            ]
+            return {k: row[i] for i, k in enumerate(keys)}
+    except Exception:
+        logging.debug("Falha ao buscar meta da programacao no banco", exc_info=True)
+    return {}
+
+
+def _parse_alteracao_campos(item: dict) -> tuple[str, str, str]:
+    detalhe = str((item or {}).get("alteracao_detalhe") or "").strip()
+    alterado_por = str((item or {}).get("alterado_por") or "").strip().upper()
+    para_quem = ""
+    motivo = ""
+    autorizado = ""
+
+    if detalhe:
+        m = re.search(r"PARA\s+QUEM\s*[:=-]\s*([^|;]+)", detalhe, flags=re.IGNORECASE)
+        if m:
+            para_quem = m.group(1).strip()
+        m = re.search(r"(POR\s+QUE|MOTIVO)\s*[:=-]\s*([^|;]+)", detalhe, flags=re.IGNORECASE)
+        if m:
+            motivo = m.group(2).strip()
+        m = re.search(r"(AUTORIZADO\s+POR|QUEM\s+AUTORIZOU)\s*[:=-]\s*([^|;]+)", detalhe, flags=re.IGNORECASE)
+        if m:
+            autorizado = m.group(2).strip()
+
+    if not motivo and detalhe:
+        motivo = detalhe
+    if not autorizado:
+        autorizado = alterado_por
+
+    return para_quem or "-", motivo or "-", autorizado or "-"
+
+
+def build_folha_retorno_operacional(prog: str) -> str:
+    prog = upper(str(prog or "").strip())
+    if not prog:
+        return "FOLHA DE RETORNO OPERACIONAL\n\nProgramacao nao informada."
+
+    meta = fetch_programacao_meta_relatorio(prog)
+    itens = fetch_programacao_itens(prog) or []
+    if not meta and not itens:
+        return (
+            f"FOLHA DE RETORNO OPERACIONAL - {prog}\n"
+            + "=" * 118
+            + "\n\nProgramacao nao encontrada."
+        )
+
+    motorista = str(meta.get("motorista") or "")
+    veiculo = str(meta.get("veiculo") or "")
+    equipe_txt = resolve_equipe_nomes(str(meta.get("equipe") or ""))
+    status = upper(str(meta.get("status_operacional") or meta.get("status") or ""))
+    prest = upper(str(meta.get("prestacao_status") or ""))
+    nf = str(meta.get("num_nf") or "")
+    local_rota = str(meta.get("local_rota") or "")
+    local_carreg = str(meta.get("local_carregamento") or "")
+    data_saida, hora_saida = normalize_date_time_components(meta.get("data_saida"), meta.get("hora_saida"))
+    data_chegada, hora_chegada = normalize_date_time_components(meta.get("data_chegada"), meta.get("hora_chegada"))
+    data_criacao = format_date_br_short(str(meta.get("data_criacao") or ""))
+
+    media_carregada = safe_float(meta.get("media"), 0.0)
+    if media_carregada > 20:
+        media_carregada = media_carregada / 1000.0
+    aves_por_caixa = safe_int(meta.get("aves_caixa_final"), 0)
+    if aves_por_caixa <= 0:
+        aves_por_caixa = 6
+
+    status_entregue = {"ENTREGUE", "FINALIZADO", "FINALIZADA", "CONCLUIDO", "CONCLUÍDO"}
+    status_cancelado = {"CANCELADO", "CANCELADA"}
+
+    tot_clientes = len(itens)
+    tot_entregues = 0
+    tot_cancelados = 0
+    tot_alterados = 0
+    tot_cx_prog = 0
+    tot_cx_ent = 0
+    tot_kg_prog = 0.0
+    tot_kg_ent = 0.0
+    tot_mort_aves = safe_int(meta.get("mortalidade_transbordo_aves"), 0)
+    tot_mort_kg = safe_float(meta.get("mortalidade_transbordo_kg"), 0.0)
+    tot_valor = 0.0
+    divergencias = 0
+    linhas = []
+    ocorrencias = []
+
+    for item in itens:
+        status_item = upper(str(item.get("status_pedido") or "PENDENTE").strip()) or "PENDENTE"
+        cx_prog = max(safe_int(item.get("qnt_caixas"), 0), 0)
+        cx_alt = max(safe_int(item.get("caixas_atual"), 0), 0)
+        preco_orig = safe_float(item.get("preco"), 0.0)
+        preco_final = safe_float(item.get("preco_atual"), 0.0) or preco_orig
+        kg_orig = safe_float(item.get("kg"), 0.0)
+        mort_aves = max(safe_int(item.get("mortalidade_aves"), 0), 0)
+        alterado = bool(
+            str(item.get("alterado_em") or "").strip()
+            or str(item.get("alterado_por") or "").strip()
+            or str(item.get("alteracao_tipo") or "").strip()
+            or str(item.get("alteracao_detalhe") or "").strip()
+            or (cx_alt > 0 and cx_alt != cx_prog)
+            or abs(preco_final - preco_orig) > 0.0001
+        )
+
+        if status_item in status_cancelado:
+            cx_ent = 0
+        elif status_item in status_entregue:
+            cx_ent = cx_alt if cx_alt > 0 else cx_prog
+        else:
+            cx_ent = cx_alt if cx_alt > 0 else 0
+
+        kg_base = safe_float(item.get("peso_previsto"), 0.0)
+        if kg_base <= 0:
+            kg_base = kg_orig
+        if kg_base <= 0 and cx_ent > 0 and media_carregada > 0:
+            kg_base = float(cx_ent) * float(max(aves_por_caixa, 1)) * media_carregada
+        elif kg_base <= 0 and cx_prog > 0 and media_carregada > 0:
+            kg_base = float(cx_prog) * float(max(aves_por_caixa, 1)) * media_carregada
+
+        total_aves_cliente = max((cx_ent if cx_ent > 0 else cx_prog) * max(aves_por_caixa, 1), 0)
+        media_cliente = (kg_base / total_aves_cliente) if total_aves_cliente > 0 and kg_base > 0 else media_carregada
+        mort_kg = mort_aves * media_cliente if media_cliente > 0 else 0.0
+        kg_ent = max(kg_base - mort_kg, 0.0) if status_item not in status_cancelado else 0.0
+        valor_total = max((kg_ent * preco_final), 0.0) if status_item not in status_cancelado else 0.0
+        delta_kg = kg_ent - kg_orig if kg_orig > 0 else 0.0
+
+        tot_cx_prog += cx_prog
+        tot_cx_ent += cx_ent
+        tot_kg_prog += max(kg_orig, 0.0)
+        tot_kg_ent += kg_ent
+        tot_mort_aves += mort_aves
+        tot_mort_kg += mort_kg
+        tot_valor += valor_total
+        if status_item in status_entregue:
+            tot_entregues += 1
+        if status_item in status_cancelado:
+            tot_cancelados += 1
+        if alterado:
+            tot_alterados += 1
+        if abs(delta_kg) >= 0.01:
+            divergencias += 1
+
+        linhas.append(
+            {
+                "cod": str(item.get("cod_cliente") or "")[:6],
+                "cliente": upper(str(item.get("nome_cliente") or "-"))[:28],
+                "st": status_item[:9],
+                "cx": f"{cx_prog}/{cx_ent}",
+                "med": f"{safe_float(media_cliente, 0.0):.3f}",
+                "kg": f"{safe_float(kg_ent, 0.0):.2f}",
+                "preco": f"{safe_float(preco_final, 0.0):.2f}",
+                "valor": f"{safe_float(valor_total, 0.0):.2f}",
+                "mort": f"{safe_int(mort_aves, 0)}/{safe_float(mort_kg, 0.0):.2f}",
+                "div": (f"{delta_kg:+.2f}" if abs(delta_kg) >= 0.01 else "-"),
+            }
+        )
+
+        if status_item in status_cancelado or alterado:
+            para_quem, motivo, autorizado = _parse_alteracao_campos(item)
+            ocorrencias.append(
+                {
+                    "cliente": upper(str(item.get("nome_cliente") or "-"))[:24],
+                    "st": status_item[:10],
+                    "cancel": "SIM" if status_item in status_cancelado else "NAO",
+                    "alter": "SIM" if alterado else "NAO",
+                    "para": para_quem[:16],
+                    "motivo": motivo[:38],
+                    "aut": autorizado[:16],
+                }
+            )
+
+    kg_carregado = safe_float(meta.get("nf_kg_carregado"), 0.0)
+    if kg_carregado <= 0:
+        kg_carregado = tot_kg_prog
+    caixas_carregadas = safe_int(meta.get("nf_caixas"), 0)
+    if caixas_carregadas <= 0:
+        caixas_carregadas = tot_cx_prog
+    media_resumo = media_carregada
+    if media_resumo <= 0 and caixas_carregadas > 0 and kg_carregado > 0:
+        media_resumo = kg_carregado / float(caixas_carregadas * max(aves_por_caixa, 1))
+
+    lines = []
+    lines.append("=" * 118)
+    lines.append(f"{'FOLHA DE RETORNO OPERACIONAL':^118}")
+    lines.append("=" * 118)
+    lines.append(
+        f"CODIGO: {prog}   DATA: {data_criacao or '-'}   STATUS: {status or '-'}   PRESTACAO: {prest or '-'}"
+    )
+    lines.append(
+        f"MOTORISTA: {upper(motorista or '-')}   VEICULO: {upper(veiculo or '-')}   EQUIPE: {equipe_txt or '-'}"
+    )
+    lines.append(
+        f"NF: {nf or '-'}   LOCAL ROTA: {upper(local_rota or '-')}   CARREGOU EM: {upper(local_carreg or '-')}"
+    )
+    lines.append(
+        f"SAIDA: {f'{data_saida} {hora_saida}'.strip() or '-'}   CHEGADA: {f'{data_chegada} {hora_chegada}'.strip() or '-'}"
+    )
+    lines.append("-" * 118)
+    lines.append(
+        f"CLIENTES: {tot_clientes}   ENTREGUES: {tot_entregues}   CANCELADOS: {tot_cancelados}   ALTERADOS: {tot_alterados}"
+    )
+    lines.append(
+        f"KG CARREGADOS: {kg_carregado:.2f}   CX CARREGADAS: {caixas_carregadas}   MEDIA CARREGADA: {media_resumo:.3f}"
+    )
+    lines.append(
+        f"KG ENTREGUE: {tot_kg_ent:.2f}   CX ENTREGUES: {tot_cx_ent}   MORTALIDADE TOTAL: {tot_mort_aves} AVES / {tot_mort_kg:.2f} KG"
+    )
+    lines.append(
+        f"VALOR TOTAL ENTREGUE: {fmt_money(tot_valor)}   DIVERGENCIAS DE PESO: {divergencias} CLIENTE(S)"
+    )
+    lines.append("-" * 118)
+    lines.append(
+        f"{'COD':<6} {'CLIENTE':<28} {'STATUS':<9} {'CX P/E':>7} {'MEDIA':>7} {'KG':>10} {'PRECO':>10} {'VALOR':>12} {'MORT A/KG':>14} {'DIV KG':>9}"
+    )
+    lines.append("-" * 118)
+    if not linhas:
+        lines.append("Sem itens de entrega para esta programacao.")
+    else:
+        for row in linhas:
+            lines.append(
+                f"{row['cod']:<6} {row['cliente']:<28} {row['st']:<9} {row['cx']:>7} {row['med']:>7} "
+                f"{row['kg']:>10} {row['preco']:>10} {row['valor']:>12} {row['mort']:>14} {row['div']:>9}"
+            )
+    lines.append("-" * 118)
+    lines.append("[OCORRENCIAS / AJUSTES]")
+    lines.append(
+        f"{'CLIENTE':<24} {'STATUS':<10} {'CANC':<4} {'ALT':<4} {'PARA QUEM':<16} {'POR QUE':<38} {'AUTORIZOU':<16}"
+    )
+    lines.append("-" * 118)
+    if not ocorrencias:
+        lines.append("Sem cancelamentos ou alteracoes registradas.")
+    else:
+        for row in ocorrencias[:40]:
+            lines.append(
+                f"{row['cliente']:<24} {row['st']:<10} {row['cancel']:<4} {row['alter']:<4} "
+                f"{row['para']:<16} {row['motivo']:<38} {row['aut']:<16}"
+            )
+        if len(ocorrencias) > 40:
+            lines.append(f"... e mais {len(ocorrencias) - 40} ocorrencia(s).")
+    return "\n".join(lines)
 
 
 def format_prog_display(p: dict) -> str:
@@ -9141,6 +9349,7 @@ class ClientesImportPage(ttk.Frame):
     def _salvar_clientes_worker(self, linhas):
         total = 0
         sync_falhas = 0
+        falhas_refs = []
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
         api_mode = bool(desktop_secret and is_desktop_api_sync_enabled())
         if api_mode:
@@ -9150,6 +9359,17 @@ class ClientesImportPage(ttk.Frame):
                     total += 1
                 except Exception:
                     sync_falhas += 1
+                    if len(falhas_refs) < 10:
+                        falhas_refs.append(str(cod or nome or "?"))
+            if sync_falhas:
+                detalhe = ", ".join(falhas_refs)
+                if sync_falhas > len(falhas_refs):
+                    detalhe += f" e mais {sync_falhas - len(falhas_refs)}"
+                raise RuntimeError(
+                    "Falha ao salvar clientes na API central. "
+                    "Nenhuma confirmação local foi aplicada.\n\n"
+                    f"Clientes com falha: {detalhe}"
+                )
         else:
             with get_db() as conn:
                 cur = conn.cursor()
@@ -9159,9 +9379,9 @@ class ClientesImportPage(ttk.Frame):
                         VALUES (?, ?, ?, ?, ?)
                         ON CONFLICT(cod_cliente) DO UPDATE SET
                             nome_cliente=excluded.nome_cliente,
-                            endereco=excluded.endereco,
-                            telefone=excluded.telefone,
-                            vendedor=excluded.vendedor
+                            endereco=COALESCE(NULLIF(excluded.endereco,''), clientes.endereco),
+                            telefone=COALESCE(NULLIF(excluded.telefone,''), clientes.telefone),
+                            vendedor=COALESCE(NULLIF(excluded.vendedor,''), clientes.vendedor)
                     """, (cod, nome, endereco, telefone, vendedor))
                     total += 1
                     try:
@@ -9207,6 +9427,7 @@ class ClientesImportPage(ttk.Frame):
 
         total = 0
         sync_falhas = 0
+        falhas_refs = []
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
         api_mode = bool(desktop_secret and is_desktop_api_sync_enabled())
         if api_mode:
@@ -9224,6 +9445,17 @@ class ClientesImportPage(ttk.Frame):
                     total += 1
                 except Exception:
                     sync_falhas += 1
+                    if len(falhas_refs) < 10:
+                        falhas_refs.append(str(cod or nome or "?"))
+            if sync_falhas:
+                detalhe = ", ".join(falhas_refs)
+                if sync_falhas > len(falhas_refs):
+                    detalhe += f" e mais {sync_falhas - len(falhas_refs)}"
+                raise RuntimeError(
+                    "Falha ao importar clientes na API central. "
+                    "Nenhuma confirmação local foi aplicada.\n\n"
+                    f"Clientes com falha: {detalhe}"
+                )
         else:
             with get_db() as conn:
                 cur = conn.cursor()
@@ -9242,9 +9474,9 @@ class ClientesImportPage(ttk.Frame):
                         VALUES (?, ?, ?, ?, ?)
                         ON CONFLICT(cod_cliente) DO UPDATE SET
                             nome_cliente=excluded.nome_cliente,
-                            endereco=excluded.endereco,
-                            telefone=excluded.telefone,
-                            vendedor=excluded.vendedor
+                            endereco=COALESCE(NULLIF(excluded.endereco,''), clientes.endereco),
+                            telefone=COALESCE(NULLIF(excluded.telefone,''), clientes.telefone),
+                            vendedor=COALESCE(NULLIF(excluded.vendedor,''), clientes.vendedor)
                     """, (upper(cod), upper(nome), upper(endereco), upper(telefone), upper(vendedor)))
                     total += 1
                     try:
@@ -9292,81 +9524,6 @@ class ClientesImportPage(ttk.Frame):
             lambda exc, seq=seq: self._on_importar_clientes_error(seq, exc),
         )
         return
-
-        try:
-            df = pd.read_excel(path, engine=excel_engine_for(path))
-
-            col_cod = guess_col(df.columns, ["cod", "cód", "codigo", "cliente", "cod cliente"])
-            col_nome = guess_col(df.columns, ["nome", "cliente"])
-            col_end = guess_col(df.columns, ["endereco", "endereço", "rua", "logradouro"])
-            col_tel = guess_col(df.columns, ["telefone", "fone", "celular", "contato"])
-            col_vendedor = guess_col(df.columns, ["vendedor", "vend", "representante"])
-
-            if not col_cod or not col_nome:
-                # Fallback: usa as duas primeiras colunas como codigo/nome quando o cabecalho vier fora do padrao.
-                cols = list(df.columns or [])
-                if len(cols) >= 2:
-                    col_cod = col_cod or cols[0]
-                    col_nome = col_nome or cols[1]
-                else:
-                    messagebox.showerror("ERRO", "NÃO IDENTIFIQUEI AS COLUNAS DE CÓDIGO E NOME DO CLIENTE NO EXCEL.")
-                    return
-
-            total = 0
-            sync_falhas = 0
-            desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-            api_mode = bool(desktop_secret and is_desktop_api_sync_enabled())
-            if api_mode:
-                for _, r in df.iterrows():
-                    cod = str(r.get(col_cod, "")).strip()
-                    nome = str(r.get(col_nome, "")).strip()
-                    if not cod or not nome:
-                        continue
-
-                    endereco = str(r.get(col_end, "")).strip() if col_end else ""
-                    telefone = str(r.get(col_tel, "")).strip() if col_tel else ""
-                    vendedor = str(r.get(col_vendedor, "")).strip() if col_vendedor else ""
-                    try:
-                        self._sync_cliente_upsert_api(cod, nome, endereco, telefone, vendedor)
-                        total += 1
-                    except Exception:
-                        sync_falhas += 1
-            else:
-                with get_db() as conn:
-                    cur = conn.cursor()
-                    for _, r in df.iterrows():
-                        cod = str(r.get(col_cod, "")).strip()
-                        nome = str(r.get(col_nome, "")).strip()
-                        if not cod or not nome:
-                            continue
-
-                        endereco = str(r.get(col_end, "")).strip() if col_end else ""
-                        telefone = str(r.get(col_tel, "")).strip() if col_tel else ""
-                        vendedor = str(r.get(col_vendedor, "")).strip() if col_vendedor else ""
-
-                        cur.execute("""
-                            INSERT INTO clientes (cod_cliente, nome_cliente, endereco, telefone, vendedor)
-                            VALUES (?, ?, ?, ?, ?)
-                            ON CONFLICT(cod_cliente) DO UPDATE SET
-                                nome_cliente=excluded.nome_cliente,
-                                endereco=excluded.endereco,
-                                telefone=excluded.telefone,
-                                vendedor=excluded.vendedor
-                        """, (upper(cod), upper(nome), upper(endereco), upper(telefone), upper(vendedor)))
-                        total += 1
-                        try:
-                            self._sync_cliente_upsert_api(cod, nome, endereco, telefone, vendedor)
-                        except Exception:
-                            sync_falhas += 1
-
-            msg = f"CLIENTES IMPORTADOS/ATUALIZADOS: {total}"
-            if sync_falhas:
-                msg += f"\nFalhas de sincronização API: {sync_falhas}"
-            messagebox.showinfo("OK", msg)
-            self.carregar()
-
-        except Exception as e:
-            messagebox.showerror("ERRO", str(e))
 
 
 class CadastrosPage(PageBase):
@@ -9766,6 +9923,8 @@ class ImportarVendasPage(PageBase):
             "tipo_estimativa": "KG",
             "caixas_estimado": 0,
             "status": "ATIVA",
+            "status_operacional": "",
+            "prestacao_status": "PENDENTE",
             "local_rota": "",
             "local_carregamento": "",
             "adiantamento": 0.0,
@@ -9796,6 +9955,8 @@ class ImportarVendasPage(PageBase):
                             "tipo_estimativa": upper(str(rota.get("tipo_estimativa") or "KG").strip()) or "KG",
                             "caixas_estimado": safe_int(rota.get("caixas_estimado"), 0),
                             "status": upper(str(rota.get("status") or "ATIVA").strip()) or "ATIVA",
+                            "status_operacional": upper(str(rota.get("status_operacional") or "").strip()),
+                            "prestacao_status": upper(str(rota.get("prestacao_status") or "PENDENTE").strip()) or "PENDENTE",
                             "local_rota": upper(str(rota.get("local_rota") or rota.get("tipo_rota") or "")),
                             "local_carregamento": upper(
                                 str(
@@ -9850,8 +10011,9 @@ class ImportarVendasPage(PageBase):
             cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
             if "codigo_programacao" not in cols_prog:
                 return None
+            data_expr = "COALESCE(data_criacao,'')" if "data_criacao" in cols_prog else ("COALESCE(data,'')" if "data" in cols_prog else "''")
             select_cols = [
-                "COALESCE(data_criacao,'')",
+                data_expr,
                 "COALESCE(motorista,'')",
                 "COALESCE(veiculo,'')",
                 "COALESCE(equipe,'')",
@@ -9859,6 +10021,8 @@ class ImportarVendasPage(PageBase):
                 "COALESCE(tipo_estimativa,'KG')" if "tipo_estimativa" in cols_prog else "'KG'",
                 "COALESCE(caixas_estimado,0)" if "caixas_estimado" in cols_prog else "0",
                 "COALESCE(status,'ATIVA')" if "status" in cols_prog else "'ATIVA'",
+                "COALESCE(status_operacional,'')" if "status_operacional" in cols_prog else "''",
+                "COALESCE(prestacao_status,'PENDENTE')" if "prestacao_status" in cols_prog else "'PENDENTE'",
                 "COALESCE(local_rota,'')" if "local_rota" in cols_prog else ("COALESCE(tipo_rota,'')" if "tipo_rota" in cols_prog else "''"),
                 (
                     "COALESCE(local_carregamento,'')"
@@ -9893,14 +10057,16 @@ class ImportarVendasPage(PageBase):
                     "tipo_estimativa": upper(str(row[5] or "KG").strip()) or "KG",
                     "caixas_estimado": safe_int(row[6], 0),
                     "status": upper(str(row[7] or "ATIVA").strip()) or "ATIVA",
-                    "local_rota": upper(str(row[8] or "")),
-                    "local_carregamento": upper(str(row[9] or "")),
-                    "adiantamento": safe_float(row[10], 0.0),
-                    "motorista_id": safe_int(row[11], 0),
-                    "motorista_codigo": upper(str(row[12] or "")),
-                    "codigo_motorista": upper(str(row[13] or "")),
-                    "usuario_criacao": upper(str(row[14] or usuario).strip()) or usuario,
-                    "usuario_ultima_edicao": upper(str(row[15] or usuario).strip()) or usuario,
+                    "status_operacional": upper(str(row[8] or "").strip()),
+                    "prestacao_status": upper(str(row[9] or "PENDENTE").strip()) or "PENDENTE",
+                    "local_rota": upper(str(row[10] or "")),
+                    "local_carregamento": upper(str(row[11] or "")),
+                    "adiantamento": safe_float(row[12], 0.0),
+                    "motorista_id": safe_int(row[13], 0),
+                    "motorista_codigo": upper(str(row[14] or "")),
+                    "codigo_motorista": upper(str(row[15] or "")),
+                    "usuario_criacao": upper(str(row[16] or usuario).strip()) or usuario,
+                    "usuario_ultima_edicao": upper(str(row[17] or usuario).strip()) or usuario,
                 }
             )
         return {"meta": meta, "itens": fetch_programacao_itens(codigo) or []}
@@ -10153,60 +10319,9 @@ class ImportarVendasPage(PageBase):
                     [(usada_em, codigo, rid) for rid in ids],
                 )
 
-    def vincular_selecionadas_programacao(self):
-        prog = upper((self.cb_prog_vinculo.get() or "").strip())
-        if not prog:
-            messagebox.showwarning("ATENÇÃO", "Selecione a programação ativa para vincular as vendas.")
-            return
-        itens = tuple(self.tree.selection() or ())
-        if not itens:
-            marcados = []
-            for iid in (self.tree.get_children() or ()):
-                vals = self.tree.item(iid, "values") or ()
-                if len(vals) > 1 and str(vals[1]).strip() == "[x]":
-                    marcados.append(iid)
-            itens = tuple(marcados)
-        if not itens:
-            messagebox.showwarning("ATENÇÃO", "Selecione uma ou mais vendas para vincular.")
-            return
-        ids = []
-        seen = set()
-        for iid in itens:
-            vals = self.tree.item(iid, "values") or ()
-            rid = safe_int(vals[0] if vals else 0, 0)
-            if rid > 0 and rid not in seen:
-                seen.add(rid)
-                ids.append(rid)
-        if not ids:
-            messagebox.showwarning("ATENÇÃO", "Nao foi possivel identificar as vendas selecionadas.")
-            return
-
-        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-        if desktop_secret and is_desktop_api_sync_enabled():
-            try:
-                _call_api(
-                    "POST",
-                    "desktop/vendas-importadas/vincular",
-                    payload={"ids": ids, "codigo_programacao": prog},
-                    extra_headers={"X-Desktop-Secret": desktop_secret},
-                )
-            except Exception:
-                logging.debug("Falha ao vincular vendas via API; usando fallback local.", exc_info=True)
-                with get_db() as conn:
-                    cur = conn.cursor()
-                    cur.executemany(
-                        "UPDATE vendas_importadas SET codigo_programacao=?, selecionada=1 WHERE id=? AND IFNULL(usada,0)=0",
-                        [(prog, rid) for rid in ids],
-                    )
-        else:
-            with get_db() as conn:
-                cur = conn.cursor()
-                cur.executemany(
-                    "UPDATE vendas_importadas SET codigo_programacao=?, selecionada=1 WHERE id=? AND IFNULL(usada,0)=0",
-                    [(prog, rid) for rid in ids],
-                )
-        self.carregar()
-        self.set_status(f"STATUS: {len(ids)} venda(s) vinculada(s) à programação {prog}.")
+    def _legacy_vincular_selecionadas_programacao_api_vinculo(self):
+        # Mantido apenas por compatibilidade com binds legados.
+        return self.vincular_selecionadas_programacao()
 
     # -------------------------
     # Helpers segurança/normalização
@@ -10214,88 +10329,9 @@ class ImportarVendasPage(PageBase):
     def _norm(self, v):
         return upper(str(v or "").strip())
 
-    def vincular_selecionadas_programacao(self):
-        prog = upper((self.cb_prog_vinculo.get() or "").strip())
-        if not prog:
-            messagebox.showwarning("ATENÇÃO", "Selecione a programação ativa para vincular as vendas.")
-            return
-
-        ids = self._collect_vinculo_target_ids()
-        if not ids:
-            messagebox.showwarning("ATENÇÃO", "Selecione uma ou mais vendas para vincular.")
-            return
-
-        rows = self._fetch_vinculo_rows_from_tree(ids)
-        if not rows:
-            messagebox.showwarning("ATENÇÃO", "Não foi possível carregar os dados das vendas selecionadas.")
-            return
-
-        snapshot = self._fetch_programacao_vinculo_snapshot(prog)
-        if not snapshot:
-            messagebox.showwarning("ATENÇÃO", f"Programação não encontrada para vínculo: {prog}.")
-            return
-
-        endereco_map = self._resolve_clientes_endereco_map([(r or {}).get("cliente") for r in rows])
-        novos_itens = [self._row_venda_to_programacao_item(row, endereco_map) for row in (rows or [])]
-        itens_merged = self._merge_programacao_items((snapshot or {}).get("itens") or [], novos_itens)
-        if not itens_merged:
-            messagebox.showwarning("ATENÇÃO", "Nenhum item válido foi preparado para a programação.")
-            return
-
-        meta = dict((snapshot or {}).get("meta") or {})
-        meta["codigo_programacao"] = prog
-        total_caixas = sum(safe_int(it.get("qnt_caixas"), 0) for it in itens_merged)
-        total_quilos = round(sum(safe_float(it.get("kg"), 0.0) for it in itens_merged), 2)
-        usada_em = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-
-        if desktop_secret and is_desktop_api_sync_enabled():
-            try:
-                _call_api(
-                    "POST",
-                    "desktop/rotas/upsert",
-                    payload={
-                        "codigo_programacao": prog,
-                        "data_criacao": str(meta.get("data_criacao") or usada_em),
-                        "motorista": upper(str(meta.get("motorista") or "")),
-                        "motorista_id": safe_int(meta.get("motorista_id"), 0),
-                        "motorista_codigo": upper(str(meta.get("motorista_codigo") or meta.get("codigo_motorista") or "")),
-                        "codigo_motorista": upper(str(meta.get("codigo_motorista") or meta.get("motorista_codigo") or "")),
-                        "veiculo": upper(str(meta.get("veiculo") or "")),
-                        "equipe": upper(str(meta.get("equipe") or "")),
-                        "kg_estimado": safe_float(meta.get("kg_estimado"), 0.0),
-                        "tipo_estimativa": upper(str(meta.get("tipo_estimativa") or "KG").strip()) or "KG",
-                        "caixas_estimado": safe_int(meta.get("caixas_estimado"), 0),
-                        "status": upper(str(meta.get("status") or "ATIVA").strip()) or "ATIVA",
-                        "local_rota": upper(str(meta.get("local_rota") or "")),
-                        "local_carregamento": upper(str(meta.get("local_carregamento") or "")),
-                        "adiantamento": safe_float(meta.get("adiantamento"), 0.0),
-                        "total_caixas": total_caixas,
-                        "quilos": total_quilos,
-                        "usuario_criacao": upper(str(meta.get("usuario_criacao") or "").strip()),
-                        "usuario_ultima_edicao": upper(str(meta.get("usuario_ultima_edicao") or meta.get("usuario_criacao") or "").strip()),
-                        "itens": itens_merged,
-                    },
-                    extra_headers={"X-Desktop-Secret": desktop_secret},
-                )
-                _call_api(
-                    "POST",
-                    "desktop/vendas-importadas/consumir",
-                    payload={"ids": ids, "codigo_programacao": prog, "usada_em": usada_em},
-                    extra_headers={"X-Desktop-Secret": desktop_secret},
-                )
-            except Exception:
-                logging.debug("Falha ao anexar vendas diretamente à programação via API; usando fallback local.", exc_info=True)
-                self._persist_vinculo_programacao_local(meta, itens_merged, ids, usada_em)
-        else:
-            self._persist_vinculo_programacao_local(meta, itens_merged, ids, usada_em)
-
-        self.carregar()
-        self.refresh_programacoes_vinculo()
-        self.set_status(
-            f"STATUS: {len(ids)} venda(s) anexada(s) à programação {prog}. "
-            "As vendas vinculadas saíram da lista e a rota já pode refletir os clientes."
-        )
+    def _legacy_vincular_selecionadas_programacao_merge_sem_caixas(self):
+        # Mantido apenas por compatibilidade com binds legados.
+        return self.vincular_selecionadas_programacao()
 
     def vincular_selecionadas_programacao(self):
         prog = upper((self.cb_prog_vinculo.get() or "").strip())
@@ -10373,19 +10409,21 @@ class ImportarVendasPage(PageBase):
                         "quilos": total_quilos,
                         "usuario_criacao": upper(str(meta.get("usuario_criacao") or "").strip()),
                         "usuario_ultima_edicao": upper(str(meta.get("usuario_ultima_edicao") or meta.get("usuario_criacao") or "").strip()),
+                        "linked_venda_ids": ids,
+                        "vendas_usada_em": usada_em,
                         "itens": itens_merged,
                     },
                     extra_headers={"X-Desktop-Secret": desktop_secret},
                 )
-                _call_api(
-                    "POST",
-                    "desktop/vendas-importadas/consumir",
-                    payload={"ids": ids, "codigo_programacao": prog, "usada_em": usada_em},
-                    extra_headers={"X-Desktop-Secret": desktop_secret},
+            except Exception as exc:
+                logging.debug("Falha ao anexar vendas diretamente a programacao via API.", exc_info=True)
+                messagebox.showerror(
+                    "ERRO",
+                    "Nao foi possivel anexar as vendas a programacao na API central.\n\n"
+                    "A gravacao local foi bloqueada para evitar divergencia entre servidor e desktop.\n\n"
+                    f"Detalhe: {exc}",
                 )
-            except Exception:
-                logging.debug("Falha ao anexar vendas diretamente a programacao via API; usando fallback local.", exc_info=True)
-                self._persist_vinculo_programacao_local(meta, itens_merged, ids, usada_em)
+                return
         else:
             self._persist_vinculo_programacao_local(meta, itens_merged, ids, usada_em)
 
@@ -10728,6 +10766,7 @@ class ImportarVendasPage(PageBase):
                             SELECT id, selecionada, pedido, data_venda, cliente, nome_cliente, produto, vr_total, qnt, cidade, vendedor, codigo_programacao
                             FROM vendas_importadas
                             WHERE (IFNULL(usada,0)=0)
+                              AND TRIM(COALESCE(codigo_programacao,''))=''
                               AND (
                                 pedido LIKE ? OR cliente LIKE ? OR nome_cliente LIKE ? OR vendedor LIKE ? OR produto LIKE ?
                               )
@@ -10738,6 +10777,7 @@ class ImportarVendasPage(PageBase):
                             SELECT id, selecionada, pedido, data_venda, cliente, nome_cliente, produto, vr_total, qnt, cidade, vendedor, codigo_programacao
                             FROM vendas_importadas
                             WHERE (IFNULL(usada,0)=0)
+                              AND TRIM(COALESCE(codigo_programacao,''))=''
                             ORDER BY id DESC
                         """)
                     rows = cur.fetchall() or []
@@ -10892,13 +10932,20 @@ class ImportarVendasPage(PageBase):
                 self.carregar()
                 self.set_status(f"STATUS: {len(ids)} venda(s) importada(s) excluida(s).")
                 return "break"
-            except Exception:
-                logging.debug("Falha ao excluir vendas importadas via API; usando fallback local.", exc_info=True)
+            except Exception as exc:
+                logging.debug("Falha ao excluir vendas importadas via API.", exc_info=True)
+                messagebox.showerror(
+                    "ERRO",
+                    "Nao foi possivel excluir as vendas na API central.\n\n"
+                    "A exclusao local foi bloqueada para evitar divergencia entre servidor e desktop.\n\n"
+                    f"Detalhe: {exc}",
+                )
+                return "break"
 
         with get_db() as conn:
             cur = conn.cursor()
             cur.executemany(
-                "DELETE FROM vendas_importadas WHERE id=? AND IFNULL(usada,0)=0",
+                "DELETE FROM vendas_importadas WHERE id=? AND IFNULL(usada,0)=0 AND TRIM(COALESCE(codigo_programacao,''))=''",
                 [(rid,) for rid in ids],
             )
 
@@ -10923,15 +10970,22 @@ class ImportarVendasPage(PageBase):
                     extra_headers={"X-Desktop-Secret": desktop_secret},
                 )
                 return
-            except Exception:
-                logging.debug("Falha ao alternar selecao via API; usando fallback local.", exc_info=True)
+            except Exception as exc:
+                logging.debug("Falha ao alternar selecao via API.", exc_info=True)
+                messagebox.showerror(
+                    "ERRO",
+                    "Nao foi possivel atualizar a selecao na API central.\n\n"
+                    "A alteracao local foi bloqueada para evitar divergencia entre servidor e desktop.\n\n"
+                    f"Detalhe: {exc}",
+                )
+                return
 
         with get_db() as conn:
             cur = conn.cursor()
             cur.execute("""
                 UPDATE vendas_importadas
                 SET selecionada = CASE WHEN selecionada=1 THEN 0 ELSE 1 END
-                WHERE id=? AND IFNULL(usada,0)=0
+                WHERE id=? AND IFNULL(usada,0)=0 AND TRIM(COALESCE(codigo_programacao,''))=''
             """, (rid,))
 
     def _on_tree_click_toggle_sel(self, event=None):
@@ -10974,12 +11028,22 @@ class ImportarVendasPage(PageBase):
                 )
                 self.carregar()
                 return
-            except Exception:
-                logging.debug("Falha ao marcar/desmarcar todas via API; usando fallback local.", exc_info=True)
+            except Exception as exc:
+                logging.debug("Falha ao marcar/desmarcar todas via API.", exc_info=True)
+                messagebox.showerror(
+                    "ERRO",
+                    "Nao foi possivel atualizar a selecao na API central.\n\n"
+                    "A alteracao local foi bloqueada para evitar divergencia entre servidor e desktop.\n\n"
+                    f"Detalhe: {exc}",
+                )
+                return
 
         with get_db() as conn:
             cur = conn.cursor()
-            cur.execute("UPDATE vendas_importadas SET selecionada=? WHERE IFNULL(usada,0)=0", (int(val),))
+            cur.execute(
+                "UPDATE vendas_importadas SET selecionada=? WHERE IFNULL(usada,0)=0 AND TRIM(COALESCE(codigo_programacao,''))=''",
+                (int(val),),
+            )
         self.carregar()
 
     def marcar_selecionadas(self):
@@ -11019,13 +11083,20 @@ class ImportarVendasPage(PageBase):
                 self.carregar()
                 self.set_status(f"STATUS: {len(ids)} venda(s) marcada(s) a partir da selecao.")
                 return
-            except Exception:
-                logging.debug("Falha ao marcar ids via API; usando fallback local.", exc_info=True)
+            except Exception as exc:
+                logging.debug("Falha ao marcar ids via API.", exc_info=True)
+                messagebox.showerror(
+                    "ERRO",
+                    "Nao foi possivel atualizar a selecao na API central.\n\n"
+                    "A alteracao local foi bloqueada para evitar divergencia entre servidor e desktop.\n\n"
+                    f"Detalhe: {exc}",
+                )
+                return
 
         with get_db() as conn:
             cur = conn.cursor()
             cur.executemany(
-                "UPDATE vendas_importadas SET selecionada=1 WHERE id=? AND IFNULL(usada,0)=0",
+                "UPDATE vendas_importadas SET selecionada=1 WHERE id=? AND IFNULL(usada,0)=0 AND TRIM(COALESCE(codigo_programacao,''))=''",
                 [(rid,) for rid in ids],
             )
 
@@ -11046,12 +11117,19 @@ class ImportarVendasPage(PageBase):
                 )
                 self.carregar()
                 return
-            except Exception:
-                logging.debug("Falha ao limpar vendas importadas via API; usando fallback local.", exc_info=True)
+            except Exception as exc:
+                logging.debug("Falha ao limpar vendas importadas via API.", exc_info=True)
+                messagebox.showerror(
+                    "ERRO",
+                    "Nao foi possivel limpar as vendas na API central.\n\n"
+                    "A limpeza local foi bloqueada para evitar divergencia entre servidor e desktop.\n\n"
+                    f"Detalhe: {exc}",
+                )
+                return
 
         with get_db() as conn:
             cur = conn.cursor()
-            cur.execute("DELETE FROM vendas_importadas")
+            cur.execute("DELETE FROM vendas_importadas WHERE IFNULL(usada,0)=0 AND TRIM(COALESCE(codigo_programacao,''))=''")
 
         self.carregar()
 
@@ -11455,7 +11533,22 @@ class ProgramacaoPage(PageBase):
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(programacoes)")
             cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
-            data_ref_expr = "COALESCE(data_saida,data_criacao,data,'')" if {"data_saida", "data_criacao", "data"} & cols else "''"
+            if "data_saida" in cols and "data_criacao" in cols and "data" in cols:
+                data_ref_expr = "COALESCE(data_saida,data_criacao,data,'')"
+            elif "data_saida" in cols and "data_criacao" in cols:
+                data_ref_expr = "COALESCE(data_saida,data_criacao,'')"
+            elif "data_saida" in cols and "data" in cols:
+                data_ref_expr = "COALESCE(data_saida,data,'')"
+            elif "data_criacao" in cols and "data" in cols:
+                data_ref_expr = "COALESCE(data_criacao,data,'')"
+            elif "data_saida" in cols:
+                data_ref_expr = "COALESCE(data_saida,'')"
+            elif "data_criacao" in cols:
+                data_ref_expr = "COALESCE(data_criacao,'')"
+            elif "data" in cols:
+                data_ref_expr = "COALESCE(data,'')"
+            else:
+                data_ref_expr = "''"
             status_op_expr = "COALESCE(status_operacional,'')" if "status_operacional" in cols else "''"
             finalizada_expr = "COALESCE(finalizada_no_app,0)" if "finalizada_no_app" in cols else "0"
             motorista_codigo_expr = "COALESCE(motorista_codigo,'')" if "motorista_codigo" in cols else ("COALESCE(codigo_motorista,'')" if "codigo_motorista" in cols else "''")
@@ -12531,6 +12624,8 @@ class ProgramacaoPage(PageBase):
         codigo = upper(str(codigo or "").strip())
         st_local = upper(str(status_local or "").strip())
         st_api = ""
+        prest_api = ""
+        prest_local = ""
 
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
         if desktop_secret and codigo:
@@ -12543,14 +12638,41 @@ class ProgramacaoPage(PageBase):
                 rota = resposta.get("rota") if isinstance(resposta, dict) else None
                 if isinstance(rota, dict):
                     st_api = upper(str(rota.get("status_operacional") or rota.get("status") or "").strip())
+                    prest_api = upper(str(rota.get("prestacao_status") or "").strip())
             except Exception:
                 logging.debug("Falha ao consultar status da programação na API central", exc_info=True)
 
-        st_ref = st_api or st_local
-        return st_ref, st_api, st_local
+        if codigo and not prest_api:
+            try:
+                with get_db() as conn:
+                    cur = conn.cursor()
+                    cur.execute("PRAGMA table_info(programacoes)")
+                    cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+                    if "prestacao_status" in cols_prog:
+                        cur.execute(
+                            "SELECT COALESCE(prestacao_status,'') FROM programacoes WHERE codigo_programacao=? ORDER BY id DESC LIMIT 1",
+                            (codigo,),
+                        )
+                        row = cur.fetchone()
+                        prest_local = upper((row[0] if row else "") or "")
+            except Exception:
+                logging.debug("Falha ao consultar prestacao_status local para programação", exc_info=True)
+
+        if prest_api == "FECHADA" or prest_local == "FECHADA":
+            st_ref = "PRESTACAO FECHADA"
+        else:
+            st_ref = st_api or st_local
+        return st_ref, (prest_api if prest_api == "FECHADA" else st_api), (prest_local if prest_local == "FECHADA" else st_local)
 
     def _warn_bloqueio_edicao_status(self, codigo: str, status_ref: str):
         st = upper(str(status_ref or "").strip())
+        if st in {"PRESTACAO FECHADA", "FECHADA"}:
+            messagebox.showwarning(
+                "BLOQUEADO",
+                f"A programação {codigo} está com a prestação FECHADA.\n\n"
+                "Não é permitido alterar ou reaproveitar essa programação no desktop."
+            )
+            return
         if st in {"EM_ROTA", "EM ROTA", "INICIADA"}:
             messagebox.showwarning(
                 "BLOQUEADO",
@@ -12980,12 +13102,31 @@ class ProgramacaoPage(PageBase):
             try:
                 _call_api(
                     "DELETE",
-                    f"desktop/rotas/{urllib.parse.quote(codigo)}",
+                    f"desktop/rotas/{urllib.parse.quote(codigo)}?delete_vendas={1 if not escolha_vendas else 0}",
                     extra_headers={"X-Desktop-Secret": desktop_secret},
                 )
+            except SyncError as exc:
+                api_delete_error = exc
+                msg = str(exc)
+                if msg.startswith("409 "):
+                    messagebox.showwarning("ATENÇÃO", msg.split(":", 1)[-1].strip() or msg)
+                else:
+                    messagebox.showerror(
+                        "ERRO",
+                        "Nao foi possivel excluir a programacao na API central.\n\n"
+                        "A exclusao local foi bloqueada para evitar divergencia entre servidor e desktop.\n\n"
+                        f"Detalhe: {msg}",
+                    )
+                return
             except Exception as exc:
                 api_delete_error = exc
-                logging.debug("Falha ao excluir programacao na API; aplicando exclusao local.", exc_info=True)
+                logging.debug("Falha ao excluir programacao na API.", exc_info=True)
+                messagebox.showerror(
+                    "ERRO",
+                    "Nao foi possivel excluir a programacao na API central.\n\n"
+                    "A exclusao local foi bloqueada para evitar divergencia entre servidor e desktop.",
+                )
+                return
 
         try:
             with get_db() as conn:
@@ -13015,11 +13156,26 @@ class ProgramacaoPage(PageBase):
                     "programacao_itens",
                     "recebimentos",
                     "despesas",
+                    "rota_gps_pings",
+                    "rota_substituicoes",
+                    "cliente_localizacao_amostras",
                 ):
                     try:
                         cur.execute(f"DELETE FROM {tabela} WHERE UPPER(COALESCE(codigo_programacao,''))=UPPER(?)", (codigo,))
                     except Exception:
                         logging.debug("Falha ao excluir registros da tabela %s para a programacao %s", tabela, codigo, exc_info=True)
+
+                try:
+                    cur.execute(
+                        """
+                        DELETE FROM transferencias
+                        WHERE UPPER(COALESCE(codigo_origem,''))=UPPER(?)
+                           OR UPPER(COALESCE(codigo_destino,''))=UPPER(?)
+                        """,
+                        (codigo, codigo),
+                    )
+                except Exception:
+                    logging.debug("Falha ao excluir transferencias da programacao %s", codigo, exc_info=True)
 
                 cur.execute(
                     "DELETE FROM programacoes WHERE UPPER(COALESCE(codigo_programacao,''))=UPPER(?)",
@@ -13570,6 +13726,8 @@ class ProgramacaoPage(PageBase):
                         "caixas_carregadas": nf_caixas_sync,
                         "usuario_criacao": usuario_logado,
                         "usuario_ultima_edicao": usuario_logado,
+                        "linked_venda_ids": [safe_int(x, 0) for x in (self._loaded_venda_ids or []) if safe_int(x, 0) > 0],
+                        "vendas_usada_em": data_criacao,
                         "itens": itens_payload,
                     }
                     try:
@@ -13579,18 +13737,6 @@ class ProgramacaoPage(PageBase):
                             payload=payload_sync,
                             extra_headers={"X-Desktop-Secret": desktop_secret},
                         )
-                        ids_carregados_api = [safe_int(x, 0) for x in (self._loaded_venda_ids or []) if safe_int(x, 0) > 0]
-                        if ids_carregados_api:
-                            _call_api(
-                                "POST",
-                                "desktop/vendas-importadas/consumir",
-                                payload={
-                                    "ids": ids_carregados_api,
-                                    "codigo_programacao": upper(codigo_try),
-                                    "usada_em": data_criacao,
-                                },
-                                extra_headers={"X-Desktop-Secret": desktop_secret},
-                            )
                         codigo = codigo_try
                         api_saved = True
                         break
@@ -13600,9 +13746,16 @@ class ProgramacaoPage(PageBase):
                             break
                 if (not api_saved) and last_api_error:
                     logging.warning(
-                        "Falha ao salvar programacao via API; aplicando fallback local. Erro: %s",
+                        "Falha ao salvar programacao via API. Erro: %s",
                         last_api_error,
                     )
+                    messagebox.showerror(
+                        "ERRO",
+                        "Nao foi possivel salvar a programacao na API central.\n\n"
+                        "A gravacao local foi bloqueada para evitar divergencia entre servidor e desktop.\n\n"
+                        f"Detalhe: {last_api_error}",
+                    )
+                    return
 
             if not api_saved:
                 conn = db_connect()
@@ -13901,7 +14054,7 @@ class ProgramacaoPage(PageBase):
                 try:
                     if db_has_column(cur, "programacoes", "prestacao_status"):
                         cur.execute(
-                            "UPDATE programacoes SET prestacao_status='PENDENTE' WHERE codigo_programacao=?",
+                            "UPDATE programacoes SET prestacao_status=COALESCE(NULLIF(TRIM(prestacao_status), ''), 'PENDENTE') WHERE codigo_programacao=?",
                             (codigo,)
                         )
                 except Exception:
@@ -13949,8 +14102,8 @@ class ProgramacaoPage(PageBase):
                                     VALUES (?, ?, ?, '', ?)
                                     ON CONFLICT(cod_cliente) DO UPDATE SET
                                         nome_cliente=excluded.nome_cliente,
-                                        endereco=excluded.endereco,
-                                        vendedor=excluded.vendedor
+                                        endereco=COALESCE(NULLIF(excluded.endereco,''), clientes.endereco),
+                                        vendedor=COALESCE(NULLIF(excluded.vendedor,''), clientes.vendedor)
                                 """, (upper(cod_cliente), upper(nome_cliente), upper(endereco), upper(vendedor)))
                             except Exception:
                                 cur.execute("""
@@ -13958,7 +14111,7 @@ class ProgramacaoPage(PageBase):
                                     VALUES (?, ?, ?, '')
                                     ON CONFLICT(cod_cliente) DO UPDATE SET
                                         nome_cliente=excluded.nome_cliente,
-                                        endereco=excluded.endereco
+                                        endereco=COALESCE(NULLIF(excluded.endereco,''), clientes.endereco)
                                 """, (upper(cod_cliente), upper(nome_cliente), upper(endereco)))
 
                 # =========================================================
@@ -14064,6 +14217,8 @@ class ProgramacaoPage(PageBase):
                     "quilos": safe_float(total_quilos, 0.0),
                     "usuario_criacao": usuario_logado,
                     "usuario_ultima_edicao": usuario_logado,
+                    "linked_venda_ids": [safe_int(x, 0) for x in (self._loaded_venda_ids or []) if safe_int(x, 0) > 0],
+                    "vendas_usada_em": data_criacao,
                     "itens": itens_payload,
                 }
                 _call_api(
@@ -14072,18 +14227,6 @@ class ProgramacaoPage(PageBase):
                     payload=payload_sync,
                     extra_headers={"X-Desktop-Secret": desktop_secret},
                 )
-                ids_carregados_api = [safe_int(x, 0) for x in (self._loaded_venda_ids or []) if safe_int(x, 0) > 0]
-                if ids_carregados_api:
-                    _call_api(
-                        "POST",
-                        "desktop/vendas-importadas/consumir",
-                        payload={
-                            "ids": ids_carregados_api,
-                            "codigo_programacao": upper(codigo),
-                            "usada_em": data_criacao,
-                        },
-                        extra_headers={"X-Desktop-Secret": desktop_secret},
-                    )
         except Exception as exc:
             logging.warning("Falha ao sincronizar programacao %s com API: %s", codigo, exc)
 
@@ -14714,16 +14857,10 @@ class ProgramacaoPage(PageBase):
             "usuario_criacao": "",
             "usuario_ultima_edicao": "",
         }
-        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-        if desktop_secret and is_desktop_api_sync_enabled():
-            try:
-                resp = _call_api(
-                    "GET",
-                    f"desktop/rotas/{urllib.parse.quote(upper(codigo or '').strip())}",
-                    extra_headers={"X-Desktop-Secret": desktop_secret},
-                )
-                rota = resp.get("rota") if isinstance(resp, dict) else None
-                if isinstance(rota, dict):
+        try:
+            bundle = self._api_bundle_relatorio(upper(codigo or "").strip()) if hasattr(self, "_api_bundle_relatorio") else None
+            rota = bundle.get("rota") if isinstance(bundle, dict) else None
+            if isinstance(rota, dict):
                     meta["motorista"] = upper(str(rota.get("motorista") or ""))
                     meta["veiculo"] = upper(str(rota.get("veiculo") or ""))
                     meta["equipe"] = upper(str(rota.get("equipe") or ""))
@@ -14758,17 +14895,25 @@ class ProgramacaoPage(PageBase):
                             meta["aves_por_caixa"] = apc
                             break
                     return meta
-            except Exception:
-                logging.debug("Falha ao buscar metadados da programacao via API; usando fallback local.", exc_info=True)
+        except Exception:
+            logging.debug("Falha ao buscar metadados da programacao via API; usando fallback local.", exc_info=True)
         try:
             with get_db() as conn:
                 cur = conn.cursor()
+                cur.execute("PRAGMA table_info(programacoes)")
+                cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+                data_expr = "COALESCE(data_criacao,'')" if "data_criacao" in cols_prog else ("COALESCE(data,'')" if "data" in cols_prog else "''")
+                kg_expr = "COALESCE(kg_estimado,0)" if "kg_estimado" in cols_prog else "0"
+                tipo_estim_expr = "COALESCE(tipo_estimativa,'KG')" if "tipo_estimativa" in cols_prog else "'KG'"
+                caixas_estim_expr = "COALESCE(caixas_estimado,0)" if "caixas_estimado" in cols_prog else "0"
+                usuario_criacao_expr = "COALESCE(usuario_criacao,'')" if "usuario_criacao" in cols_prog else "''"
+                usuario_edicao_expr = "COALESCE(usuario_ultima_edicao,'')" if "usuario_ultima_edicao" in cols_prog else "''"
                 cur.execute(
-                    """
+                    f"""
                     SELECT COALESCE(motorista,''), COALESCE(veiculo,''), COALESCE(equipe,''),
-                           COALESCE(data_criacao,''), COALESCE(kg_estimado,0),
-                           COALESCE(tipo_estimativa,'KG'), COALESCE(caixas_estimado,0),
-                           COALESCE(usuario_criacao,''), COALESCE(usuario_ultima_edicao,'')
+                           {data_expr}, {kg_expr},
+                           {tipo_estim_expr}, {caixas_estim_expr},
+                           {usuario_criacao_expr}, {usuario_edicao_expr}
                     FROM programacoes
                     WHERE codigo_programacao=?
                     LIMIT 1
@@ -16074,6 +16219,8 @@ class RecebimentosPage(PageBase):
                     status_where = "UPPER(TRIM(COALESCE(status_operacional,''))) NOT IN ('CANCELADA','CANCELADO')"
                 else:
                     status_where = "UPPER(TRIM(COALESCE(status,''))) NOT IN ('CANCELADA','CANCELADO')"
+                if has_finalizada_app:
+                    status_where += " AND COALESCE(finalizada_no_app,0)=1"
                 prest_where = " AND COALESCE(prestacao_status,'PENDENTE') IN ('PENDENTE','FECHADA')" if has_prest else ""
 
                 cur.execute(
@@ -16127,9 +16274,15 @@ class RecebimentosPage(PageBase):
         if row is None:
             with get_db() as conn:
                 cur = conn.cursor()
+                cur.execute("PRAGMA table_info(programacoes)")
+                cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+                data_saida_expr = "COALESCE(data_saida,'')" if "data_saida" in cols_prog else "''"
+                hora_saida_expr = "COALESCE(hora_saida,'')" if "hora_saida" in cols_prog else "''"
+                data_chegada_expr = "COALESCE(data_chegada,'')" if "data_chegada" in cols_prog else "''"
+                hora_chegada_expr = "COALESCE(hora_chegada,'')" if "hora_chegada" in cols_prog else "''"
                 cur.execute(
-                    """
-                    SELECT data_saida, hora_saida, data_chegada, hora_chegada
+                    f"""
+                    SELECT {data_saida_expr}, {hora_saida_expr}, {data_chegada_expr}, {hora_chegada_expr}
                     FROM programacoes
                     WHERE codigo_programacao=?
                     ORDER BY id DESC
@@ -16195,16 +16348,8 @@ class RecebimentosPage(PageBase):
         if not prog:
             return False
 
-        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-        if not desktop_secret:
-            return False
-
         try:
-            resposta = _call_api(
-                "GET",
-                f"desktop/rotas/{prog}",
-                extra_headers={"X-Desktop-Secret": desktop_secret},
-            )
+            resposta = self._api_bundle_prestacao(prog) if hasattr(self, "_api_bundle_prestacao") else None
             rota = resposta.get("rota") if isinstance(resposta, dict) else None
             return isinstance(rota, dict)
         except Exception:
@@ -16223,19 +16368,13 @@ class RecebimentosPage(PageBase):
     def _is_prestacao_fechada(self, prog: str) -> bool:
         if not prog:
             return False
-        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-        if desktop_secret and is_desktop_api_sync_enabled():
-            try:
-                resp = _call_api(
-                    "GET",
-                    f"desktop/rotas/{urllib.parse.quote(upper(prog))}",
-                    extra_headers={"X-Desktop-Secret": desktop_secret},
-                )
-                rota = resp.get("rota") if isinstance(resp, dict) else None
-                if isinstance(rota, dict):
-                    return upper(str(rota.get("prestacao_status") or "")) == "FECHADA"
-            except Exception:
-                logging.debug("Falha ao consultar prestacao via API; usando fallback local.", exc_info=True)
+        try:
+            bundle = self._api_bundle_prestacao(prog) if hasattr(self, "_api_bundle_prestacao") else None
+            rota = bundle.get("rota") if isinstance(bundle, dict) else None
+            if isinstance(rota, dict):
+                return upper(str(rota.get("prestacao_status") or "")) == "FECHADA"
+        except Exception:
+            logging.debug("Falha ao consultar prestacao via API; usando fallback local.", exc_info=True)
         try:
             with get_db() as conn:
                 cur = conn.cursor()
@@ -16589,11 +16728,7 @@ class RecebimentosPage(PageBase):
         if api_enabled:
             try:
                 api_checked = True
-                resp = _call_api(
-                    "GET",
-                    f"desktop/rotas/{urllib.parse.quote(upper(prog))}",
-                    extra_headers={"X-Desktop-Secret": desktop_secret},
-                )
+                resp = self._api_bundle_prestacao(prog) if hasattr(self, "_api_bundle_prestacao") else None
                 rota_obj = resp.get("rota") if isinstance(resp, dict) else None
                 if isinstance(rota_obj, dict):
                     motorista = str(rota_obj.get("motorista") or "")
@@ -16749,6 +16884,17 @@ class RecebimentosPage(PageBase):
         self._refresh_diarias_preview()
 
         try:
+            resumo_diarias = self._sync_diarias_despesas(
+                prog=self._current_prog,
+                rota=self._rota_atual,
+                equipe_raw=self._equipe_raw,
+                data_saida=data_saida,
+                hora_saida=hora_saida,
+                data_chegada=data_chegada,
+                hora_chegada=hora_chegada,
+                diaria_motorista=diaria_motorista,
+                persist_remote=False,
+            )
             desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
             _call_api(
                 "PUT",
@@ -16759,18 +16905,14 @@ class RecebimentosPage(PageBase):
                     "data_chegada": data_chegada,
                     "hora_chegada": hora_chegada,
                     "diaria_motorista_valor": float(diaria_motorista),
+                    "qtd_diarias": float(resumo_diarias.get("qtd_diarias", 0.0)),
+                    "qtd_ajudantes": int(resumo_diarias.get("qtd_ajudantes", 0)),
+                    "total_motorista": float(resumo_diarias.get("total_motorista", 0.0)),
+                    "total_ajudantes": float(resumo_diarias.get("total_ajudantes", 0.0)),
+                    "observacao_motorista": str(resumo_diarias.get("observacao_motorista") or ""),
+                    "observacao_ajudantes": str(resumo_diarias.get("observacao_ajudantes") or ""),
                 },
                 extra_headers={"X-Desktop-Secret": desktop_secret},
-            )
-            resumo_diarias = self._sync_diarias_despesas(
-                prog=self._current_prog,
-                rota=self._rota_atual,
-                equipe_raw=self._equipe_raw,
-                data_saida=data_saida,
-                hora_saida=hora_saida,
-                data_chegada=data_chegada,
-                hora_chegada=hora_chegada,
-                diaria_motorista=diaria_motorista,
             )
 
             if not silent:
@@ -16788,7 +16930,11 @@ class RecebimentosPage(PageBase):
             return True
         except Exception as e:
             if not silent:
-                messagebox.showerror("ERRO", f"Erro ao salvar dados: {str(e)}")
+                messagebox.showerror(
+                    "ERRO",
+                    "Não foi possível salvar o cabeçalho da rota.\n\n"
+                    f"{_friendly_sync_error(e)}",
+                )
             return False
     
 
@@ -16848,7 +16994,7 @@ class RecebimentosPage(PageBase):
             return len(parts_nome)
         return 2
 
-    def _sync_diarias_despesas(self, prog: str, rota: str, equipe_raw: str, data_saida: str, hora_saida: str, data_chegada: str, hora_chegada: str, diaria_motorista: float):
+    def _sync_diarias_despesas(self, prog: str, rota: str, equipe_raw: str, data_saida: str, hora_saida: str, data_chegada: str, hora_chegada: str, diaria_motorista: float, persist_remote: bool = True):
         qtd = self._calc_qtd_diarias_regra(data_saida, hora_saida, data_chegada, hora_chegada)
         diaria_motorista = safe_float(diaria_motorista, 0.0)
         qtd_ajudantes = self._count_ajudantes(equipe_raw)
@@ -16860,19 +17006,14 @@ class RecebimentosPage(PageBase):
         motorista_nome = ""
         ajudantes_nome = ""
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-        if desktop_secret and is_desktop_api_sync_enabled():
-            try:
-                resp = _call_api(
-                    "GET",
-                    f"desktop/rotas/{urllib.parse.quote(upper(prog))}",
-                    extra_headers={"X-Desktop-Secret": desktop_secret},
-                )
-                rota_obj = resp.get("rota") if isinstance(resp, dict) else None
-                if isinstance(rota_obj, dict):
-                    motorista_nome = self._resolve_motorista_nome(str(rota_obj.get("motorista") or ""))
-                    ajudantes_nome = self._resolve_equipe_integrantes(str(rota_obj.get("equipe") or equipe_raw or ""))
-            except Exception:
-                logging.debug("Falha ao carregar equipe/motorista via API para diarias; usando fallback local.", exc_info=True)
+        try:
+            bundle = self._api_bundle_prestacao(prog) if hasattr(self, "_api_bundle_prestacao") else None
+            rota_obj = bundle.get("rota") if isinstance(bundle, dict) else None
+            if isinstance(rota_obj, dict):
+                motorista_nome = self._resolve_motorista_nome(str(rota_obj.get("motorista") or ""))
+                ajudantes_nome = self._resolve_equipe_integrantes(str(rota_obj.get("equipe") or equipe_raw or ""))
+        except Exception:
+            logging.debug("Falha ao carregar equipe/motorista via API para diarias; usando fallback local.", exc_info=True)
         if not motorista_nome and not ajudantes_nome:
             try:
                 with get_db() as conn:
@@ -16894,21 +17035,7 @@ class RecebimentosPage(PageBase):
 
         obs_motorista = f"QTD DIARIAS: {qtd:g} | MOTORISTA: {motorista_nome}"
         obs_ajudantes = f"QTD DIARIAS: {qtd:g} | AJUDANTES: {ajudantes_nome}"
-        _call_api(
-            "POST",
-            f"desktop/rotas/{urllib.parse.quote(upper(prog))}/diarias/sync",
-            payload={
-                "qtd_diarias": float(qtd),
-                "qtd_ajudantes": int(qtd_ajudantes),
-                "total_motorista": float(total_mot),
-                "total_ajudantes": float(total_ajud),
-                "observacao_motorista": obs_motorista,
-                "observacao_ajudantes": obs_ajudantes,
-            },
-            extra_headers={"X-Desktop-Secret": desktop_secret},
-        )
-
-        return {
+        resumo = {
             "qtd_diarias": qtd,
             "qtd_ajudantes": qtd_ajudantes,
             "diaria_motorista": diaria_motorista,
@@ -16916,7 +17043,25 @@ class RecebimentosPage(PageBase):
             "total_motorista": total_mot,
             "total_ajudantes": total_ajud,
             "total_geral": total_geral,
+            "observacao_motorista": obs_motorista,
+            "observacao_ajudantes": obs_ajudantes,
         }
+        if persist_remote:
+            _call_api(
+                "POST",
+                f"desktop/rotas/{urllib.parse.quote(upper(prog))}/diarias/sync",
+                payload={
+                    "qtd_diarias": float(qtd),
+                    "qtd_ajudantes": int(qtd_ajudantes),
+                    "total_motorista": float(total_mot),
+                    "total_ajudantes": float(total_ajud),
+                    "observacao_motorista": obs_motorista,
+                    "observacao_ajudantes": obs_ajudantes,
+                },
+                extra_headers={"X-Desktop-Secret": desktop_secret},
+            )
+
+        return resumo
     
 
 # -------------------------
@@ -16935,19 +17080,14 @@ class RecebimentosPage(PageBase):
 
         if api_enabled:
             try:
-                rota_resp = _call_api(
+                bundle_resp = _call_api(
                     "GET",
-                    f"desktop/rotas/{urllib.parse.quote(upper(prog))}",
+                    f"desktop/rotas/{urllib.parse.quote(upper(prog))}/bundle",
                     extra_headers={"X-Desktop-Secret": desktop_secret},
                 )
-                rec_resp = _call_api(
-                    "GET",
-                    f"desktop/rotas/{urllib.parse.quote(upper(prog))}/recebimentos",
-                    extra_headers={"X-Desktop-Secret": desktop_secret},
-                )
-                rota = rota_resp.get("rota") if isinstance(rota_resp, dict) else None
-                clientes_api = rota_resp.get("clientes") if isinstance(rota_resp, dict) else []
-                rec_items = rec_resp.get("recebimentos") if isinstance(rec_resp, dict) else []
+                rota = bundle_resp.get("rota") if isinstance(bundle_resp, dict) else None
+                clientes_api = bundle_resp.get("clientes") if isinstance(bundle_resp, dict) else []
+                rec_items = bundle_resp.get("recebimentos") if isinstance(bundle_resp, dict) else []
                 if isinstance(rota, dict):
                     clientes = [
                         (
@@ -17258,8 +17398,13 @@ class RecebimentosPage(PageBase):
         if safe_float(valor, 0.0) <= 0:
             messagebox.showwarning("ATENÇÃO", "Informe um valor válido (maior que zero).")
             return
+        forma = upper(str(forma or "").strip())
+        formas_validas = {"DINHEIRO", "PIX", "CARTAO", "BOLETO", "OUTRO"}
         if not forma:
             messagebox.showwarning("ATENÇÃO", "Informe a forma de pagamento.")
+            return
+        if forma not in formas_validas:
+            messagebox.showwarning("ATENÇÃO", "Forma de pagamento inválida.")
             return
 
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
@@ -17311,7 +17456,11 @@ class RecebimentosPage(PageBase):
             self.carregar_clientes_e_recebimentos()
             self.set_status(f"STATUS: Recebimento de {fmt_money(valor)} salvo para {nome}.")
         except Exception as e:
-            messagebox.showerror("ERRO", f"Erro ao salvar recebimento: {str(e)}")
+            messagebox.showerror(
+                "ERRO",
+                "Não foi possível salvar o recebimento.\n\n"
+                f"{_friendly_sync_error(e)}",
+            )
 
     def zerar_recebimento(self):
         prog = self._current_prog
@@ -17342,7 +17491,11 @@ class RecebimentosPage(PageBase):
             self.carregar_clientes_e_recebimentos()
             self.set_status(f"STATUS: Recebimentos zerados para cliente {cod}.")
         except Exception as e:
-            messagebox.showerror("ERRO", f"Erro ao zerar recebimentos: {str(e)}")
+            messagebox.showerror(
+                "ERRO",
+                "Não foi possível zerar os recebimentos do cliente.\n\n"
+                f"{_friendly_sync_error(e)}",
+            )
 
     def inserir_cliente_manual(self):
         prog = self._current_prog
@@ -17396,7 +17549,11 @@ class RecebimentosPage(PageBase):
                 logging.debug("Falha ignorada")
 
         except Exception as e:
-            messagebox.showerror("ERRO", f"Erro ao inserir cliente: {str(e)}")
+            messagebox.showerror(
+                "ERRO",
+                "Não foi possível inserir o cliente manual na programação.\n\n"
+                f"{_friendly_sync_error(e)}",
+            )
     
 
 # =========================
@@ -17425,18 +17582,13 @@ class RecebimentosPage(PageBase):
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
         if desktop_secret and is_desktop_api_sync_enabled():
             try:
-                rota_resp = _call_api(
+                bundle_resp = _call_api(
                     "GET",
-                    f"desktop/rotas/{urllib.parse.quote(upper(prog))}",
+                    f"desktop/rotas/{urllib.parse.quote(upper(prog))}/bundle",
                     extra_headers={"X-Desktop-Secret": desktop_secret},
                 )
-                rec_resp = _call_api(
-                    "GET",
-                    f"desktop/rotas/{urllib.parse.quote(upper(prog))}/recebimentos",
-                    extra_headers={"X-Desktop-Secret": desktop_secret},
-                )
-                rota = rota_resp.get("rota") if isinstance(rota_resp, dict) else None
-                recebimentos = rec_resp.get("recebimentos") if isinstance(rec_resp, dict) else []
+                rota = bundle_resp.get("rota") if isinstance(bundle_resp, dict) else None
+                recebimentos = bundle_resp.get("recebimentos") if isinstance(bundle_resp, dict) else []
                 if isinstance(rota, dict):
                     motorista_raw = str(rota.get("motorista") or "")
                     equipe_raw = str(rota.get("equipe") or "")
@@ -17495,12 +17647,30 @@ class RecebimentosPage(PageBase):
 
         with get_db() as conn:
             cur = conn.cursor()
-            cur.execute("""
-                SELECT motorista, veiculo, equipe, num_nf, data_saida, hora_saida, data_chegada, hora_chegada
+            cur.execute("PRAGMA table_info(programacoes)")
+            cols_prog = {str(c[1]).lower() for c in (cur.fetchall() or [])}
+            nf_expr = "COALESCE(num_nf,'')" if "num_nf" in cols_prog else ("COALESCE(nf_numero,'')" if "nf_numero" in cols_prog else "''")
+            data_saida_expr = "COALESCE(data_saida,'')" if "data_saida" in cols_prog else "''"
+            hora_saida_expr = "COALESCE(hora_saida,'')" if "hora_saida" in cols_prog else "''"
+            data_chegada_expr = "COALESCE(data_chegada,'')" if "data_chegada" in cols_prog else "''"
+            hora_chegada_expr = "COALESCE(hora_chegada,'')" if "hora_chegada" in cols_prog else "''"
+            cur.execute(
+                f"""
+                SELECT
+                    COALESCE(motorista,''),
+                    COALESCE(veiculo,''),
+                    COALESCE(equipe,''),
+                    {nf_expr},
+                    {data_saida_expr},
+                    {hora_saida_expr},
+                    {data_chegada_expr},
+                    {hora_chegada_expr}
                 FROM programacoes
                 WHERE codigo_programacao=?
                 LIMIT 1
-            """, (prog,))
+                """,
+                (prog,),
+            )
             r = cur.fetchone()
 
             if r:
@@ -17516,21 +17686,47 @@ class RecebimentosPage(PageBase):
                 header["data_chegada"] = dch_n
                 header["hora_chegada"] = hch_n
 
-            cur.execute("""
-                SELECT cod_cliente, nome_cliente, SUM(valor) AS total_valor,
-                       (SELECT forma_pagamento
-                          FROM recebimentos r2
-                         WHERE r2.codigo_programacao = r.codigo_programacao
-                           AND upper(r2.cod_cliente) = upper(r.cod_cliente)
-                         ORDER BY datetime(r2.data_registro) DESC, r2.id DESC
-                         LIMIT 1) AS forma_recente
-                FROM recebimentos r
-                WHERE codigo_programacao=?
-                GROUP BY upper(cod_cliente), upper(nome_cliente)
-                HAVING SUM(valor) > 0
-                ORDER BY upper(nome_cliente) ASC
-            """, (prog,))
-            rows = cur.fetchall() or []
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='recebimentos'")
+            if cur.fetchone():
+                cur.execute("PRAGMA table_info(recebimentos)")
+                cols_rec = {str(c[1]).lower() for c in (cur.fetchall() or [])}
+                cod_expr = "COALESCE(cod_cliente,'')" if "cod_cliente" in cols_rec else "''"
+                nome_expr = "COALESCE(nome_cliente,'')" if "nome_cliente" in cols_rec else "''"
+                valor_expr = "COALESCE(valor,0)" if "valor" in cols_rec else "0"
+                forma_expr = "COALESCE(forma_pagamento,'')" if "forma_pagamento" in cols_rec else "''"
+                data_expr = "COALESCE(data_registro,'')" if "data_registro" in cols_rec else "''"
+                cliente_where = (
+                    "upper(COALESCE(r2.cod_cliente,'')) = upper(COALESCE(r.cod_cliente,''))"
+                    if "cod_cliente" in cols_rec
+                    else "1=1"
+                )
+                group_cod = "upper(COALESCE(cod_cliente,''))" if "cod_cliente" in cols_rec else "''"
+                order_id_expr = "r2.id DESC" if "id" in cols_rec else "1 DESC"
+                cur.execute(
+                    f"""
+                    SELECT
+                        {cod_expr},
+                        {nome_expr},
+                        SUM({valor_expr}) AS total_valor,
+                        (
+                            SELECT {forma_expr}
+                            FROM recebimentos r2
+                            WHERE r2.codigo_programacao = r.codigo_programacao
+                              AND {cliente_where}
+                            ORDER BY datetime({data_expr}) DESC, {order_id_expr}
+                            LIMIT 1
+                        ) AS forma_recente
+                    FROM recebimentos r
+                    WHERE codigo_programacao=?
+                    GROUP BY {group_cod}, upper(COALESCE(nome_cliente,''))
+                    HAVING SUM({valor_expr}) > 0
+                    ORDER BY upper(COALESCE(nome_cliente,'')) ASC
+                    """,
+                    (prog,),
+                )
+                rows = cur.fetchall() or []
+            else:
+                rows = []
 
         parsed_rows = []
         total_geral = 0.0
@@ -17546,6 +17742,8 @@ class RecebimentosPage(PageBase):
         prog = self._current_prog
         if not prog:
             messagebox.showwarning("ATENÇÃO", "Carregue uma programação primeiro.")
+            return
+        if not require_reportlab():
             return
 
         header, rows, total_geral = self._get_dados_para_impressao(prog)
@@ -18535,6 +18733,27 @@ class DespesasPage(PageBase):
         except Exception:
             return "R$ 0,00"
 
+    def _api_bundle_prestacao(self, prog: str):
+        prog = upper(str(prog or "").strip())
+        if not prog:
+            return None
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if not desktop_secret or not is_desktop_api_sync_enabled():
+            return None
+        try:
+            resp = _call_api(
+                "GET",
+                f"desktop/rotas/{urllib.parse.quote(prog)}/bundle",
+                extra_headers={"X-Desktop-Secret": desktop_secret},
+            )
+            rota = resp.get("rota") if isinstance(resp, dict) else None
+            if not isinstance(rota, dict):
+                return None
+            return resp
+        except Exception:
+            logging.debug("Falha ao montar bundle de prestacao via API.", exc_info=True)
+            return None
+
     def _draw_km_pie(self, items):
         canvas = getattr(self, "canvas_km_pie", None)
         if not canvas:
@@ -18607,11 +18826,14 @@ class DespesasPage(PageBase):
             try:
                 with get_db() as conn:
                     cur = conn.cursor()
-                    cur.execute("""
-                        SELECT COALESCE(veiculo, '-'), COALESCE(media_km_l, 0)
+                    cur.execute("PRAGMA table_info(programacoes)")
+                    cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+                    media_expr = "COALESCE(media_km_l, 0)" if "media_km_l" in cols_prog else "0"
+                    cur.execute(f"""
+                        SELECT COALESCE(veiculo, '-'), {media_expr}
                         FROM programacoes
-                        WHERE COALESCE(media_km_l, 0) > 0
-                        ORDER BY media_km_l DESC, id DESC
+                        WHERE {media_expr} > 0
+                        ORDER BY {media_expr} DESC, id DESC
                         LIMIT 5
                     """)
                     medias_top = [(str(r[0] or "-"), safe_float(r[1], 0.0)) for r in (cur.fetchall() or [])]
@@ -18655,13 +18877,8 @@ class DespesasPage(PageBase):
         rows = []
         self._despesas_cache = {}
         try:
-            desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-            resp = _call_api(
-                "GET",
-                f"desktop/rotas/{urllib.parse.quote(upper(prog))}/despesas",
-                extra_headers={"X-Desktop-Secret": desktop_secret},
-            )
-            itens = (resp.get("despesas") if isinstance(resp, dict) else []) or []
+            bundle = self._api_bundle_prestacao(prog)
+            itens = (bundle.get("despesas") if isinstance(bundle, dict) else []) or []
             for r in itens:
                 rid = safe_int((r or {}).get("id"), 0)
                 desc = str((r or {}).get("descricao") or "")
@@ -18711,6 +18928,16 @@ class DespesasPage(PageBase):
                 rows = cur.fetchall()
             for rid, desc, val, data_reg, cat_row, observacao in rows:
                 self._despesas_cache[str(rid)] = (rid, upper(prog), desc, val, cat_row, observacao, data_reg)
+
+        if rows:
+            if ordem == "DATA ASC":
+                rows.sort(key=lambda r: (str(r[3] or ""), safe_int(r[0], 0)))
+            elif ordem == "VALOR DESC":
+                rows.sort(key=lambda r: (safe_float(r[2], 0.0), safe_int(r[0], 0)), reverse=True)
+            elif ordem == "VALOR ASC":
+                rows.sort(key=lambda r: (safe_float(r[2], 0.0), safe_int(r[0], 0)))
+            else:
+                rows.sort(key=lambda r: (str(r[3] or ""), safe_int(r[0], 0)), reverse=True)
 
         for i in self.tree_desp.get_children():
             self.tree_desp.delete(i)
@@ -18910,15 +19137,10 @@ class DespesasPage(PageBase):
         has_obs_transbordo = False
 
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-        if desktop_secret and is_desktop_api_sync_enabled():
-            try:
-                resp = _call_api(
-                    "GET",
-                    f"desktop/rotas/{urllib.parse.quote(upper(prog))}",
-                    extra_headers={"X-Desktop-Secret": desktop_secret},
-                )
-                rota_api = resp.get("rota") if isinstance(resp, dict) else None
-                if isinstance(rota_api, dict):
+        try:
+            resp = self._api_bundle_prestacao(prog)
+            rota_api = resp.get("rota") if isinstance(resp, dict) else None
+            if isinstance(rota_api, dict):
                     motorista = str(rota_api.get("motorista") or "")
                     veiculo = str(rota_api.get("veiculo") or "")
                     equipe = str(rota_api.get("equipe") or "")
@@ -19021,8 +19243,8 @@ class DespesasPage(PageBase):
 
                     self._refresh_km_insights()
                     return
-            except Exception:
-                logging.debug("Falha ao carregar extras via API; usando fallback local.", exc_info=True)
+        except Exception:
+            logging.debug("Falha ao carregar extras via API; usando fallback local.", exc_info=True)
 
         with get_db() as conn:
             cur = conn.cursor()
@@ -19333,35 +19555,22 @@ class DespesasPage(PageBase):
 
         total_desp = 0.0
         total_receb = 0.0
-        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
         loaded_api = False
-        if desktop_secret and is_desktop_api_sync_enabled():
-            try:
-                rec_resp = _call_api(
-                    "GET",
-                    f"desktop/rotas/{urllib.parse.quote(upper(prog))}/recebimentos",
-                    extra_headers={"X-Desktop-Secret": desktop_secret},
-                )
-                desp_resp = _call_api(
-                    "GET",
-                    f"desktop/rotas/{urllib.parse.quote(upper(prog))}/despesas",
-                    extra_headers={"X-Desktop-Secret": desktop_secret},
-                )
-                rec_rows = (rec_resp.get("recebimentos") if isinstance(rec_resp, dict) else []) or []
-                desp_rows = (desp_resp.get("despesas") if isinstance(desp_resp, dict) else []) or []
-                total_receb = sum(
-                    safe_float((r or {}).get("valor"), 0.0)
-                    for r in rec_rows
-                    if isinstance(r, dict)
-                )
-                total_desp = sum(
-                    safe_float((r or {}).get("valor"), 0.0)
-                    for r in desp_rows
-                    if isinstance(r, dict)
-                )
-                loaded_api = True
-            except Exception:
-                logging.debug("Falha ao calcular resumo financeiro via API; usando fallback local.", exc_info=True)
+        bundle = self._api_bundle_prestacao(prog)
+        if bundle:
+            rec_rows = bundle.get("recebimentos") if isinstance(bundle, dict) else []
+            desp_rows = bundle.get("despesas") if isinstance(bundle, dict) else []
+            total_receb = sum(
+                safe_float((r or {}).get("valor"), 0.0)
+                for r in (rec_rows or [])
+                if isinstance(r, dict)
+            )
+            total_desp = sum(
+                safe_float((r or {}).get("valor"), 0.0)
+                for r in (desp_rows or [])
+                if isinstance(r, dict)
+            )
+            loaded_api = True
 
         if not loaded_api:
             with get_db() as conn:
@@ -19540,57 +19749,51 @@ class DespesasPage(PageBase):
             aves_por_caixa = 6
             kg_vendido = safe_float(self.ent_nf_kg_vendido.get(), 0.0)
             used_api = False
-            desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-            if desktop_secret and is_desktop_api_sync_enabled():
-                try:
-                    resp = _call_api(
-                        "GET",
-                        f"desktop/rotas/{urllib.parse.quote(upper(prog))}",
-                        extra_headers={"X-Desktop-Secret": desktop_secret},
-                    )
-                    rota = resp.get("rota") if isinstance(resp, dict) else None
-                    clientes = resp.get("clientes") if isinstance(resp, dict) else []
-                    if isinstance(rota, dict):
-                        if caixas <= 0:
-                            caixas = safe_int(
-                                rota.get("nf_caixas"),
-                                safe_int(rota.get("caixas_carregadas"), safe_int(rota.get("qnt_cx_carregada"), safe_int(rota.get("total_caixas"), 0))),
-                            )
-                        if media <= 0:
-                            media = self._normalize_media_kg_ave(
-                                safe_float(rota.get("media"), safe_float(rota.get("media_carregada"), safe_float(rota.get("media_base"), 0.0)))
-                            )
-                        if caixa_final <= 0:
-                            caixa_final = safe_int(
-                                rota.get("aves_caixa_final"),
-                                safe_int(rota.get("qnt_aves_caixa_final"), 0),
-                            )
-                        aves_por_caixa = safe_int(
-                            rota.get("qnt_aves_por_cx"),
-                            safe_int(rota.get("aves_por_caixa"), safe_int(rota.get("qnt_aves_por_caixa"), 6)),
+            try:
+                bundle = self._api_bundle_prestacao(prog)
+                rota = bundle.get("rota") if isinstance(bundle, dict) else None
+                clientes = bundle.get("clientes") if isinstance(bundle, dict) else []
+                if bundle and isinstance(rota, dict):
+                    if caixas <= 0:
+                        caixas = safe_int(
+                            rota.get("nf_caixas"),
+                            safe_int(rota.get("caixas_carregadas"), safe_int(rota.get("qnt_cx_carregada"), safe_int(rota.get("total_caixas"), 0))),
                         )
-                        if aves_por_caixa <= 0:
-                            aves_por_caixa = 6
+                    if media <= 0:
+                        media = self._normalize_media_kg_ave(
+                            safe_float(rota.get("media"), safe_float(rota.get("media_carregada"), safe_float(rota.get("media_base"), 0.0)))
+                        )
+                    if caixa_final <= 0:
+                        caixa_final = safe_int(
+                            rota.get("aves_caixa_final"),
+                            safe_int(rota.get("qnt_aves_caixa_final"), 0),
+                        )
+                    aves_por_caixa = safe_int(
+                        rota.get("qnt_aves_por_cx"),
+                        safe_int(rota.get("aves_por_caixa"), safe_int(rota.get("qnt_aves_por_caixa"), 6)),
+                    )
+                    if aves_por_caixa <= 0:
+                        aves_por_caixa = 6
 
-                        kg_vendido_calc = 0.0
-                        for it in (clientes or []):
-                            if not isinstance(it, dict):
-                                continue
-                            st = upper(str(it.get("status_pedido") or ""))
-                            if st != "ENTREGUE":
-                                continue
-                            peso = safe_float(it.get("peso_previsto"), 0.0)
-                            if peso > 0:
-                                kg_vendido_calc += peso
-                                continue
-                            cx = safe_float(it.get("caixas_atual"), safe_float(it.get("qnt_caixas"), 0.0))
-                            if cx > 0:
-                                kg_vendido_calc += cx * aves_por_caixa * media
-                        if kg_vendido_calc > 0:
-                            kg_vendido = kg_vendido_calc
-                        used_api = True
-                except Exception:
-                    logging.debug("Falha ao calcular saldo via API; usando fallback local.", exc_info=True)
+                    kg_vendido_calc = 0.0
+                    for it in (clientes or []):
+                        if not isinstance(it, dict):
+                            continue
+                        st = upper(str(it.get("status_pedido") or ""))
+                        if st != "ENTREGUE":
+                            continue
+                        peso = safe_float(it.get("peso_previsto"), 0.0)
+                        if peso > 0:
+                            kg_vendido_calc += peso
+                            continue
+                        cx = safe_float(it.get("caixas_atual"), safe_float(it.get("qnt_caixas"), 0.0))
+                        if cx > 0:
+                            kg_vendido_calc += cx * aves_por_caixa * media
+                    if kg_vendido_calc > 0:
+                        kg_vendido = kg_vendido_calc
+                    used_api = True
+            except Exception:
+                logging.debug("Falha ao calcular saldo via API; usando fallback local.", exc_info=True)
 
             if not used_api:
                 with get_db() as conn:
@@ -19743,15 +19946,10 @@ class DespesasPage(PageBase):
     def _calc_preco_medio_venda(self, prog: str) -> float:
         if not prog:
             return 0.0
-        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-        if desktop_secret and is_desktop_api_sync_enabled():
-            try:
-                resp = _call_api(
-                    "GET",
-                    f"desktop/rotas/{urllib.parse.quote(upper(prog))}",
-                    extra_headers={"X-Desktop-Secret": desktop_secret},
-                )
-                clientes = resp.get("clientes") if isinstance(resp, dict) else []
+        try:
+            bundle = self._api_bundle_prestacao(prog)
+            if bundle:
+                clientes = bundle.get("clientes") if isinstance(bundle, dict) else []
                 precos = []
                 for r in (clientes or []):
                     if not isinstance(r, dict):
@@ -19761,8 +19959,9 @@ class DespesasPage(PageBase):
                         precos.append(p)
                 if precos:
                     return sum(precos) / float(len(precos))
-            except Exception:
-                logging.debug("Falha ao calcular preco medio via API; usando fallback local.", exc_info=True)
+                return 0.0
+        except Exception:
+            logging.debug("Falha ao calcular preco medio via API; usando fallback local.", exc_info=True)
         try:
             with get_db() as conn:
                 cur = conn.cursor()
@@ -19822,24 +20021,19 @@ class DespesasPage(PageBase):
         try:
             prog = self._current_programacao or ""
             if prog:
-                desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
                 loaded_api = False
-                if desktop_secret and is_desktop_api_sync_enabled():
-                    try:
-                        resp = _call_api(
-                            "GET",
-                            f"desktop/rotas/{urllib.parse.quote(upper(prog))}/despesas",
-                            extra_headers={"X-Desktop-Secret": desktop_secret},
-                        )
-                        arr = (resp.get("despesas") if isinstance(resp, dict) else []) or []
+                try:
+                    bundle = self._api_bundle_prestacao(prog)
+                    arr = (bundle.get("despesas") if isinstance(bundle, dict) else []) or []
+                    if bundle:
                         despesas_rota = sum(
                             safe_float((r or {}).get("valor"), 0.0)
                             for r in arr
                             if isinstance(r, dict)
                         )
                         loaded_api = True
-                    except Exception:
-                        logging.debug("Falha ao calcular despesas da rota via API; usando fallback local.", exc_info=True)
+                except Exception:
+                    logging.debug("Falha ao calcular despesas da rota via API; usando fallback local.", exc_info=True)
                 if not loaded_api:
                     with get_db() as conn:
                         cur = conn.cursor()
@@ -19922,24 +20116,19 @@ class DespesasPage(PageBase):
             total_despesas = 0.0
             try:
                 if self._current_programacao:
-                    desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
                     loaded_api = False
-                    if desktop_secret and is_desktop_api_sync_enabled():
-                        try:
-                            resp = _call_api(
-                                "GET",
-                                f"desktop/rotas/{urllib.parse.quote(upper(self._current_programacao))}/despesas",
-                                extra_headers={"X-Desktop-Secret": desktop_secret},
-                            )
-                            arr = (resp.get("despesas") if isinstance(resp, dict) else []) or []
+                    try:
+                        bundle = self._api_bundle_prestacao(self._current_programacao)
+                        arr = (bundle.get("despesas") if isinstance(bundle, dict) else []) or []
+                        if bundle:
                             total_despesas = sum(
                                 safe_float((r or {}).get("valor"), 0.0)
                                 for r in arr
                                 if isinstance(r, dict)
                             )
                             loaded_api = True
-                        except Exception:
-                            logging.debug("Falha ao calcular total despesas via API; usando fallback local.", exc_info=True)
+                    except Exception:
+                        logging.debug("Falha ao calcular total despesas via API; usando fallback local.", exc_info=True)
                     if not loaded_api:
                         with get_db() as conn:
                             cur = conn.cursor()
@@ -20078,16 +20267,8 @@ class DespesasPage(PageBase):
         if not prog:
             return False
 
-        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-        if not desktop_secret:
-            return False
-
         try:
-            resposta = _call_api(
-                "GET",
-                f"desktop/rotas/{prog}",
-                extra_headers={"X-Desktop-Secret": desktop_secret},
-            )
+            resposta = self._api_bundle_prestacao(prog) if hasattr(self, "_api_bundle_prestacao") else None
             rota = resposta.get("rota") if isinstance(resposta, dict) else None
             clientes = resposta.get("clientes") if isinstance(resposta, dict) else []
             if not isinstance(rota, dict):
@@ -20110,22 +20291,16 @@ class DespesasPage(PageBase):
             return False
 
     def _fetch_motorista_codigo_hint(self, prog: str) -> str:
-        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-        if desktop_secret and is_desktop_api_sync_enabled():
-            try:
-                resp = _call_api(
-                    "GET",
-                    f"desktop/rotas/{urllib.parse.quote(upper(prog or '').strip())}",
-                    extra_headers={"X-Desktop-Secret": desktop_secret},
-                )
-                rota = resp.get("rota") if isinstance(resp, dict) else None
-                if isinstance(rota, dict):
-                    cod = str(rota.get("motorista_codigo") or rota.get("codigo_motorista") or "").strip()
-                    if cod:
-                        return cod
-                    return str(rota.get("motorista") or "").strip()
-            except Exception:
-                logging.debug("Falha ao obter hint de motorista via API; usando fallback local.", exc_info=True)
+        try:
+            bundle = self._api_bundle_prestacao(upper(prog or "").strip())
+            rota = bundle.get("rota") if isinstance(bundle, dict) else None
+            if isinstance(rota, dict):
+                cod = str(rota.get("motorista_codigo") or rota.get("codigo_motorista") or "").strip()
+                if cod:
+                    return cod
+                return str(rota.get("motorista") or "").strip()
+        except Exception:
+            logging.debug("Falha ao obter hint de motorista via API; usando fallback local.", exc_info=True)
         try:
             with get_db() as conn:
                 cur = conn.cursor()
@@ -20557,10 +20732,11 @@ class DespesasPage(PageBase):
                 prest_where = ""
                 if has_prest:
                     prest_where = f" AND {prest_expr} IN ('PENDENTE','FECHADA')"
+                data_expr = "COALESCE(data_criacao,'')" if "data_criacao" in cols else ("COALESCE(data,'')" if "data" in cols else ("COALESCE(data_saida,'')" if "data_saida" in cols else "''"))
 
                 cur.execute(
                     f"""
-                    SELECT codigo_programacao, data_criacao
+                    SELECT codigo_programacao, {data_expr} AS data_ref
                     FROM programacoes
                     WHERE ({where_sql}){prest_where}
                     ORDER BY id DESC
@@ -20568,7 +20744,7 @@ class DespesasPage(PageBase):
                     """
                 )
             except Exception:
-                cur.execute("SELECT codigo_programacao, data_criacao FROM programacoes ORDER BY id DESC LIMIT 300")
+                cur.execute("SELECT codigo_programacao, '' AS data_ref FROM programacoes ORDER BY id DESC LIMIT 300")
 
             programas = []
             for row in cur.fetchall():
@@ -20607,19 +20783,13 @@ class DespesasPage(PageBase):
 
     # --------- REGRAS DE SEGURANÇA (não altera sistema; só bloqueia quando necessário)
     def _get_prestacao_status(self, prog: str) -> str:
-        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-        if desktop_secret and is_desktop_api_sync_enabled():
-            try:
-                resp = _call_api(
-                    "GET",
-                    f"desktop/rotas/{urllib.parse.quote(upper(prog))}",
-                    extra_headers={"X-Desktop-Secret": desktop_secret},
-                )
-                rota = resp.get("rota") if isinstance(resp, dict) else None
-                if isinstance(rota, dict):
-                    return upper(str(rota.get("prestacao_status") or ""))
-            except Exception:
-                logging.debug("Falha ao consultar status da prestacao via API; usando fallback local.", exc_info=True)
+        try:
+            bundle = self._api_bundle_prestacao(prog)
+            rota = bundle.get("rota") if isinstance(bundle, dict) else None
+            if isinstance(rota, dict):
+                return upper(str(rota.get("prestacao_status") or ""))
+        except Exception:
+            logging.debug("Falha ao consultar status da prestacao via API; usando fallback local.", exc_info=True)
         try:
             with get_db() as conn:
                 cur = conn.cursor()
@@ -20668,31 +20838,25 @@ class DespesasPage(PageBase):
         if not prog:
             return out
 
-        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-        if desktop_secret and is_desktop_api_sync_enabled():
-            try:
-                resp = _call_api(
-                    "GET",
-                    f"desktop/rotas/{urllib.parse.quote(prog)}/logistica",
-                    extra_headers={"X-Desktop-Secret": desktop_secret},
-                )
-                info = resp.get("logistica") if isinstance(resp, dict) else None
-                if isinstance(info, dict):
-                    out.update({
-                        "pend_substituicao": safe_int(info.get("pend_substituicao"), 0),
-                        "pend_transferencia": safe_int(info.get("pend_transferencia"), 0),
-                        "transf_out": safe_int(info.get("transf_out"), 0),
-                        "transf_in": safe_int(info.get("transf_in"), 0),
-                        "base_cx": safe_int(info.get("base_cx"), 0),
-                        "atual_cx": safe_int(info.get("atual_cx"), 0),
-                        "esperado_cx": safe_int(info.get("esperado_cx"), 0),
-                        "delta_cx": safe_int(info.get("delta_cx"), 0),
-                        "itens_ok": bool(info.get("itens_ok", True)),
-                        "resumo": list(info.get("resumo") or []),
-                    })
-                    return out
-            except Exception:
-                logging.debug("Falha ao consolidar rastreabilidade via API; usando fallback local.", exc_info=True)
+        try:
+            bundle = self._api_bundle_prestacao(prog)
+            info = bundle.get("logistica") if isinstance(bundle, dict) else None
+            if isinstance(info, dict):
+                out.update({
+                    "pend_substituicao": safe_int(info.get("pend_substituicao"), 0),
+                    "pend_transferencia": safe_int(info.get("pend_transferencia"), 0),
+                    "transf_out": safe_int(info.get("transf_out"), 0),
+                    "transf_in": safe_int(info.get("transf_in"), 0),
+                    "base_cx": safe_int(info.get("base_cx"), 0),
+                    "atual_cx": safe_int(info.get("atual_cx"), 0),
+                    "esperado_cx": safe_int(info.get("esperado_cx"), 0),
+                    "delta_cx": safe_int(info.get("delta_cx"), 0),
+                    "itens_ok": bool(info.get("itens_ok", True)),
+                    "resumo": list(info.get("resumo") or []),
+                })
+                return out
+        except Exception:
+            logging.debug("Falha ao consolidar rastreabilidade via API; usando fallback local.", exc_info=True)
 
         try:
             with get_db() as conn:
@@ -20869,7 +21033,7 @@ class DespesasPage(PageBase):
                 if messagebox.askyesno(
                     "Imprimir prestacao",
                     f"Deseja imprimir agora a prestacao da rota {prog}?\n\n"
-                    "Sera gerada a folha completa com recebimentos e despesas."
+                    "Sera gerada a folha completa com retorno operacional, recebimentos e despesas."
                 ):
                     self._current_programacao = prog
                     self.imprimir_resumo()
@@ -20908,7 +21072,11 @@ class DespesasPage(PageBase):
             self._load_by_programacao()
             self.set_status("STATUS: Prestacao finalizada. Selecione uma nova programacao para continuar.")
         except Exception as e:
-            messagebox.showerror("ERRO", f"Erro ao finalizar prestacao: {str(e)}")
+            messagebox.showerror(
+                "ERRO",
+                "Não foi possível finalizar a prestação.\n\n"
+                f"{_friendly_sync_error(e)}",
+            )
     
 
     def _parse_money_local(self, s):
@@ -21102,7 +21270,11 @@ class DespesasPage(PageBase):
 
             except Exception as e:
                 self.logger.error(f"Erro ao salvar despesa: {str(e)}")
-                messagebox.showerror("ERRO", f"Erro ao salvar despesa: {str(e)}")
+                messagebox.showerror(
+                    "ERRO",
+                    "Não foi possível registrar a despesa.\n\n"
+                    f"{_friendly_sync_error(e)}",
+                )
 
         btn_frame = ttk.Frame(frm)
         btn_frame.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(18, 0))
@@ -21250,7 +21422,11 @@ class DespesasPage(PageBase):
 
             except Exception as e:
                 self.logger.error(f"Erro ao atualizar despesa: {str(e)}")
-                messagebox.showerror("ERRO", f"Erro ao atualizar despesa: {str(e)}")
+                messagebox.showerror(
+                    "ERRO",
+                    "Não foi possível atualizar a despesa.\n\n"
+                    f"{_friendly_sync_error(e)}",
+                )
 
         btn_frame = ttk.Frame(frm)
         btn_frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(18, 0))
@@ -21318,7 +21494,11 @@ class DespesasPage(PageBase):
 
         except Exception as e:
             self.logger.error(f"Erro ao excluir despesa: {str(e)}")
-            messagebox.showerror("ERRO", f"Erro ao excluir despesa: {str(e)}")
+            messagebox.showerror(
+                "ERRO",
+                "Não foi possível excluir a despesa.\n\n"
+                f"{_friendly_sync_error(e)}",
+            )
 
     # =========================================================
     # 7.7 RELATÓRIO EM TELA + IMPRESSÃO SIMULADA
@@ -21355,6 +21535,8 @@ class DespesasPage(PageBase):
                 logging.debug("Falha ignorada")
 
     def imprimir_resumo(self):
+        if not require_reportlab():
+            return
         try:
             prog = self._current_programacao
             if not prog:
@@ -21393,233 +21575,261 @@ class DespesasPage(PageBase):
             total_desp = 0.0
 
             used_api = False
-            desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-            if prog and desktop_secret and is_desktop_api_sync_enabled():
-                try:
-                    rota_resp = _call_api(
-                        "GET",
-                        f"desktop/rotas/{urllib.parse.quote(upper(prog))}",
-                        extra_headers={"X-Desktop-Secret": desktop_secret},
+            bundle = self._api_bundle_prestacao(prog)
+            if bundle:
+                rota = bundle.get("rota") if isinstance(bundle, dict) else None
+                recebimentos_api = bundle.get("recebimentos") if isinstance(bundle, dict) else []
+                despesas_api = bundle.get("despesas") if isinstance(bundle, dict) else []
+
+                if isinstance(rota, dict):
+                    motorista = str(rota.get("motorista") or "")
+                    veiculo = str(rota.get("veiculo") or "")
+                    equipe = str(rota.get("equipe") or "")
+                    equipe_txt = resolve_equipe_nomes(equipe)
+
+                    nf = str(rota.get("num_nf") or rota.get("nf_numero") or "")
+                    local_rota = str(rota.get("local_rota") or rota.get("tipo_rota") or "")
+                    local_carreg = str(rota.get("local_carregamento") or rota.get("granja_carregada") or "")
+
+                    data_saida, hora_saida = normalize_date_time_components(
+                        rota.get("data_saida"), rota.get("hora_saida")
                     )
-                    rec_resp = _call_api(
-                        "GET",
-                        f"desktop/rotas/{urllib.parse.quote(upper(prog))}/recebimentos",
-                        extra_headers={"X-Desktop-Secret": desktop_secret},
-                    )
-                    desp_resp = _call_api(
-                        "GET",
-                        f"desktop/rotas/{urllib.parse.quote(upper(prog))}/despesas",
-                        extra_headers={"X-Desktop-Secret": desktop_secret},
+                    data_chegada, hora_chegada = normalize_date_time_components(
+                        rota.get("data_chegada"), rota.get("hora_chegada")
                     )
 
-                    rota = rota_resp.get("rota") if isinstance(rota_resp, dict) else None
-                    recebimentos_api = rec_resp.get("recebimentos") if isinstance(rec_resp, dict) else []
-                    despesas_api = desp_resp.get("despesas") if isinstance(desp_resp, dict) else []
+                    nf_kg = safe_float(rota.get("nf_kg"), 0.0)
+                    nf_caixas = safe_int(rota.get("nf_caixas"), 0)
+                    nf_kg_carregado = safe_float(rota.get("nf_kg_carregado"), 0.0)
+                    nf_kg_vendido = safe_float(rota.get("nf_kg_vendido"), 0.0)
+                    nf_saldo = safe_float(rota.get("nf_saldo"), 0.0)
+                    nf_preco = safe_float(rota.get("nf_preco") or rota.get("preco_nf"), 0.0)
+                    nf_media_carregada = safe_float(rota.get("media") or rota.get("media_carregada"), 0.0)
+                    nf_caixa_final = safe_int(
+                        rota.get("aves_caixa_final")
+                        if rota.get("aves_caixa_final") not in (None, "")
+                        else rota.get("qnt_aves_caixa_final"),
+                        0,
+                    )
 
-                    if isinstance(rota, dict):
-                        motorista = str(rota.get("motorista") or "")
-                        veiculo = str(rota.get("veiculo") or "")
-                        equipe = str(rota.get("equipe") or "")
-                        equipe_txt = resolve_equipe_nomes(equipe)
+                    km_inicial = safe_float(rota.get("km_inicial"), 0.0)
+                    km_final = safe_float(rota.get("km_final"), 0.0)
+                    litros = safe_float(rota.get("litros"), 0.0)
+                    km_rodado = safe_float(rota.get("km_rodado"), 0.0)
+                    media_km_l = safe_float(rota.get("media_km_l"), 0.0)
+                    custo_km = safe_float(rota.get("custo_km"), 0.0)
 
-                        nf = str(rota.get("num_nf") or rota.get("nf_numero") or "")
-                        local_rota = str(rota.get("local_rota") or rota.get("tipo_rota") or "")
-                        local_carreg = str(rota.get("local_carregamento") or rota.get("granja_carregada") or "")
+                    ced_qtd[200] = safe_int(rota.get("ced_200_qtd"), 0)
+                    ced_qtd[100] = safe_int(rota.get("ced_100_qtd"), 0)
+                    ced_qtd[50] = safe_int(rota.get("ced_50_qtd"), 0)
+                    ced_qtd[20] = safe_int(rota.get("ced_20_qtd"), 0)
+                    ced_qtd[10] = safe_int(rota.get("ced_10_qtd"), 0)
+                    ced_qtd[5] = safe_int(rota.get("ced_5_qtd"), 0)
+                    ced_qtd[2] = safe_int(rota.get("ced_2_qtd"), 0)
+                    valor_dinheiro = safe_float(rota.get("valor_dinheiro"), 0.0)
+                    adiantamento = safe_float(
+                        rota.get("adiantamento")
+                        if rota.get("adiantamento") not in (None, "")
+                        else rota.get("adiantamento_rota"),
+                        0.0,
+                    )
 
-                        data_saida, hora_saida = normalize_date_time_components(
-                            rota.get("data_saida"), rota.get("hora_saida")
+                    recebimentos = [
+                        (
+                            r.get("cod_cliente"),
+                            r.get("nome_cliente"),
+                            safe_float(r.get("valor"), 0.0),
+                            r.get("forma_pagamento"),
+                            r.get("observacao"),
+                            r.get("data_registro"),
                         )
-                        data_chegada, hora_chegada = normalize_date_time_components(
-                            rota.get("data_chegada"), rota.get("hora_chegada")
+                        for r in (recebimentos_api or [])
+                        if isinstance(r, dict)
+                    ]
+                    despesas = [
+                        (
+                            d.get("descricao"),
+                            safe_float(d.get("valor"), 0.0),
+                            d.get("categoria"),
+                            d.get("observacao"),
+                            d.get("data_registro"),
                         )
+                        for d in (despesas_api or [])
+                        if isinstance(d, dict)
+                    ]
 
-                        nf_kg = safe_float(rota.get("nf_kg"), 0.0)
-                        nf_caixas = safe_int(rota.get("nf_caixas"), 0)
-                        nf_kg_carregado = safe_float(rota.get("nf_kg_carregado"), 0.0)
-                        nf_kg_vendido = safe_float(rota.get("nf_kg_vendido"), 0.0)
-                        nf_saldo = safe_float(rota.get("nf_saldo"), 0.0)
-                        nf_preco = safe_float(rota.get("nf_preco") or rota.get("preco_nf"), 0.0)
-                        nf_media_carregada = safe_float(rota.get("media") or rota.get("media_carregada"), 0.0)
-                        nf_caixa_final = safe_int(
-                            rota.get("aves_caixa_final")
-                            if rota.get("aves_caixa_final") not in (None, "")
-                            else rota.get("qnt_aves_caixa_final"),
-                            0,
-                        )
-
-                        km_inicial = safe_float(rota.get("km_inicial"), 0.0)
-                        km_final = safe_float(rota.get("km_final"), 0.0)
-                        litros = safe_float(rota.get("litros"), 0.0)
-                        km_rodado = safe_float(rota.get("km_rodado"), 0.0)
-                        media_km_l = safe_float(rota.get("media_km_l"), 0.0)
-                        custo_km = safe_float(rota.get("custo_km"), 0.0)
-
-                        ced_qtd[200] = safe_int(rota.get("ced_200_qtd"), 0)
-                        ced_qtd[100] = safe_int(rota.get("ced_100_qtd"), 0)
-                        ced_qtd[50] = safe_int(rota.get("ced_50_qtd"), 0)
-                        ced_qtd[20] = safe_int(rota.get("ced_20_qtd"), 0)
-                        ced_qtd[10] = safe_int(rota.get("ced_10_qtd"), 0)
-                        ced_qtd[5] = safe_int(rota.get("ced_5_qtd"), 0)
-                        ced_qtd[2] = safe_int(rota.get("ced_2_qtd"), 0)
-                        valor_dinheiro = safe_float(rota.get("valor_dinheiro"), 0.0)
-                        adiantamento = safe_float(
-                            rota.get("adiantamento")
-                            if rota.get("adiantamento") not in (None, "")
-                            else rota.get("adiantamento_rota"),
-                            0.0,
-                        )
-
-                        recebimentos = [
-                            (
-                                r.get("cod_cliente"),
-                                r.get("nome_cliente"),
-                                safe_float(r.get("valor"), 0.0),
-                                r.get("forma_pagamento"),
-                                r.get("observacao"),
-                                r.get("data_registro"),
-                            )
-                            for r in (recebimentos_api or [])
-                            if isinstance(r, dict)
-                        ]
-                        despesas = [
-                            (
-                                d.get("descricao"),
-                                safe_float(d.get("valor"), 0.0),
-                                d.get("categoria"),
-                                d.get("observacao"),
-                                d.get("data_registro"),
-                            )
-                            for d in (despesas_api or [])
-                            if isinstance(d, dict)
-                        ]
-
-                        total_receb = sum(safe_float(r[2], 0.0) for r in recebimentos)
-                        total_desp = sum(safe_float(d[1], 0.0) for d in despesas)
-                        used_api = True
-                except Exception:
-                    logging.debug("Falha ao carregar resumo via API; usando fallback local.", exc_info=True)
+                    total_receb = sum(safe_float(r[2], 0.0) for r in recebimentos)
+                    total_desp = sum(safe_float(d[1], 0.0) for d in despesas)
+                    used_api = True
 
             if not used_api:
                 with get_db() as conn:
                     cur = conn.cursor()
+                    def has_col(col):
+                        try:
+                            return db_has_column(cur, "programacoes", col)
+                        except Exception:
+                            return False
 
-                def has_col(col):
-                    try:
-                        return db_has_column(cur, "programacoes", col)
-                    except Exception:
-                        return False
+                    nf_col = "num_nf" if has_col("num_nf") else ("nf_numero" if has_col("nf_numero") else "'' as num_nf")
+                    local_rota_col = "local_rota" if has_col("local_rota") else ("tipo_rota" if has_col("tipo_rota") else "'' as local_rota")
+                    local_carreg_col = "local_carregamento" if has_col("local_carregamento") else ("granja_carregada" if has_col("granja_carregada") else "'' as local_carregamento")
+                    data_saida_col = "COALESCE(data_saida,'')" if has_col("data_saida") else "''"
+                    hora_saida_col = "COALESCE(hora_saida,'')" if has_col("hora_saida") else "''"
+                    data_chegada_col = "COALESCE(data_chegada,'')" if has_col("data_chegada") else "''"
+                    hora_chegada_col = "COALESCE(hora_chegada,'')" if has_col("hora_chegada") else "''"
+                    nf_kg_col = "COALESCE(nf_kg,0)" if has_col("nf_kg") else "0"
+                    nf_caixas_col = "COALESCE(nf_caixas,0)" if has_col("nf_caixas") else "0"
+                    nf_kg_carregado_col = "COALESCE(nf_kg_carregado,0)" if has_col("nf_kg_carregado") else ("COALESCE(kg_carregado,0)" if has_col("kg_carregado") else "0")
+                    nf_kg_vendido_col = "COALESCE(nf_kg_vendido,0)" if has_col("nf_kg_vendido") else ("COALESCE(kg_vendido,0)" if has_col("kg_vendido") else "0")
+                    nf_saldo_col = "COALESCE(nf_saldo,0)" if has_col("nf_saldo") else "0"
+                    nf_preco_col = "COALESCE(nf_preco,0) as nf_preco" if has_col("nf_preco") else "0 as nf_preco"
+                    media_carreg_col = "COALESCE(media,0) as media_carregada" if has_col("media") else "0 as media_carregada"
+                    if has_col("aves_caixa_final") and has_col("qnt_aves_caixa_final"):
+                        caixa_final_col = "COALESCE(aves_caixa_final, qnt_aves_caixa_final, 0) as caixa_final"
+                    elif has_col("aves_caixa_final"):
+                        caixa_final_col = "COALESCE(aves_caixa_final, 0) as caixa_final"
+                    elif has_col("qnt_aves_caixa_final"):
+                        caixa_final_col = "COALESCE(qnt_aves_caixa_final, 0) as caixa_final"
+                    else:
+                        caixa_final_col = "0 as caixa_final"
+                    km_inicial_col = "COALESCE(km_inicial,0)" if has_col("km_inicial") else "0"
+                    km_final_col = "COALESCE(km_final,0)" if has_col("km_final") else "0"
+                    litros_col = "COALESCE(litros,0)" if has_col("litros") else "0"
+                    km_rodado_col = "COALESCE(km_rodado,0)" if has_col("km_rodado") else "0"
+                    media_km_l_col = "COALESCE(media_km_l,0)" if has_col("media_km_l") else "0"
+                    custo_km_col = "COALESCE(custo_km,0)" if has_col("custo_km") else "0"
+                    ced_200_col = "COALESCE(ced_200_qtd,0)" if has_col("ced_200_qtd") else "0"
+                    ced_100_col = "COALESCE(ced_100_qtd,0)" if has_col("ced_100_qtd") else "0"
+                    ced_50_col = "COALESCE(ced_50_qtd,0)" if has_col("ced_50_qtd") else "0"
+                    ced_20_col = "COALESCE(ced_20_qtd,0)" if has_col("ced_20_qtd") else "0"
+                    ced_10_col = "COALESCE(ced_10_qtd,0)" if has_col("ced_10_qtd") else "0"
+                    ced_5_col = "COALESCE(ced_5_qtd,0)" if has_col("ced_5_qtd") else "0"
+                    ced_2_col = "COALESCE(ced_2_qtd,0)" if has_col("ced_2_qtd") else "0"
+                    valor_dinheiro_col = "COALESCE(valor_dinheiro,0)" if has_col("valor_dinheiro") else "0"
 
-                nf_col = "num_nf" if has_col("num_nf") else ("nf_numero" if has_col("nf_numero") else "'' as num_nf")
-                local_rota_col = "local_rota" if has_col("local_rota") else ("tipo_rota" if has_col("tipo_rota") else "'' as local_rota")
-                local_carreg_col = "local_carregamento" if has_col("local_carregamento") else ("granja_carregada" if has_col("granja_carregada") else "'' as local_carregamento")
-                nf_preco_col = "COALESCE(nf_preco,0) as nf_preco" if has_col("nf_preco") else "0 as nf_preco"
-                media_carreg_col = "COALESCE(media,0) as media_carregada" if has_col("media") else "0 as media_carregada"
-                if has_col("aves_caixa_final") and has_col("qnt_aves_caixa_final"):
-                    caixa_final_col = "COALESCE(aves_caixa_final, qnt_aves_caixa_final, 0) as caixa_final"
-                elif has_col("aves_caixa_final"):
-                    caixa_final_col = "COALESCE(aves_caixa_final, 0) as caixa_final"
-                elif has_col("qnt_aves_caixa_final"):
-                    caixa_final_col = "COALESCE(qnt_aves_caixa_final, 0) as caixa_final"
-                else:
-                    caixa_final_col = "0 as caixa_final"
+                    if has_col("adiantamento"):
+                        adiant_col = "adiantamento"
+                    elif has_col("adiantamento_rota"):
+                        adiant_col = "adiantamento_rota as adiantamento"
+                    else:
+                        adiant_col = "0 as adiantamento"
 
-                if has_col("adiantamento"):
-                    adiant_col = "adiantamento"
-                elif has_col("adiantamento_rota"):
-                    adiant_col = "adiantamento_rota as adiantamento"
-                else:
-                    adiant_col = "0 as adiantamento"
+                    cur.execute(f"""
+                        SELECT
+                            motorista,
+                            veiculo,
+                            equipe,
+                            {nf_col} as num_nf,
+                            {local_rota_col} as local_rota,
+                            {local_carreg_col} as local_carreg,
+                            {data_saida_col}, {hora_saida_col},
+                            {data_chegada_col}, {hora_chegada_col},
+                            {nf_kg_col}, {nf_caixas_col}, {nf_kg_carregado_col},
+                            {nf_kg_vendido_col}, {nf_saldo_col},
+                            {nf_preco_col},
+                            {media_carreg_col},
+                            {caixa_final_col},
+                            {km_inicial_col}, {km_final_col}, {litros_col},
+                            {km_rodado_col}, {media_km_l_col}, {custo_km_col},
+                            {ced_200_col}, {ced_100_col}, {ced_50_col},
+                            {ced_20_col}, {ced_10_col}, {ced_5_col}, {ced_2_col},
+                            {valor_dinheiro_col},
+                            {adiant_col}
+                        FROM programacoes
+                        WHERE codigo_programacao=?
+                    """, (prog,))
+                    row = cur.fetchone() or []
 
-                cur.execute(f"""
-                    SELECT
-                        motorista,
-                        veiculo,
-                        equipe,
-                        {nf_col} as num_nf,
-                        {local_rota_col} as local_rota,
-                        {local_carreg_col} as local_carreg,
-                        COALESCE(data_saida,''), COALESCE(hora_saida,''),
-                        COALESCE(data_chegada,''), COALESCE(hora_chegada,''),
-                        COALESCE(nf_kg,0), COALESCE(nf_caixas,0), COALESCE(nf_kg_carregado,0),
-                        COALESCE(nf_kg_vendido,0), COALESCE(nf_saldo,0),
-                        {nf_preco_col},
-                        {media_carreg_col},
-                        {caixa_final_col},
-                        COALESCE(km_inicial,0), COALESCE(km_final,0), COALESCE(litros,0),
-                        COALESCE(km_rodado,0), COALESCE(media_km_l,0), COALESCE(custo_km,0),
-                        COALESCE(ced_200_qtd,0), COALESCE(ced_100_qtd,0), COALESCE(ced_50_qtd,0),
-                        COALESCE(ced_20_qtd,0), COALESCE(ced_10_qtd,0), COALESCE(ced_5_qtd,0), COALESCE(ced_2_qtd,0),
-                        COALESCE(valor_dinheiro,0),
-                        {adiant_col}
-                    FROM programacoes
-                    WHERE codigo_programacao=?
-                """, (prog,))
-                row = cur.fetchone() or []
+                    if row:
+                        idx = 0
+                        motorista, veiculo, equipe = row[idx] or "", row[idx + 1] or "", row[idx + 2] or ""
+                        idx += 3
+                        nf, local_rota, local_carreg = row[idx] or "", row[idx + 1] or "", row[idx + 2] or ""
+                        idx += 3
+                        data_saida, hora_saida = row[idx] or "", row[idx + 1] or ""
+                        idx += 2
+                        data_chegada, hora_chegada = row[idx] or "", row[idx + 1] or ""
+                        idx += 2
+                        nf_kg, nf_caixas, nf_kg_carregado = safe_float(row[idx], 0.0), safe_int(row[idx + 1], 0), safe_float(row[idx + 2], 0.0)
+                        idx += 3
+                        nf_kg_vendido, nf_saldo = safe_float(row[idx], 0.0), safe_float(row[idx + 1], 0.0)
+                        idx += 2
+                        nf_preco = safe_float(row[idx], 0.0)
+                        nf_media_carregada = safe_float(row[idx + 1], 0.0)
+                        nf_caixa_final = safe_int(row[idx + 2], 0)
+                        idx += 3
+                        km_inicial, km_final = safe_float(row[idx], 0.0), safe_float(row[idx + 1], 0.0)
+                        idx += 2
+                        litros, km_rodado = safe_float(row[idx], 0.0), safe_float(row[idx + 1], 0.0)
+                        idx += 2
+                        media_km_l, custo_km = safe_float(row[idx], 0.0), safe_float(row[idx + 1], 0.0)
+                        idx += 2
+                        ced_qtd[200], ced_qtd[100], ced_qtd[50] = safe_int(row[idx], 0), safe_int(row[idx + 1], 0), safe_int(row[idx + 2], 0)
+                        idx += 3
+                        ced_qtd[20], ced_qtd[10], ced_qtd[5], ced_qtd[2] = safe_int(row[idx], 0), safe_int(row[idx + 1], 0), safe_int(row[idx + 2], 0), safe_int(row[idx + 3], 0)
+                        idx += 4
+                        valor_dinheiro = safe_float(row[idx], 0.0)
+                        idx += 1
+                        adiantamento = safe_float(row[idx], 0.0)
 
-                if row:
-                    idx = 0
-                    motorista, veiculo, equipe = row[idx] or "", row[idx + 1] or "", row[idx + 2] or ""
-                    idx += 3
-                    nf, local_rota, local_carreg = row[idx] or "", row[idx + 1] or "", row[idx + 2] or ""
-                    idx += 3
-                    data_saida, hora_saida = row[idx] or "", row[idx + 1] or ""
-                    idx += 2
-                    data_chegada, hora_chegada = row[idx] or "", row[idx + 1] or ""
-                    idx += 2
-                    nf_kg, nf_caixas, nf_kg_carregado = safe_float(row[idx], 0.0), safe_int(row[idx + 1], 0), safe_float(row[idx + 2], 0.0)
-                    idx += 3
-                    nf_kg_vendido, nf_saldo = safe_float(row[idx], 0.0), safe_float(row[idx + 1], 0.0)
-                    idx += 2
-                    nf_preco = safe_float(row[idx], 0.0)
-                    nf_media_carregada = safe_float(row[idx + 1], 0.0)
-                    nf_caixa_final = safe_int(row[idx + 2], 0)
-                    idx += 3
-                    km_inicial, km_final = safe_float(row[idx], 0.0), safe_float(row[idx + 1], 0.0)
-                    idx += 2
-                    litros, km_rodado = safe_float(row[idx], 0.0), safe_float(row[idx + 1], 0.0)
-                    idx += 2
-                    media_km_l, custo_km = safe_float(row[idx], 0.0), safe_float(row[idx + 1], 0.0)
-                    idx += 2
-                    ced_qtd[200], ced_qtd[100], ced_qtd[50] = safe_int(row[idx], 0), safe_int(row[idx + 1], 0), safe_int(row[idx + 2], 0)
-                    idx += 3
-                    ced_qtd[20], ced_qtd[10], ced_qtd[5], ced_qtd[2] = safe_int(row[idx], 0), safe_int(row[idx + 1], 0), safe_int(row[idx + 2], 0), safe_int(row[idx + 3], 0)
-                    idx += 4
-                    valor_dinheiro = safe_float(row[idx], 0.0)
-                    idx += 1
-                    adiantamento = safe_float(row[idx], 0.0)
+                        equipe_txt = resolve_equipe_nomes(equipe)
 
-                    equipe_txt = resolve_equipe_nomes(equipe)
+                        data_saida, hora_saida = normalize_date_time_components(data_saida, hora_saida)
+                        data_chegada, hora_chegada = normalize_date_time_components(data_chegada, hora_chegada)
 
-                    data_saida, hora_saida = normalize_date_time_components(data_saida, hora_saida)
-                    data_chegada, hora_chegada = normalize_date_time_components(data_chegada, hora_chegada)
+                    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='despesas'")
+                    if cur.fetchone():
+                        cur.execute("PRAGMA table_info(despesas)")
+                        cols_desp = {str(c[1]).lower() for c in (cur.fetchall() or [])}
+                        descricao_desp_col = "COALESCE(descricao,'')" if "descricao" in cols_desp else "''"
+                        valor_desp_col = "COALESCE(valor,0)" if "valor" in cols_desp else "0"
+                        categoria_desp_col = "COALESCE(categoria,'OUTROS')" if "categoria" in cols_desp else "'OUTROS'"
+                        obs_desp_col = "COALESCE(observacao,'')" if "observacao" in cols_desp else "''"
+                        data_desp_col = "COALESCE(data_registro,'')" if "data_registro" in cols_desp else "''"
+                        order_desp_col = "data_registro DESC" if "data_registro" in cols_desp else "1 DESC"
+                        cur.execute(
+                            f"""
+                            SELECT {descricao_desp_col}, {valor_desp_col}, {categoria_desp_col}, {obs_desp_col}, {data_desp_col}
+                            FROM despesas
+                            WHERE codigo_programacao=?
+                            ORDER BY {order_desp_col}
+                            """,
+                            (prog,),
+                        )
+                        despesas = cur.fetchall() or []
+                        cur.execute("SELECT SUM(valor) FROM despesas WHERE codigo_programacao=?", (prog,))
+                        total_desp = safe_float((cur.fetchone() or [0])[0], 0.0)
+                    else:
+                        despesas = []
+                        total_desp = 0.0
 
-                cur.execute("""
-                    SELECT descricao, valor, COALESCE(categoria,'OUTROS'), COALESCE(observacao,''), data_registro
-                    FROM despesas
-                    WHERE codigo_programacao=?
-                    ORDER BY data_registro DESC
-                """, (prog,))
-                despesas = cur.fetchall() or []
-
-                cur.execute("""
-                    SELECT
-                        COALESCE(cod_cliente,''),
-                        COALESCE(nome_cliente,''),
-                        COALESCE(valor,0),
-                        COALESCE(forma_pagamento,''),
-                        COALESCE(observacao,''),
-                        COALESCE(data_registro,'')
-                    FROM recebimentos
-                    WHERE codigo_programacao=?
-                    ORDER BY data_registro DESC, id DESC
-                """, (prog,))
-                recebimentos = cur.fetchall() or []
-
-                cur.execute("SELECT SUM(valor) FROM recebimentos WHERE codigo_programacao=?", (prog,))
-                total_receb = safe_float((cur.fetchone() or [0])[0], 0.0)
-
-                cur.execute("SELECT SUM(valor) FROM despesas WHERE codigo_programacao=?", (prog,))
-                total_desp = safe_float((cur.fetchone() or [0])[0], 0.0)
+                    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='recebimentos'")
+                    if cur.fetchone():
+                        cur.execute("PRAGMA table_info(recebimentos)")
+                        cols_rec = {str(c[1]).lower() for c in (cur.fetchall() or [])}
+                        cod_rec_col = "COALESCE(cod_cliente,'')" if "cod_cliente" in cols_rec else "''"
+                        nome_rec_col = "COALESCE(nome_cliente,'')" if "nome_cliente" in cols_rec else "''"
+                        valor_rec_col = "COALESCE(valor,0)" if "valor" in cols_rec else "0"
+                        forma_rec_col = "COALESCE(forma_pagamento,'')" if "forma_pagamento" in cols_rec else "''"
+                        obs_rec_col = "COALESCE(observacao,'')" if "observacao" in cols_rec else "''"
+                        data_rec_col = "COALESCE(data_registro,'')" if "data_registro" in cols_rec else "''"
+                        order_rec_col = "data_registro DESC, id DESC" if "data_registro" in cols_rec and "id" in cols_rec else ("id DESC" if "id" in cols_rec else "1 DESC")
+                        cur.execute(
+                            f"""
+                            SELECT {cod_rec_col}, {nome_rec_col}, {valor_rec_col}, {forma_rec_col}, {obs_rec_col}, {data_rec_col}
+                            FROM recebimentos
+                            WHERE codigo_programacao=?
+                            ORDER BY {order_rec_col}
+                            """,
+                            (prog,),
+                        )
+                        recebimentos = cur.fetchall() or []
+                        cur.execute("SELECT SUM(valor) FROM recebimentos WHERE codigo_programacao=?", (prog,))
+                        total_receb = safe_float((cur.fetchone() or [0])[0], 0.0)
+                    else:
+                        recebimentos = []
+                        total_receb = 0.0
 
             # totais
             ced_total = sum(float(ced) * safe_int(qtd, 0) for ced, qtd in ced_qtd.items())
@@ -21676,6 +21886,273 @@ class DespesasPage(PageBase):
                 offset = min(max(22 * mm, key_w + 2.5 * mm), col_w * 0.55)
                 avail = max(col_w - offset - 1.5 * mm, 10 * mm)
                 c.drawString(x + offset, y0, _clip_width(v, avail, "Helvetica", 9))
+
+            def _draw_retorno_sheet():
+                nonlocal y
+                meta_ret = fetch_programacao_meta_relatorio(prog)
+                itens_ret = fetch_programacao_itens(prog) or []
+
+                media_carreg = safe_float(meta_ret.get("media"), 0.0)
+                if media_carreg > 20:
+                    media_carreg = media_carreg / 1000.0
+                aves_cx = safe_int(meta_ret.get("aves_caixa_final"), 0)
+                if aves_cx <= 0:
+                    aves_cx = 6
+
+                status_entregue = {"ENTREGUE", "FINALIZADO", "FINALIZADA", "CONCLUIDO", "CONCLUÍDO"}
+                status_cancelado = {"CANCELADO", "CANCELADA"}
+
+                tot_ent = tot_cancel = tot_alt = 0
+                tot_cx_prog = tot_cx_ent = 0
+                tot_kg_ent = tot_val = 0.0
+                tot_mort_aves = safe_int(meta_ret.get("mortalidade_transbordo_aves"), 0)
+                tot_mort_kg = safe_float(meta_ret.get("mortalidade_transbordo_kg"), 0.0)
+                divergencias = 0
+                linhas_ret = []
+                ocorrencias_ret = []
+
+                for item in itens_ret:
+                    status_item = upper(str(item.get("status_pedido") or "PENDENTE").strip()) or "PENDENTE"
+                    cx_prog = max(safe_int(item.get("qnt_caixas"), 0), 0)
+                    cx_alt = max(safe_int(item.get("caixas_atual"), 0), 0)
+                    cx_ent = 0 if status_item in status_cancelado else (cx_alt if cx_alt > 0 else (cx_prog if status_item in status_entregue else 0))
+                    preco_orig = safe_float(item.get("preco"), 0.0)
+                    preco_final = safe_float(item.get("preco_atual"), 0.0) or preco_orig
+                    kg_orig = safe_float(item.get("kg"), 0.0)
+                    kg_base = safe_float(item.get("peso_previsto"), 0.0) or kg_orig
+                    if kg_base <= 0 and media_carreg > 0:
+                        base_cx = cx_ent if cx_ent > 0 else cx_prog
+                        kg_base = float(base_cx) * float(max(aves_cx, 1)) * media_carreg
+                    aves_total = max((cx_ent if cx_ent > 0 else cx_prog) * max(aves_cx, 1), 0)
+                    media_cli = (kg_base / aves_total) if aves_total > 0 and kg_base > 0 else media_carreg
+                    mort_aves = max(safe_int(item.get("mortalidade_aves"), 0), 0)
+                    mort_kg = mort_aves * media_cli if media_cli > 0 else 0.0
+                    kg_ent = max(kg_base - mort_kg, 0.0) if status_item not in status_cancelado else 0.0
+                    valor_total = max(kg_ent * preco_final, 0.0) if status_item not in status_cancelado else 0.0
+                    alterado = bool(
+                        str(item.get("alterado_em") or "").strip()
+                        or str(item.get("alterado_por") or "").strip()
+                        or str(item.get("alteracao_tipo") or "").strip()
+                        or str(item.get("alteracao_detalhe") or "").strip()
+                        or (cx_alt > 0 and cx_alt != cx_prog)
+                        or abs(preco_final - preco_orig) > 0.0001
+                    )
+                    delta_kg = kg_ent - kg_orig if kg_orig > 0 else 0.0
+
+                    tot_cx_prog += cx_prog
+                    tot_cx_ent += cx_ent
+                    tot_kg_ent += kg_ent
+                    tot_val += valor_total
+                    tot_mort_aves += mort_aves
+                    tot_mort_kg += mort_kg
+                    if status_item in status_entregue:
+                        tot_ent += 1
+                    if status_item in status_cancelado:
+                        tot_cancel += 1
+                    if alterado:
+                        tot_alt += 1
+                    if abs(delta_kg) >= 0.01:
+                        divergencias += 1
+
+                    linhas_ret.append(
+                        (
+                            str(item.get("cod_cliente") or "")[:6],
+                            upper(str(item.get("nome_cliente") or "-"))[:24],
+                            status_item[:10],
+                            f"{cx_prog}/{cx_ent}",
+                            f"{safe_float(media_cli, 0.0):.3f}",
+                            f"{safe_float(kg_ent, 0.0):.2f}",
+                            f"{safe_float(preco_final, 0.0):.2f}",
+                            f"{safe_float(valor_total, 0.0):.2f}",
+                            f"{safe_int(mort_aves, 0)}/{safe_float(mort_kg, 0.0):.2f}",
+                            f"{delta_kg:+.2f}" if abs(delta_kg) >= 0.01 else "-",
+                        )
+                    )
+
+                    if status_item in status_cancelado or alterado:
+                        para_quem, motivo, autorizado = _parse_alteracao_campos(item)
+                        ocorrencias_ret.append(
+                            (
+                                upper(str(item.get("nome_cliente") or "-"))[:20],
+                                status_item[:10],
+                                "SIM" if status_item in status_cancelado else "NAO",
+                                "SIM" if alterado else "NAO",
+                                para_quem[:14],
+                                motivo[:28],
+                                autorizado[:14],
+                            )
+                        )
+
+                kg_carregado_ret = safe_float(meta_ret.get("nf_kg_carregado"), 0.0)
+                if kg_carregado_ret <= 0:
+                    kg_carregado_ret = safe_float(meta_ret.get("nf_kg"), 0.0)
+                caixas_carreg_ret = safe_int(meta_ret.get("nf_caixas"), 0)
+                if caixas_carreg_ret <= 0:
+                    caixas_carreg_ret = tot_cx_prog
+
+                data_saida_ret, hora_saida_ret = normalize_date_time_components(meta_ret.get("data_saida"), meta_ret.get("hora_saida"))
+                data_chegada_ret, hora_chegada_ret = normalize_date_time_components(meta_ret.get("data_chegada"), meta_ret.get("hora_chegada"))
+                c.showPage()
+                y = height - top
+                c.setFont("Helvetica-Bold", 14)
+                c.drawString(left, y, f"FOLHA DE RETORNO OPERACIONAL - PROGRAMACAO {prog}")
+                y -= 8 * mm
+
+                c.setFont("Helvetica", 9)
+                draw_kv(col1_x, y, "Motorista", str(meta_ret.get("motorista") or motorista), col1_w)
+                draw_kv(col2_x, y, "Veiculo", str(meta_ret.get("veiculo") or veiculo), col2_w)
+                y -= line_h
+                draw_kv(col1_x, y, "Equipe", resolve_equipe_nomes(str(meta_ret.get("equipe") or equipe)), col1_w)
+                draw_kv(col2_x, y, "NF", str(meta_ret.get("num_nf") or nf), col2_w)
+                y -= line_h
+                draw_kv(col1_x, y, "Local Rota", str(meta_ret.get("local_rota") or local_rota), col1_w)
+                draw_kv(col2_x, y, "Carregou em", str(meta_ret.get("local_carregamento") or local_carreg), col2_w)
+                y -= line_h
+                draw_kv(col1_x, y, "Saida", f"{data_saida_ret} {hora_saida_ret}".strip(), col1_w)
+                draw_kv(col2_x, y, "Chegada", f"{data_chegada_ret} {hora_chegada_ret}".strip(), col2_w)
+                y -= 8 * mm
+
+                box_gap = 4 * mm
+                box_w = (table_w - (box_gap * 3)) / 4.0
+                box_h = 13 * mm
+
+                def _summary_box(x, y_top, titulo, valor):
+                    c.rect(x, y_top - box_h, box_w, box_h, stroke=1, fill=0)
+                    c.setFont("Helvetica-Bold", 8)
+                    c.drawString(x + 2 * mm, y_top - 4.5 * mm, titulo)
+                    c.setFont("Helvetica", 11)
+                    c.drawRightString(x + box_w - 2 * mm, y_top - 9.5 * mm, valor)
+
+                _summary_box(left, y, "Clientes", str(len(itens_ret)))
+                _summary_box(left + box_w + box_gap, y, "Entregues/Cancel.", f"{tot_ent}/{tot_cancel}")
+                _summary_box(left + ((box_w + box_gap) * 2), y, "CX Carreg./Entreg.", f"{caixas_carreg_ret}/{tot_cx_ent}")
+                _summary_box(left + ((box_w + box_gap) * 3), y, "KG Carreg./Entreg.", f"{kg_carregado_ret:.2f}/{tot_kg_ent:.2f}")
+                y -= (box_h + 6 * mm)
+
+                _summary_box(left, y, "Media Carreg.", f"{media_carreg:.3f}")
+                _summary_box(left + box_w + box_gap, y, "Mortalidade", f"{tot_mort_aves} / {tot_mort_kg:.2f}kg")
+                _summary_box(left + ((box_w + box_gap) * 2), y, "Valor Entregue", self._fmt_money(tot_val))
+                _summary_box(left + ((box_w + box_gap) * 3), y, "Diverg. Peso", str(divergencias))
+                y -= (box_h + 7 * mm)
+
+                c.setFont("Helvetica-Bold", 10)
+                c.drawString(left, y, "ENTREGAS POR CLIENTE")
+                y -= 5.5 * mm
+
+                row_h_ret = 5.8 * mm
+                col_cod_ret = table_w * 0.08
+                col_cli_ret = table_w * 0.21
+                col_st_ret = table_w * 0.11
+                col_cx_ret = table_w * 0.08
+                col_med_ret = table_w * 0.08
+                col_kg_ret = table_w * 0.10
+                col_preco_ret = table_w * 0.10
+                col_val_ret = table_w * 0.12
+                col_mort_ret = table_w * 0.08
+                col_div_ret = table_w - sum([col_cod_ret, col_cli_ret, col_st_ret, col_cx_ret, col_med_ret, col_kg_ret, col_preco_ret, col_val_ret, col_mort_ret])
+
+                x_cod_ret = table_x
+                x_cli_ret = x_cod_ret + col_cod_ret
+                x_st_ret = x_cli_ret + col_cli_ret
+                x_cx_ret = x_st_ret + col_st_ret
+                x_med_ret = x_cx_ret + col_cx_ret
+                x_kg_ret = x_med_ret + col_med_ret
+                x_preco_ret = x_kg_ret + col_kg_ret
+                x_val_ret = x_preco_ret + col_preco_ret
+                x_mort_ret = x_val_ret + col_val_ret
+                x_div_ret = x_mort_ret + col_mort_ret
+
+                def _draw_ret_header(title_suffix=""):
+                    nonlocal y
+                    c.setFont("Helvetica-Bold", 7)
+                    c.rect(table_x, y - row_h_ret + 1, table_w, row_h_ret, stroke=1, fill=0)
+                    c.drawString(x_cod_ret + 2, y - row_h_ret + 3, "COD")
+                    c.drawString(x_cli_ret + 2, y - row_h_ret + 3, "CLIENTE")
+                    c.drawString(x_st_ret + 2, y - row_h_ret + 3, "STATUS")
+                    c.drawRightString(x_cx_ret + col_cx_ret - 2, y - row_h_ret + 3, "CX")
+                    c.drawRightString(x_med_ret + col_med_ret - 2, y - row_h_ret + 3, "MEDIA")
+                    c.drawRightString(x_kg_ret + col_kg_ret - 2, y - row_h_ret + 3, "KG")
+                    c.drawRightString(x_preco_ret + col_preco_ret - 2, y - row_h_ret + 3, "PRECO")
+                    c.drawRightString(x_val_ret + col_val_ret - 2, y - row_h_ret + 3, "VALOR")
+                    c.drawRightString(x_mort_ret + col_mort_ret - 2, y - row_h_ret + 3, "MORT")
+                    c.drawRightString(x_div_ret + col_div_ret - 2, y - row_h_ret + 3, "DIV")
+                    y -= row_h_ret
+                    c.setFont("Helvetica", 7)
+                    if title_suffix:
+                        c.setFont("Helvetica-Bold", 12)
+                        c.drawString(left, height - top, title_suffix)
+                        c.setFont("Helvetica", 7)
+
+                _draw_ret_header()
+                if not linhas_ret:
+                    c.rect(table_x, y - row_h_ret + 1, table_w, row_h_ret, stroke=1, fill=0)
+                    c.drawString(x_cod_ret + 2, y - row_h_ret + 3, "SEM ENTREGAS REGISTRADAS")
+                    y -= row_h_ret
+                else:
+                    for row in linhas_ret:
+                        if y < bottom + 58 * mm:
+                            c.showPage()
+                            y = height - top - 8 * mm
+                            c.setFont("Helvetica-Bold", 12)
+                            c.drawString(left, height - top, f"FOLHA DE RETORNO OPERACIONAL - PROGRAMACAO {prog} (CONT.)")
+                            _draw_ret_header()
+                        c.rect(table_x, y - row_h_ret + 1, table_w, row_h_ret, stroke=1, fill=0)
+                        c.drawString(x_cod_ret + 2, y - row_h_ret + 3, _clip_width(row[0], col_cod_ret - 4, "Helvetica", 7))
+                        c.drawString(x_cli_ret + 2, y - row_h_ret + 3, _clip_width(row[1], col_cli_ret - 4, "Helvetica", 7))
+                        c.drawString(x_st_ret + 2, y - row_h_ret + 3, _clip_width(row[2], col_st_ret - 4, "Helvetica", 7))
+                        c.drawRightString(x_cx_ret + col_cx_ret - 2, y - row_h_ret + 3, row[3])
+                        c.drawRightString(x_med_ret + col_med_ret - 2, y - row_h_ret + 3, row[4].replace(".", ","))
+                        c.drawRightString(x_kg_ret + col_kg_ret - 2, y - row_h_ret + 3, row[5].replace(".", ","))
+                        c.drawRightString(x_preco_ret + col_preco_ret - 2, y - row_h_ret + 3, row[6].replace(".", ","))
+                        c.drawRightString(x_val_ret + col_val_ret - 2, y - row_h_ret + 3, row[7].replace(".", ","))
+                        c.drawRightString(x_mort_ret + col_mort_ret - 2, y - row_h_ret + 3, row[8].replace(".", ","))
+                        c.drawRightString(x_div_ret + col_div_ret - 2, y - row_h_ret + 3, row[9].replace(".", ","))
+                        y -= row_h_ret
+
+                y -= 6 * mm
+                c.setFont("Helvetica-Bold", 10)
+                c.drawString(left, y, "OCORRENCIAS / AJUSTES")
+                y -= 5.5 * mm
+
+                row_h_occ = 5.8 * mm
+                occ_cols = [0.21, 0.10, 0.06, 0.06, 0.15, 0.26, 0.16]
+                occ_ws = [table_w * v for v in occ_cols]
+                occ_ws[-1] = table_w - sum(occ_ws[:-1])
+                x_occ = [table_x]
+                for wv in occ_ws[:-1]:
+                    x_occ.append(x_occ[-1] + wv)
+
+                def _draw_occ_header():
+                    nonlocal y
+                    c.setFont("Helvetica-Bold", 7)
+                    c.rect(table_x, y - row_h_occ + 1, table_w, row_h_occ, stroke=1, fill=0)
+                    headers = ["CLIENTE", "STATUS", "CANC", "ALT", "PARA", "MOTIVO", "AUTORIZOU"]
+                    for idx_h, head in enumerate(headers):
+                        c.drawString(x_occ[idx_h] + 2, y - row_h_occ + 3, head)
+                    y -= row_h_occ
+                    c.setFont("Helvetica", 7)
+
+                _draw_occ_header()
+                if not ocorrencias_ret:
+                    c.rect(table_x, y - row_h_occ + 1, table_w, row_h_occ, stroke=1, fill=0)
+                    c.drawString(table_x + 2, y - row_h_occ + 3, "SEM OCORRENCIAS DE CANCELAMENTO/ALTERACAO")
+                    y -= row_h_occ
+                else:
+                    for row in ocorrencias_ret:
+                        if y < bottom + 20 * mm:
+                            c.showPage()
+                            y = height - top - 8 * mm
+                            c.setFont("Helvetica-Bold", 12)
+                            c.drawString(left, height - top, f"OCORRENCIAS - RETORNO OPERACIONAL {prog} (CONT.)")
+                            _draw_occ_header()
+                        c.rect(table_x, y - row_h_occ + 1, table_w, row_h_occ, stroke=1, fill=0)
+                        for idx_v, value in enumerate(row):
+                            txt = _clip_width(str(value), occ_ws[idx_v] - 4, "Helvetica", 7)
+                            if idx_v in {2, 3}:
+                                c.drawCentredString(x_occ[idx_v] + (occ_ws[idx_v] / 2.0), y - row_h_occ + 3, txt)
+                            else:
+                                c.drawString(x_occ[idx_v] + 2, y - row_h_occ + 3, txt)
+                        y -= row_h_occ
 
             # ===== FOLHA 1: RECEBIMENTOS =====
             c.setFont("Helvetica-Bold", 14)
@@ -21790,6 +22267,8 @@ class DespesasPage(PageBase):
             c.setFont("Helvetica-Bold", 10)
             c.drawRightString(width - right, y, f"TOTAL RECEBIMENTOS: {self._fmt_money(total_receb_detalhe)}")
             y -= 8 * mm
+
+            _draw_retorno_sheet()
 
             # ===== FOLHA 2: DESPESAS =====
             new_page(f"FOLHA DE DESPESAS - PROGRAMACAO {prog}")
@@ -22028,22 +22507,14 @@ class DespesasPage(PageBase):
         try:
             if prog:
                 used_api = False
-                desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-                if desktop_secret and is_desktop_api_sync_enabled():
-                    try:
-                        desp_resp = _call_api(
-                            "GET",
-                            f"desktop/rotas/{urllib.parse.quote(upper(prog))}/despesas",
-                            extra_headers={"X-Desktop-Secret": desktop_secret},
-                        )
-                        despesas_api = desp_resp.get("despesas") if isinstance(desp_resp, dict) else []
-                        total_despesas_prog = sum(
-                            safe_float((d.get("valor") if isinstance(d, dict) else 0), 0.0)
-                            for d in (despesas_api or [])
-                        )
-                        used_api = True
-                    except Exception:
-                        logging.debug("Falha ao calcular total de despesas via API; usando fallback local.", exc_info=True)
+                bundle = self._api_bundle_prestacao(prog)
+                if bundle:
+                    despesas_api = bundle.get("despesas") if isinstance(bundle, dict) else []
+                    total_despesas_prog = sum(
+                        safe_float((d.get("valor") if isinstance(d, dict) else 0), 0.0)
+                        for d in (despesas_api or [])
+                    )
+                    used_api = True
 
                 if not used_api:
                     with get_db() as conn_tmp:
@@ -22122,7 +22593,13 @@ class DespesasPage(PageBase):
                 self._refresh_nf_trade_summary()
                 return
             except Exception:
-                logging.debug("Falha ao salvar dados financeiros via API; usando fallback local.", exc_info=True)
+                logging.debug("Falha ao salvar dados financeiros via API.", exc_info=True)
+                messagebox.showerror(
+                    "ERRO",
+                    "Não foi possível salvar os dados financeiros na API central.\n\n"
+                    "A gravação local foi bloqueada para evitar divergência entre servidor e desktop.",
+                )
+                return
 
         try:
             with get_db() as conn:
@@ -22250,129 +22727,167 @@ class DespesasPage(PageBase):
 
         try:
             used_api = False
-            desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
-            if desktop_secret and is_desktop_api_sync_enabled():
-                try:
-                    rota_resp = _call_api(
-                        "GET",
-                        f"desktop/rotas/{urllib.parse.quote(upper(prog))}",
-                        extra_headers={"X-Desktop-Secret": desktop_secret},
+            bundle = self._api_bundle_prestacao(prog)
+            if bundle:
+                rota = bundle.get("rota") if isinstance(bundle, dict) else None
+                recebimentos = bundle.get("recebimentos") if isinstance(bundle, dict) else []
+                despesas = bundle.get("despesas") if isinstance(bundle, dict) else []
+                if isinstance(rota, dict):
+                    df_prog = pd.DataFrame([{
+                        "codigo_programacao": upper(prog),
+                        "motorista": rota.get("motorista"),
+                        "veiculo": rota.get("veiculo"),
+                        "data_criacao": rota.get("data_criacao") or rota.get("data"),
+                        "nf_numero": rota.get("num_nf") or rota.get("nf_numero"),
+                        "nf_kg": rota.get("nf_kg"),
+                        "nf_caixas": rota.get("nf_caixas"),
+                        "nf_kg_carregado": rota.get("nf_kg_carregado"),
+                        "nf_kg_vendido": rota.get("nf_kg_vendido"),
+                        "nf_saldo": rota.get("nf_saldo"),
+                        "km_inicial": rota.get("km_inicial"),
+                        "km_final": rota.get("km_final"),
+                        "litros": rota.get("litros"),
+                        "km_rodado": rota.get("km_rodado"),
+                        "media_km_l": rota.get("media_km_l"),
+                        "custo_km": rota.get("custo_km"),
+                        "valor_dinheiro": rota.get("valor_dinheiro"),
+                        "adiantamento": rota.get("adiantamento"),
+                    }])
+                    df_despesas = pd.DataFrame(
+                        [
+                            {
+                                "id": d.get("id"),
+                                "descricao": d.get("descricao"),
+                                "valor": d.get("valor"),
+                                "categoria": d.get("categoria"),
+                                "observacao": d.get("observacao"),
+                                "data_registro": d.get("data_registro"),
+                            }
+                            for d in (despesas or [])
+                            if isinstance(d, dict)
+                        ]
                     )
-                    rec_resp = _call_api(
-                        "GET",
-                        f"desktop/rotas/{urllib.parse.quote(upper(prog))}/recebimentos",
-                        extra_headers={"X-Desktop-Secret": desktop_secret},
+                    df_receb = pd.DataFrame(
+                        [
+                            {
+                                "cod_cliente": r.get("cod_cliente"),
+                                "nome_cliente": r.get("nome_cliente"),
+                                "valor": r.get("valor"),
+                                "forma_pagamento": r.get("forma_pagamento"),
+                                "observacao": r.get("observacao"),
+                                "num_nf": r.get("num_nf"),
+                                "data_registro": r.get("data_registro"),
+                            }
+                            for r in (recebimentos or [])
+                            if isinstance(r, dict)
+                        ]
                     )
-                    desp_resp = _call_api(
-                        "GET",
-                        f"desktop/rotas/{urllib.parse.quote(upper(prog))}/despesas",
-                        extra_headers={"X-Desktop-Secret": desktop_secret},
-                    )
-                    rota = rota_resp.get("rota") if isinstance(rota_resp, dict) else None
-                    recebimentos = rec_resp.get("recebimentos") if isinstance(rec_resp, dict) else []
-                    despesas = desp_resp.get("despesas") if isinstance(desp_resp, dict) else []
-                    if isinstance(rota, dict):
-                        df_prog = pd.DataFrame([{
-                            "codigo_programacao": upper(prog),
-                            "motorista": rota.get("motorista"),
-                            "veiculo": rota.get("veiculo"),
-                            "data_criacao": rota.get("data_criacao") or rota.get("data"),
-                            "nf_numero": rota.get("num_nf") or rota.get("nf_numero"),
-                            "nf_kg": rota.get("nf_kg"),
-                            "nf_caixas": rota.get("nf_caixas"),
-                            "nf_kg_carregado": rota.get("nf_kg_carregado"),
-                            "nf_kg_vendido": rota.get("nf_kg_vendido"),
-                            "nf_saldo": rota.get("nf_saldo"),
-                            "km_inicial": rota.get("km_inicial"),
-                            "km_final": rota.get("km_final"),
-                            "litros": rota.get("litros"),
-                            "km_rodado": rota.get("km_rodado"),
-                            "media_km_l": rota.get("media_km_l"),
-                            "custo_km": rota.get("custo_km"),
-                            "valor_dinheiro": rota.get("valor_dinheiro"),
-                            "adiantamento": rota.get("adiantamento"),
-                        }])
-                        df_despesas = pd.DataFrame(
-                            [
-                                {
-                                    "id": d.get("id"),
-                                    "descricao": d.get("descricao"),
-                                    "valor": d.get("valor"),
-                                    "categoria": d.get("categoria"),
-                                    "observacao": d.get("observacao"),
-                                    "data_registro": d.get("data_registro"),
-                                }
-                                for d in (despesas or [])
-                                if isinstance(d, dict)
-                            ]
-                        )
-                        df_receb = pd.DataFrame(
-                            [
-                                {
-                                    "cod_cliente": r.get("cod_cliente"),
-                                    "nome_cliente": r.get("nome_cliente"),
-                                    "valor": r.get("valor"),
-                                    "forma_pagamento": r.get("forma_pagamento"),
-                                    "observacao": r.get("observacao"),
-                                    "num_nf": r.get("num_nf"),
-                                    "data_registro": r.get("data_registro"),
-                                }
-                                for r in (recebimentos or [])
-                                if isinstance(r, dict)
-                            ]
-                        )
-                        used_api = True
-                except Exception:
-                    logging.debug("Falha ao carregar dados para exportacao via API; usando fallback local.", exc_info=True)
+                    used_api = True
 
             if not used_api:
                 with get_db() as conn:
-                    try:
-                        df_prog = pd.read_sql_query("""
-                            SELECT codigo_programacao, motorista, veiculo, data_criacao,
-                                   nf_numero, nf_kg, nf_caixas, nf_kg_carregado, nf_kg_vendido, nf_saldo,
-                                   km_inicial, km_final, litros, km_rodado, media_km_l, custo_km,
-                                   valor_dinheiro,
-                                   adiantamento
-                            FROM programacoes
-                            WHERE codigo_programacao=?
-                        """, conn, params=(prog,))
-                    except Exception:
-                        df_prog = pd.read_sql_query("""
-                            SELECT codigo_programacao, motorista, veiculo, data_criacao,
-                                   nf_numero, nf_kg, nf_caixas, nf_kg_carregado, nf_kg_vendido, nf_saldo,
-                                   km_inicial, km_final, litros, km_rodado, media_km_l, custo_km,
-                                   valor_dinheiro,
-                                   adiantamento_rota
-                            FROM programacoes
-                            WHERE codigo_programacao=?
-                        """, conn, params=(prog,))
+                    cur = conn.cursor()
 
-                    if df_prog.empty:
-                        df_prog = pd.read_sql_query("""
-                            SELECT codigo_programacao, motorista, veiculo, data_criacao,
-                                   nf_numero, nf_kg, nf_caixas, nf_kg_carregado, nf_kg_vendido, nf_saldo,
-                                   km_inicial, km_final, litros, km_rodado, media_km_l, custo_km,
-                                   valor_dinheiro
-                            FROM programacoes
-                            WHERE codigo_programacao=?
-                        """, conn, params=(prog,))
+                    def _table_exists(name: str) -> bool:
+                        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (name,))
+                        return bool(cur.fetchone())
 
-                    df_despesas = pd.read_sql_query("""
-                        SELECT id, descricao, valor, categoria, observacao, data_registro
-                        FROM despesas
+                    def _prog_expr(name: str, *, alias: str | None = None, fallback: str = "''") -> str:
+                        return f"{name} AS {alias or name}" if db_has_column(cur, "programacoes", name) else f"{fallback} AS {alias or name}"
+
+                    data_expr = _prog_expr("data_criacao", fallback=("data" if db_has_column(cur, "programacoes", "data") else "''"))
+                    nf_numero_expr = _prog_expr("nf_numero", fallback=("num_nf" if db_has_column(cur, "programacoes", "num_nf") else "''"))
+                    nf_kg_carregado_expr = _prog_expr(
+                        "nf_kg_carregado",
+                        fallback=("COALESCE(kg_carregado,0)" if db_has_column(cur, "programacoes", "kg_carregado") else "0"),
+                    )
+                    nf_kg_vendido_expr = _prog_expr(
+                        "nf_kg_vendido",
+                        fallback=("COALESCE(kg_vendido,0)" if db_has_column(cur, "programacoes", "kg_vendido") else "0"),
+                    )
+                    adiant_expr = _prog_expr(
+                        "adiantamento",
+                        fallback=("COALESCE(adiantamento_rota,0)" if db_has_column(cur, "programacoes", "adiantamento_rota") else "0"),
+                    )
+                    sql_prog = f"""
+                        SELECT
+                            {_prog_expr('codigo_programacao')},
+                            {_prog_expr('motorista')},
+                            {_prog_expr('veiculo')},
+                            {data_expr},
+                            {nf_numero_expr},
+                            {_prog_expr('nf_kg', fallback='0')},
+                            {_prog_expr('nf_caixas', fallback='0')},
+                            {nf_kg_carregado_expr},
+                            {nf_kg_vendido_expr},
+                            {_prog_expr('nf_saldo', fallback='0')},
+                            {_prog_expr('km_inicial', fallback='0')},
+                            {_prog_expr('km_final', fallback='0')},
+                            {_prog_expr('litros', fallback='0')},
+                            {_prog_expr('km_rodado', fallback='0')},
+                            {_prog_expr('media_km_l', fallback='0')},
+                            {_prog_expr('custo_km', fallback='0')},
+                            {_prog_expr('valor_dinheiro', fallback='0')},
+                            {adiant_expr}
+                        FROM programacoes
                         WHERE codigo_programacao=?
-                        ORDER BY data_registro DESC
-                    """, conn, params=(prog,))
+                    """
+                    df_prog = pd.read_sql_query(sql_prog, conn, params=(prog,))
 
-                    try:
-                        df_receb = pd.read_sql_query("""
-                            SELECT cod_cliente, nome_cliente, valor, forma_pagamento, observacao, num_nf, data_registro
+                    if _table_exists("despesas"):
+                        cols_desp = {str(r[1]).lower() for r in (cur.execute("PRAGMA table_info(despesas)").fetchall() or [])}
+                        id_desp_expr = "id" if "id" in cols_desp else "0 AS id"
+                        descricao_desp_expr = "COALESCE(descricao,'') AS descricao" if "descricao" in cols_desp else "'' AS descricao"
+                        valor_desp_expr = "COALESCE(valor,0) AS valor" if "valor" in cols_desp else "0 AS valor"
+                        categoria_desp_expr = "COALESCE(categoria,'') AS categoria" if "categoria" in cols_desp else "'' AS categoria"
+                        observacao_desp_expr = "COALESCE(observacao,'') AS observacao" if "observacao" in cols_desp else "'' AS observacao"
+                        data_desp_expr = "COALESCE(data_registro,'') AS data_registro" if "data_registro" in cols_desp else "'' AS data_registro"
+                        df_despesas = pd.read_sql_query(
+                            f"""
+                            SELECT
+                                {id_desp_expr},
+                                {descricao_desp_expr},
+                                {valor_desp_expr},
+                                {categoria_desp_expr},
+                                {observacao_desp_expr},
+                                {data_desp_expr}
+                            FROM despesas
+                            WHERE codigo_programacao=?
+                            ORDER BY data_registro DESC
+                            """,
+                            conn,
+                            params=(prog,),
+                        )
+                    else:
+                        df_despesas = pd.DataFrame(columns=["id", "descricao", "valor", "categoria", "observacao", "data_registro"])
+
+                    if _table_exists("recebimentos"):
+                        cols_rec = {str(r[1]).lower() for r in (cur.execute("PRAGMA table_info(recebimentos)").fetchall() or [])}
+                        cod_cliente_rec_expr = "COALESCE(cod_cliente,'') AS cod_cliente" if "cod_cliente" in cols_rec else "'' AS cod_cliente"
+                        nome_cliente_rec_expr = "COALESCE(nome_cliente,'') AS nome_cliente" if "nome_cliente" in cols_rec else "'' AS nome_cliente"
+                        valor_rec_expr = "COALESCE(valor,0) AS valor" if "valor" in cols_rec else "0 AS valor"
+                        forma_pag_rec_expr = "COALESCE(forma_pagamento,'') AS forma_pagamento" if "forma_pagamento" in cols_rec else "'' AS forma_pagamento"
+                        observacao_rec_expr = "COALESCE(observacao,'') AS observacao" if "observacao" in cols_rec else "'' AS observacao"
+                        num_nf_rec_expr = "COALESCE(num_nf,'') AS num_nf" if "num_nf" in cols_rec else "'' AS num_nf"
+                        data_rec_expr = "COALESCE(data_registro,'') AS data_registro" if "data_registro" in cols_rec else "'' AS data_registro"
+                        df_receb = pd.read_sql_query(
+                            f"""
+                            SELECT
+                                {cod_cliente_rec_expr},
+                                {nome_cliente_rec_expr},
+                                {valor_rec_expr},
+                                {forma_pag_rec_expr},
+                                {observacao_rec_expr},
+                                {num_nf_rec_expr},
+                                {data_rec_expr}
                             FROM recebimentos
                             WHERE codigo_programacao=?
                             ORDER BY data_registro DESC
-                        """, conn, params=(prog,))
-                    except Exception:
+                            """,
+                            conn,
+                            params=(prog,),
+                        )
+                    else:
                         df_receb = pd.DataFrame(columns=[
                             "cod_cliente", "nome_cliente", "valor", "forma_pagamento", "observacao", "num_nf", "data_registro"
                         ])
@@ -23110,25 +23625,37 @@ class EscalaPage(PageBase):
                 km_rodado_expr = "COALESCE(km_rodado,0)" if "km_rodado" in cols else "0"
                 status_op_expr = "COALESCE(status_operacional,'')" if "status_operacional" in cols else "''"
                 finalizada_app_expr = "COALESCE(finalizada_no_app,0)" if "finalizada_no_app" in cols else "0"
+                kg_estimado_expr = "COALESCE(kg_estimado,0)" if "kg_estimado" in cols else "0"
                 data_saida_expr = "COALESCE(data_saida,'')" if "data_saida" in cols else "''"
                 hora_saida_expr = "COALESCE(hora_saida,'')" if "hora_saida" in cols else "''"
                 data_chegada_expr = "COALESCE(data_chegada,'')" if "data_chegada" in cols else "''"
                 hora_chegada_expr = "COALESCE(hora_chegada,'')" if "hora_chegada" in cols else "''"
-                data_ref_expr = (
-                    "COALESCE(data_saida,data_criacao,data,'')"
-                    if "data_saida" in cols or "data_criacao" in cols or "data" in cols
-                    else "''"
-                )
+                if "data_saida" in cols and "data_criacao" in cols and "data" in cols:
+                    data_ref_expr = "COALESCE(data_saida,data_criacao,data,'')"
+                elif "data_saida" in cols and "data_criacao" in cols:
+                    data_ref_expr = "COALESCE(data_saida,data_criacao,'')"
+                elif "data_saida" in cols and "data" in cols:
+                    data_ref_expr = "COALESCE(data_saida,data,'')"
+                elif "data_criacao" in cols and "data" in cols:
+                    data_ref_expr = "COALESCE(data_criacao,data,'')"
+                elif "data_saida" in cols:
+                    data_ref_expr = "COALESCE(data_saida,'')"
+                elif "data_criacao" in cols:
+                    data_ref_expr = "COALESCE(data_criacao,'')"
+                elif "data" in cols:
+                    data_ref_expr = "COALESCE(data,'')"
+                else:
+                    data_ref_expr = "''"
                 cur.execute(
                     f"""
                     SELECT codigo_programacao,
                            {data_ref_expr} AS data_ref,
-                           motorista,
-                           equipe,
+                           COALESCE(motorista,'') AS motorista,
+                           COALESCE(equipe,'') AS equipe,
                            COALESCE(status,'') AS status,
                            {status_op_expr} AS status_operacional,
                            {finalizada_app_expr} AS finalizada_no_app,
-                           kg_estimado,
+                           {kg_estimado_expr} AS kg_estimado,
                            {data_saida_expr} AS data_saida,
                            {hora_saida_expr} AS hora_saida,
                            {data_chegada_expr} AS data_chegada,
@@ -23948,9 +24475,32 @@ class CentroCustosPage(PageBase):
                 cur.execute("PRAGMA table_info(programacoes)")
                 cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
 
-                data_expr = "COALESCE(data_saida,data_criacao,'')"
+                if "data_saida" in cols and "data_criacao" in cols:
+                    data_expr = "COALESCE(data_saida,data_criacao,'')"
+                elif "data_saida" in cols:
+                    data_expr = "COALESCE(data_saida,'')"
+                elif "data_criacao" in cols:
+                    data_expr = "COALESCE(data_criacao,'')"
+                elif "data" in cols:
+                    data_expr = "COALESCE(data,'')"
+                else:
+                    data_expr = "''"
                 km_expr = "COALESCE(km_rodado,0)" if "km_rodado" in cols else "0"
                 kg_expr = "COALESCE(nf_kg_carregado, kg_carregado, 0)" if "nf_kg_carregado" in cols else ("COALESCE(kg_carregado,0)" if "kg_carregado" in cols else "0")
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='despesas'")
+                has_despesas = bool(cur.fetchone())
+                despesas_join = (
+                    """
+                 LEFT JOIN (
+                        SELECT codigo_programacao, COALESCE(SUM(valor),0) as total_desp
+                          FROM despesas
+                         GROUP BY codigo_programacao
+                    ) d ON d.codigo_programacao = p.codigo_programacao
+                    """
+                    if has_despesas
+                    else ""
+                )
+                total_desp_expr = "COALESCE(d.total_desp,0)" if has_despesas else "0"
 
                 cur.execute(
                     f"""
@@ -23959,13 +24509,9 @@ class CentroCustosPage(PageBase):
                            {data_expr} as data_ref,
                            {km_expr} as km_rodado,
                            {kg_expr} as kg_carregado,
-                           COALESCE(d.total_desp,0) as total_desp
+                           {total_desp_expr} as total_desp
                       FROM programacoes p
-                 LEFT JOIN (
-                        SELECT codigo_programacao, COALESCE(SUM(valor),0) as total_desp
-                          FROM despesas
-                         GROUP BY codigo_programacao
-                    ) d ON d.codigo_programacao = p.codigo_programacao
+                    {despesas_join}
                      WHERE trim(COALESCE(p.veiculo,'')) <> ''
                     """
                 )
@@ -23980,8 +24526,9 @@ class CentroCustosPage(PageBase):
             kg = safe_float(r[4], 0.0)
             desp = safe_float(r[5], 0.0)
 
-            if cutoff is not None and dt_ref is not None and dt_ref < cutoff:
-                continue
+            if cutoff is not None:
+                if dt_ref is None or dt_ref < cutoff:
+                    continue
             if veiculo_sel and veiculo_sel != "TODOS" and veiculo != veiculo_sel:
                 continue
             if not veiculo:
@@ -24196,35 +24743,66 @@ class RelatoriosPage(PageBase):
         Retorna dict com status/prestacao_status quando existir.
         CompatÃÂÂvel com bases antigas (sem coluna prestacao_status).
         """
-        info = {"status": "", "prestacao_status": ""}
+        info = {"status": "", "prestacao_status": "", "status_operacional": "", "finalizada_no_app": 0}
+        prog = upper(str(prog or "").strip())
+        if not prog:
+            return info
+
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and can_read_from_api():
+            try:
+                resp = _call_api(
+                    "GET",
+                    f"desktop/rotas/{urllib.parse.quote(prog)}",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                rota = resp.get("rota") if isinstance(resp, dict) else None
+                if isinstance(rota, dict):
+                    status = upper(str(rota.get("status") or "").strip())
+                    status_op = upper(str(rota.get("status_operacional") or "").strip())
+                    fin_app = safe_int(rota.get("finalizada_no_app"), 0)
+                    info["status_operacional"] = status_op
+                    info["finalizada_no_app"] = fin_app
+                    info["prestacao_status"] = upper(str(rota.get("prestacao_status") or "").strip())
+                    info["status"] = status_op or status
+                    if not info["status"] and fin_app == 1:
+                        info["status"] = "FINALIZADA"
+                    return info
+            except Exception:
+                logging.debug("Falha ao consultar status da programacao via API; usando fallback local.", exc_info=True)
+
         with get_db() as conn:
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(programacoes)")
-            cols = [c[1] for c in cur.fetchall()]
-            has_prest = "prestacao_status" in cols
-
-            if has_prest:
-                cur.execute("""
-                    SELECT COALESCE(status,''), COALESCE(prestacao_status,'')
-                    FROM programacoes
-                    WHERE codigo_programacao=?
-                    LIMIT 1
-                """, (prog,))
-                row = cur.fetchone()
-                if row:
-                    info["status"] = upper(row[0])
-                    info["prestacao_status"] = upper(row[1])
-            else:
-                cur.execute("""
-                    SELECT COALESCE(status,'')
-                    FROM programacoes
-                    WHERE codigo_programacao=?
-                    LIMIT 1
-                """, (prog,))
-                row = cur.fetchone()
-                if row:
-                    info["status"] = upper(row[0])
-                    info["prestacao_status"] = ""
+            cols = {str(c[1]).lower() for c in cur.fetchall()}
+            status_op_expr = "COALESCE(status_operacional,'')" if "status_operacional" in cols else "''"
+            prest_expr = "COALESCE(prestacao_status,'')" if "prestacao_status" in cols else "''"
+            fin_app_expr = "COALESCE(finalizada_no_app,0)" if "finalizada_no_app" in cols else "0"
+            cur.execute(
+                f"""
+                SELECT
+                    COALESCE(status,'') AS status,
+                    {status_op_expr} AS status_operacional,
+                    {prest_expr} AS prestacao_status,
+                    {fin_app_expr} AS finalizada_no_app
+                FROM programacoes
+                WHERE codigo_programacao=?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (prog,),
+            )
+            row = cur.fetchone()
+            if row:
+                status = upper(row[0] if row[0] is not None else "")
+                status_op = upper(row[1] if row[1] is not None else "")
+                fin_app = safe_int(row[3], 0)
+                info["status_operacional"] = status_op
+                info["prestacao_status"] = upper(row[2] if row[2] is not None else "")
+                info["finalizada_no_app"] = fin_app
+                info["status"] = status_op or status
+                if not info["status"] and fin_app == 1:
+                    info["status"] = "FINALIZADA"
         return info
 
     def _is_prestacao_fechada(self, prog: str) -> bool:
@@ -24330,10 +24908,18 @@ class RelatoriosPage(PageBase):
                     elif "status" in cols:
                         sql += " AND UPPER(COALESCE(status,''))='FINALIZADA'"
 
-                if "status" in cols and "id" in cols:
-                    sql += " ORDER BY CASE WHEN UPPER(COALESCE(status,''))='ATIVA' THEN 0 ELSE 1 END, id DESC LIMIT 400"
-                elif "id" in cols:
-                    sql += " ORDER BY id DESC LIMIT 400"
+                if "id" in cols:
+                    if "status_operacional" in cols and "status" in cols:
+                        sql += (
+                            " ORDER BY CASE "
+                            "WHEN UPPER(COALESCE(NULLIF(status_operacional,''), status, '')) IN ('ATIVA','EM_ROTA','CARREGADA','INICIADA') THEN 0 "
+                            "WHEN UPPER(COALESCE(NULLIF(status_operacional,''), status, '')) IN ('FINALIZADA','FINALIZADO') THEN 1 "
+                            "ELSE 2 END, id DESC LIMIT 400"
+                        )
+                    elif "status" in cols:
+                        sql += " ORDER BY CASE WHEN UPPER(COALESCE(status,''))='ATIVA' THEN 0 ELSE 1 END, id DESC LIMIT 400"
+                    else:
+                        sql += " ORDER BY id DESC LIMIT 400"
                 else:
                     sql += " LIMIT 400"
 
@@ -24367,25 +24953,15 @@ class RelatoriosPage(PageBase):
             self._last_bundle_api_state = "disabled"
             return None
         try:
-            rota_resp = _call_api(
+            resp = _call_api(
                 "GET",
-                f"desktop/rotas/{urllib.parse.quote(prog)}",
+                f"desktop/rotas/{urllib.parse.quote(prog)}/bundle",
                 extra_headers={"X-Desktop-Secret": desktop_secret},
             )
-            rec_resp = _call_api(
-                "GET",
-                f"desktop/rotas/{urllib.parse.quote(prog)}/recebimentos",
-                extra_headers={"X-Desktop-Secret": desktop_secret},
-            )
-            desp_resp = _call_api(
-                "GET",
-                f"desktop/rotas/{urllib.parse.quote(prog)}/despesas",
-                extra_headers={"X-Desktop-Secret": desktop_secret},
-            )
-            rota = rota_resp.get("rota") if isinstance(rota_resp, dict) else None
-            clientes = rota_resp.get("clientes") if isinstance(rota_resp, dict) else []
-            receb = rec_resp.get("recebimentos") if isinstance(rec_resp, dict) else []
-            desp = desp_resp.get("despesas") if isinstance(desp_resp, dict) else []
+            rota = resp.get("rota") if isinstance(resp, dict) else None
+            clientes = resp.get("clientes") if isinstance(resp, dict) else []
+            receb = resp.get("recebimentos") if isinstance(resp, dict) else []
+            desp = resp.get("despesas") if isinstance(resp, dict) else []
             if not isinstance(rota, dict):
                 self._last_bundle_api_state = "not_found"
                 return None
@@ -24672,6 +25248,7 @@ class RelatoriosPage(PageBase):
 
         if "PRESTACAO" in tipo_rel and prog:
             self._create_a4_preview_tab(nb, "Folha Prestação", self._build_preview_folha_prestacao(prog))
+            self._create_a4_preview_tab(nb, "Folha Retorno", build_folha_retorno_operacional(prog))
 
         tab_resumo = ttk.Frame(nb)
         nb.add(tab_resumo, text="Resumo")
@@ -25246,22 +25823,26 @@ class RelatoriosPage(PageBase):
                 """, (prog,))
                 meta = cur.fetchone() or ("", "", "", "", 0, "", "", "KG", 0, "", "")
 
-                cur.execute("PRAGMA table_info(programacao_itens)")
-                cols_i = {str(c[1]).lower() for c in (cur.fetchall() or [])}
-                cidade_expr = "COALESCE(cidade,'')" if "cidade" in cols_i else "''"
-                vendedor_expr = "COALESCE(vendedor,'')" if "vendedor" in cols_i else "''"
-                pedido_expr = "COALESCE(pedido,'')" if "pedido" in cols_i else "''"
-                caixas_expr = "COALESCE(qnt_caixas,0)" if "qnt_caixas" in cols_i else "0"
-                preco_expr = "COALESCE(preco,0)" if "preco" in cols_i else "0"
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='programacao_itens'")
+                if cur.fetchone():
+                    cur.execute("PRAGMA table_info(programacao_itens)")
+                    cols_i = {str(c[1]).lower() for c in (cur.fetchall() or [])}
+                    cidade_expr = "COALESCE(cidade,'')" if "cidade" in cols_i else "''"
+                    vendedor_expr = "COALESCE(vendedor,'')" if "vendedor" in cols_i else "''"
+                    pedido_expr = "COALESCE(pedido,'')" if "pedido" in cols_i else "''"
+                    caixas_expr = "COALESCE(qnt_caixas,0)" if "qnt_caixas" in cols_i else "0"
+                    preco_expr = "COALESCE(preco,0)" if "preco" in cols_i else "0"
 
-                cur.execute(f"""
-                    SELECT COALESCE(cod_cliente,''), COALESCE(nome_cliente,''), {preco_expr},
-                           {vendedor_expr}, {cidade_expr}, {pedido_expr}, {caixas_expr}
-                    FROM programacao_itens
-                    WHERE codigo_programacao=?
-                    ORDER BY nome_cliente ASC, cod_cliente ASC
-                """, (prog,))
-                itens = cur.fetchall() or []
+                    cur.execute(f"""
+                        SELECT COALESCE(cod_cliente,''), COALESCE(nome_cliente,''), {preco_expr},
+                               {vendedor_expr}, {cidade_expr}, {pedido_expr}, {caixas_expr}
+                        FROM programacao_itens
+                        WHERE codigo_programacao=?
+                        ORDER BY nome_cliente ASC, cod_cliente ASC
+                    """, (prog,))
+                    itens = cur.fetchall() or []
+                else:
+                    itens = []
         except Exception as e:
             return (
                 f"ERRO AO MONTAR FOLHA DE PROGRAMAÇÃO ({prog})\n"
@@ -25443,8 +26024,9 @@ class RelatoriosPage(PageBase):
                 mort_aves_expr = "COALESCE(mortalidade_transbordo_aves,0)" if "mortalidade_transbordo_aves" in cols_p else "0"
                 mort_kg_expr = "COALESCE(mortalidade_transbordo_kg,0)" if "mortalidade_transbordo_kg" in cols_p else "0"
                 obs_transb_expr = "COALESCE(obs_transbordo,'')" if "obs_transbordo" in cols_p else "''"
+                data_criacao_expr = "COALESCE(data_criacao,'')" if "data_criacao" in cols_p else ("COALESCE(data,'')" if "data" in cols_p else "''")
                 cur.execute(f"""
-                    SELECT COALESCE(data_criacao,''), COALESCE(motorista,''), COALESCE(veiculo,''), COALESCE(equipe,''),
+                    SELECT {data_criacao_expr}, COALESCE(motorista,''), COALESCE(veiculo,''), COALESCE(equipe,''),
                            {status_expr}, {prest_expr}, {km_expr}, {media_expr}, {custo_expr}, {adiant_expr},
                            {mort_aves_expr}, {mort_kg_expr}, {obs_transb_expr}
                     FROM programacoes
@@ -25453,26 +26035,56 @@ class RelatoriosPage(PageBase):
                 """, (prog,))
                 meta = cur.fetchone() or ("", "", "", "", "", "", 0, 0, 0, 0, 0, 0.0, "")
 
-                cur.execute("SELECT COALESCE(SUM(valor),0) FROM recebimentos WHERE codigo_programacao=?", (prog,))
-                total_receb = safe_float((cur.fetchone() or [0])[0], 0.0)
-                cur.execute("SELECT COALESCE(SUM(valor),0) FROM despesas WHERE codigo_programacao=?", (prog,))
-                total_desp = safe_float((cur.fetchone() or [0])[0], 0.0)
-                cur.execute("""
-                    SELECT COALESCE(cod_cliente,''), COALESCE(nome_cliente,''), COALESCE(valor,0), COALESCE(forma_pagamento,'')
-                    FROM recebimentos
-                    WHERE codigo_programacao=?
-                    ORDER BY id DESC
-                    LIMIT 12
-                """, (prog,))
-                receb = cur.fetchall() or []
-                cur.execute("""
-                    SELECT COALESCE(categoria,'OUTROS'), COALESCE(descricao,''), COALESCE(valor,0)
-                    FROM despesas
-                    WHERE codigo_programacao=?
-                    ORDER BY id DESC
-                    LIMIT 12
-                """, (prog,))
-                desp = cur.fetchall() or []
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='recebimentos'")
+                if cur.fetchone():
+                    cur.execute("PRAGMA table_info(recebimentos)")
+                    cols_rec = {str(c[1]).lower() for c in (cur.fetchall() or [])}
+                    cur.execute("SELECT COALESCE(SUM(valor),0) FROM recebimentos WHERE codigo_programacao=?", (prog,))
+                    total_receb = safe_float((cur.fetchone() or [0])[0], 0.0)
+                    cod_rec_col = "COALESCE(cod_cliente,'')" if "cod_cliente" in cols_rec else "''"
+                    nome_rec_col = "COALESCE(nome_cliente,'')" if "nome_cliente" in cols_rec else "''"
+                    valor_rec_col = "COALESCE(valor,0)" if "valor" in cols_rec else "0"
+                    forma_rec_col = "COALESCE(forma_pagamento,'')" if "forma_pagamento" in cols_rec else "''"
+                    order_rec_col = "id DESC" if "id" in cols_rec else "1 DESC"
+                    cur.execute(
+                        f"""
+                        SELECT {cod_rec_col}, {nome_rec_col}, {valor_rec_col}, {forma_rec_col}
+                        FROM recebimentos
+                        WHERE codigo_programacao=?
+                        ORDER BY {order_rec_col}
+                        LIMIT 12
+                        """,
+                        (prog,),
+                    )
+                    receb = cur.fetchall() or []
+                else:
+                    total_receb = 0.0
+                    receb = []
+
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='despesas'")
+                if cur.fetchone():
+                    cur.execute("PRAGMA table_info(despesas)")
+                    cols_desp = {str(c[1]).lower() for c in (cur.fetchall() or [])}
+                    cur.execute("SELECT COALESCE(SUM(valor),0) FROM despesas WHERE codigo_programacao=?", (prog,))
+                    total_desp = safe_float((cur.fetchone() or [0])[0], 0.0)
+                    categoria_desp_col = "COALESCE(categoria,'OUTROS')" if "categoria" in cols_desp else "'OUTROS'"
+                    descricao_desp_col = "COALESCE(descricao,'')" if "descricao" in cols_desp else "''"
+                    valor_desp_col = "COALESCE(valor,0)" if "valor" in cols_desp else "0"
+                    order_desp_col = "id DESC" if "id" in cols_desp else "1 DESC"
+                    cur.execute(
+                        f"""
+                        SELECT {categoria_desp_col}, {descricao_desp_col}, {valor_desp_col}
+                        FROM despesas
+                        WHERE codigo_programacao=?
+                        ORDER BY {order_desp_col}
+                        LIMIT 12
+                        """,
+                        (prog,),
+                    )
+                    desp = cur.fetchall() or []
+                else:
+                    total_desp = 0.0
+                    desp = []
         except Exception as e:
             return (
                 f"ERRO AO MONTAR FOLHA DE PRESTAÇÃO ({prog})\n"
@@ -25505,9 +26117,12 @@ class RelatoriosPage(PageBase):
         try:
             with get_db() as conn:
                 cur = conn.cursor()
+                cur.execute("PRAGMA table_info(programacoes)")
+                cols_prog = {str(c[1]).lower() for c in (cur.fetchall() or [])}
+                nf_kg_expr = "COALESCE(nf_kg,0)" if "nf_kg" in cols_prog else "0"
                 cur.execute(
-                    """
-                    SELECT COALESCE(nf_kg,0)
+                    f"""
+                    SELECT {nf_kg_expr}
                     FROM programacoes
                     WHERE codigo_programacao=?
                     ORDER BY id DESC
@@ -25610,8 +26225,16 @@ class RelatoriosPage(PageBase):
                 cur.execute("PRAGMA table_info(programacoes)")
                 cols = {str(c[1]).lower() for c in (cur.fetchall() or [])}
                 km_expr = "COALESCE(km_rodado,0)" if "km_rodado" in cols else "0"
+                if "nf_kg_vendido" in cols and "kg_vendido" in cols:
+                    kg_expr = "COALESCE(nf_kg_vendido, kg_vendido, 0)"
+                elif "nf_kg_vendido" in cols:
+                    kg_expr = "COALESCE(nf_kg_vendido,0)"
+                elif "kg_vendido" in cols:
+                    kg_expr = "COALESCE(kg_vendido,0)"
+                else:
+                    kg_expr = "0"
                 cur.execute(f"""
-                    SELECT COALESCE(codigo_programacao,''), COALESCE(motorista,''), COALESCE(equipe,''), COALESCE(status,''), COALESCE(kg_vendido,0), {km_expr}
+                    SELECT COALESCE(codigo_programacao,''), COALESCE(motorista,''), COALESCE(equipe,''), COALESCE(status,''), {kg_expr}, {km_expr}
                     FROM programacoes
                     ORDER BY id DESC
                 """)
@@ -25755,13 +26378,23 @@ class RelatoriosPage(PageBase):
         if not api_succeeded:
             with get_db() as conn:
                 cur = conn.cursor()
-                cur.execute("""
-                    SELECT COALESCE(categoria,'OUTROS') AS categoria, COUNT(1) AS qtd, COALESCE(SUM(valor),0) AS total
-                    FROM despesas
-                    GROUP BY COALESCE(categoria,'OUTROS')
-                    ORDER BY total DESC, categoria ASC
-                """)
-                rows = cur.fetchall() or []
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='despesas'")
+                if cur.fetchone():
+                    cur.execute("PRAGMA table_info(despesas)")
+                    cols_desp = {str(c[1]).lower() for c in (cur.fetchall() or [])}
+                    categoria_expr = "COALESCE(categoria,'OUTROS')" if "categoria" in cols_desp else "'OUTROS'"
+                    valor_expr = "COALESCE(valor,0)" if "valor" in cols_desp else "0"
+                    cur.execute(
+                        f"""
+                        SELECT {categoria_expr} AS categoria, COUNT(1) AS qtd, COALESCE(SUM({valor_expr}),0) AS total
+                        FROM despesas
+                        GROUP BY {categoria_expr}
+                        ORDER BY total DESC, categoria ASC
+                        """
+                    )
+                    rows = cur.fetchall() or []
+                else:
+                    rows = []
         self.txt.delete("1.0", "end")
         self.txt.insert("end", "RELATORIO GERAL DE DESPESAS\n")
         self.txt.insert("end", "=" * 90 + "\n\n")
@@ -25987,25 +26620,49 @@ class RelatoriosPage(PageBase):
                 prest_col = "COALESCE(prestacao_status,'') as prestacao_status" if has_col("prestacao_status") else "'' as prestacao_status"
                 data_col = "COALESCE(data_criacao,'') as data_criacao" if has_col("data_criacao") else ("COALESCE(data,'') as data_criacao" if has_col("data") else "'' as data_criacao")
                 usuario_col = f"COALESCE({usuario_col_name},'') as usuario_criacao" if usuario_col_name else "'' as usuario_criacao"
+                kg_estimado_col = "COALESCE(kg_estimado,0)" if has_col("kg_estimado") else "0"
+                data_saida_col = "COALESCE(data_saida,'')" if has_col("data_saida") else "''"
+                hora_saida_col = "COALESCE(hora_saida,'')" if has_col("hora_saida") else "''"
+                data_chegada_col = "COALESCE(data_chegada,'')" if has_col("data_chegada") else "''"
+                hora_chegada_col = "COALESCE(hora_chegada,'')" if has_col("hora_chegada") else "''"
+                nf_kg_col = "COALESCE(nf_kg,0)" if has_col("nf_kg") else "0"
+                nf_caixas_col = "COALESCE(nf_caixas,0)" if has_col("nf_caixas") else "0"
+                nf_kg_carregado_col = "COALESCE(nf_kg_carregado,0)" if has_col("nf_kg_carregado") else ("COALESCE(kg_carregado,0)" if has_col("kg_carregado") else "0")
+                nf_kg_vendido_col = "COALESCE(nf_kg_vendido,0)" if has_col("nf_kg_vendido") else ("COALESCE(kg_vendido,0)" if has_col("kg_vendido") else "0")
+                nf_saldo_col = "COALESCE(nf_saldo,0)" if has_col("nf_saldo") else "0"
+                km_inicial_col = "COALESCE(km_inicial,0)" if has_col("km_inicial") else "0"
+                km_final_col = "COALESCE(km_final,0)" if has_col("km_final") else "0"
+                litros_col = "COALESCE(litros,0)" if has_col("litros") else "0"
+                km_rodado_col = "COALESCE(km_rodado,0)" if has_col("km_rodado") else "0"
+                media_km_l_col = "COALESCE(media_km_l,0)" if has_col("media_km_l") else "0"
+                custo_km_col = "COALESCE(custo_km,0)" if has_col("custo_km") else "0"
+                ced_200_col = "COALESCE(ced_200_qtd,0)" if has_col("ced_200_qtd") else "0"
+                ced_100_col = "COALESCE(ced_100_qtd,0)" if has_col("ced_100_qtd") else "0"
+                ced_50_col = "COALESCE(ced_50_qtd,0)" if has_col("ced_50_qtd") else "0"
+                ced_20_col = "COALESCE(ced_20_qtd,0)" if has_col("ced_20_qtd") else "0"
+                ced_10_col = "COALESCE(ced_10_qtd,0)" if has_col("ced_10_qtd") else "0"
+                ced_5_col = "COALESCE(ced_5_qtd,0)" if has_col("ced_5_qtd") else "0"
+                ced_2_col = "COALESCE(ced_2_qtd,0)" if has_col("ced_2_qtd") else "0"
+                valor_dinheiro_col = "COALESCE(valor_dinheiro,0)" if has_col("valor_dinheiro") else "0"
 
                 cur.execute(f"""
                     SELECT
                         motorista, veiculo, equipe,
                         {status_col}, {prest_col}, {data_col},
                         {usuario_col},
-                        COALESCE(kg_estimado,0),
+                        {kg_estimado_col},
                         {nf_col} as num_nf,
                         {local_rota_col} as local_rota,
                         {local_carreg_col} as local_carreg,
-                        COALESCE(data_saida,''), COALESCE(hora_saida,''),
-                        COALESCE(data_chegada,''), COALESCE(hora_chegada,''),
-                        COALESCE(nf_kg,0), COALESCE(nf_caixas,0), COALESCE(nf_kg_carregado,0),
-                        COALESCE(nf_kg_vendido,0), COALESCE(nf_saldo,0),
-                        COALESCE(km_inicial,0), COALESCE(km_final,0), COALESCE(litros,0),
-                        COALESCE(km_rodado,0), COALESCE(media_km_l,0), COALESCE(custo_km,0),
-                        COALESCE(ced_200_qtd,0), COALESCE(ced_100_qtd,0), COALESCE(ced_50_qtd,0),
-                        COALESCE(ced_20_qtd,0), COALESCE(ced_10_qtd,0), COALESCE(ced_5_qtd,0), COALESCE(ced_2_qtd,0),
-                        COALESCE(valor_dinheiro,0),
+                        {data_saida_col}, {hora_saida_col},
+                        {data_chegada_col}, {hora_chegada_col},
+                        {nf_kg_col}, {nf_caixas_col}, {nf_kg_carregado_col},
+                        {nf_kg_vendido_col}, {nf_saldo_col},
+                        {km_inicial_col}, {km_final_col}, {litros_col},
+                        {km_rodado_col}, {media_km_l_col}, {custo_km_col},
+                        {ced_200_col}, {ced_100_col}, {ced_50_col},
+                        {ced_20_col}, {ced_10_col}, {ced_5_col}, {ced_2_col},
+                        {valor_dinheiro_col},
                         {adiant_col}
                     FROM programacoes
                     WHERE codigo_programacao=?
@@ -26037,44 +26694,101 @@ class RelatoriosPage(PageBase):
                 data_saida, hora_saida = normalize_date_time_components(data_saida, hora_saida)
                 data_chegada, hora_chegada = normalize_date_time_components(data_chegada, hora_chegada)
 
-                try:
-                    cur.execute("SELECT COUNT(*) FROM programacao_itens WHERE codigo_programacao=?", (prog,))
-                    total_entregas = safe_int((cur.fetchone() or [0])[0], 0)
-                except Exception:
-                    total_entregas = 0
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='programacao_itens'")
+                has_itens = bool(cur.fetchone())
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='recebimentos'")
+                has_recebimentos = bool(cur.fetchone())
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='despesas'")
+                has_despesas = bool(cur.fetchone())
 
-                cur.execute("""
-                    SELECT COALESCE(cod_cliente,''), COALESCE(nome_cliente,''), COALESCE(preco,0), COALESCE(vendedor,'')
-                    FROM programacao_itens
-                    WHERE codigo_programacao=?
-                    ORDER BY nome_cliente ASC, cod_cliente ASC
-                """, (prog,))
-                clientes_programacao = cur.fetchall() or []
+                if has_itens:
+                    cols_itens = {str(c[1]).lower() for c in (cur.execute("PRAGMA table_info(programacao_itens)").fetchall() or [])}
+                    try:
+                        cur.execute("SELECT COUNT(*) FROM programacao_itens WHERE codigo_programacao=?", (prog,))
+                        total_entregas = safe_int((cur.fetchone() or [0])[0], 0)
+                    except Exception:
+                        total_entregas = 0
+
+                    cod_cliente_item_col = "COALESCE(cod_cliente,'')" if "cod_cliente" in cols_itens else "''"
+                    nome_cliente_item_col = "COALESCE(nome_cliente,'')" if "nome_cliente" in cols_itens else "''"
+                    preco_col = "COALESCE(preco,0)" if "preco" in cols_itens else "0"
+                    vendedor_item_col = "COALESCE(vendedor,'')" if "vendedor" in cols_itens else "''"
+                    cur.execute(
+                        f"""
+                        SELECT
+                            {cod_cliente_item_col},
+                            {nome_cliente_item_col},
+                            {preco_col},
+                            {vendedor_item_col}
+                        FROM programacao_itens
+                        WHERE codigo_programacao=?
+                        ORDER BY nome_cliente ASC, cod_cliente ASC
+                        """,
+                        (prog,),
+                    )
+                    clientes_programacao = cur.fetchall() or []
+                else:
+                    total_entregas = 0
+                    clientes_programacao = []
 
                 if is_prestacao:
-                    cur.execute("SELECT COALESCE(SUM(valor),0) FROM recebimentos WHERE codigo_programacao=?", (prog,))
-                    total_receb = safe_float((cur.fetchone() or [0])[0], 0.0)
+                    if has_recebimentos:
+                        cols_receb = {str(c[1]).lower() for c in (cur.execute("PRAGMA table_info(recebimentos)").fetchall() or [])}
+                        cod_cliente_receb_col = "COALESCE(cod_cliente,'')" if "cod_cliente" in cols_receb else "''"
+                        nome_cliente_receb_col = "COALESCE(nome_cliente,'')" if "nome_cliente" in cols_receb else "''"
+                        valor_receb_col = "COALESCE(valor,0)" if "valor" in cols_receb else "0"
+                        forma_receb_col = "COALESCE(forma_pagamento,'')" if "forma_pagamento" in cols_receb else "''"
+                        obs_receb_col = "COALESCE(observacao,'')" if "observacao" in cols_receb else "''"
+                        data_receb_col = "COALESCE(data_registro,'')" if "data_registro" in cols_receb else "''"
+                        cur.execute("SELECT COALESCE(SUM(valor),0) FROM recebimentos WHERE codigo_programacao=?", (prog,))
+                        total_receb = safe_float((cur.fetchone() or [0])[0], 0.0)
+                        cur.execute(
+                            f"""
+                            SELECT
+                                {cod_cliente_receb_col},
+                                {nome_cliente_receb_col},
+                                {valor_receb_col},
+                                {forma_receb_col},
+                                {obs_receb_col},
+                                {data_receb_col}
+                            FROM recebimentos
+                            WHERE codigo_programacao=?
+                            ORDER BY data_registro DESC, id DESC
+                            """,
+                            (prog,),
+                        )
+                        recebimentos = cur.fetchall() or []
+                    else:
+                        total_receb = 0.0
+                        recebimentos = []
 
-                    cur.execute("SELECT COALESCE(SUM(valor),0) FROM despesas WHERE codigo_programacao=?", (prog,))
-                    total_desp = safe_float((cur.fetchone() or [0])[0], 0.0)
-
-                    cur.execute("""
-                        SELECT COALESCE(cod_cliente,''), COALESCE(nome_cliente,''), COALESCE(valor,0),
-                               COALESCE(forma_pagamento,''), COALESCE(observacao,''), COALESCE(data_registro,'')
-                        FROM recebimentos
-                        WHERE codigo_programacao=?
-                        ORDER BY data_registro DESC, id DESC
-                    """, (prog,))
-                    recebimentos = cur.fetchall() or []
-
-                    cur.execute("""
-                        SELECT COALESCE(descricao,''), COALESCE(valor,0), COALESCE(categoria,'OUTROS'),
-                               COALESCE(observacao,''), COALESCE(data_registro,'')
-                        FROM despesas
-                        WHERE codigo_programacao=?
-                        ORDER BY data_registro DESC, id DESC
-                    """, (prog,))
-                    despesas = cur.fetchall() or []
+                    if has_despesas:
+                        cols_desp = {str(c[1]).lower() for c in (cur.execute("PRAGMA table_info(despesas)").fetchall() or [])}
+                        descricao_rel_desp_col = "COALESCE(descricao,'')" if "descricao" in cols_desp else "''"
+                        valor_rel_desp_col = "COALESCE(valor,0)" if "valor" in cols_desp else "0"
+                        categoria_rel_desp_col = "COALESCE(categoria,'OUTROS')" if "categoria" in cols_desp else "'OUTROS'"
+                        obs_rel_desp_col = "COALESCE(observacao,'')" if "observacao" in cols_desp else "''"
+                        data_rel_desp_col = "COALESCE(data_registro,'')" if "data_registro" in cols_desp else "''"
+                        cur.execute("SELECT COALESCE(SUM(valor),0) FROM despesas WHERE codigo_programacao=?", (prog,))
+                        total_desp = safe_float((cur.fetchone() or [0])[0], 0.0)
+                        cur.execute(
+                            f"""
+                            SELECT
+                                {descricao_rel_desp_col},
+                                {valor_rel_desp_col},
+                                {categoria_rel_desp_col},
+                                {obs_rel_desp_col},
+                                {data_rel_desp_col}
+                            FROM despesas
+                            WHERE codigo_programacao=?
+                            ORDER BY data_registro DESC, id DESC
+                            """,
+                            (prog,),
+                        )
+                        despesas = cur.fetchall() or []
+                    else:
+                        total_desp = 0.0
+                        despesas = []
 
         equipe_txt = resolve_equipe_nomes(equipe)
         data_criacao_n = normalize_date(data_criacao)
@@ -26294,6 +27008,18 @@ class RelatoriosPage(PageBase):
                     else ("COALESCE(p.data,'')" if has_data else "''")
                 )
                 status_expr = "COALESCE(p.status,'')" if has_status else "''"
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='programacao_itens_controle'")
+                has_controle = bool(cur.fetchone())
+                mort_sum_expr = "COALESCE(SUM(COALESCE(pc.mortalidade_aves, 0)), 0)" if has_controle else "0"
+                mort_count_expr = "COUNT(CASE WHEN COALESCE(pc.mortalidade_aves,0) > 0 THEN 1 END)" if has_controle else "0"
+                join_controle = (
+                    """
+                    LEFT JOIN programacao_itens_controle pc
+                      ON UPPER(COALESCE(pc.codigo_programacao,'')) = UPPER(COALESCE(p.codigo_programacao,''))
+                    """
+                    if has_controle
+                    else ""
+                )
 
                 sql = f"""
                     SELECT
@@ -26301,11 +27027,10 @@ class RelatoriosPage(PageBase):
                         COALESCE(p.motorista,'') as motorista,
                         {data_expr} as data_ref,
                         {status_expr} as status_ref,
-                        COALESCE(SUM(COALESCE(pc.mortalidade_aves, 0)), 0) as mortalidade_total,
-                        COUNT(CASE WHEN COALESCE(pc.mortalidade_aves,0) > 0 THEN 1 END) as clientes_com_mortalidade
+                        {mort_sum_expr} as mortalidade_total,
+                        {mort_count_expr} as clientes_com_mortalidade
                     FROM programacoes p
-                    LEFT JOIN programacao_itens_controle pc
-                      ON UPPER(COALESCE(pc.codigo_programacao,'')) = UPPER(COALESCE(p.codigo_programacao,''))
+                    {join_controle}
                     WHERE 1=1
                 """
                 params = []
@@ -26443,18 +27168,29 @@ class RelatoriosPage(PageBase):
                     return
                 with get_db() as conn:
                     cur = conn.cursor()
+                    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='programacao_itens'")
+                    if cur.fetchone():
+                        cur.execute("SELECT * FROM programacao_itens WHERE codigo_programacao=?", (prog,))
+                        itens = cur.fetchall()
+                        cols_itens = [d[0] for d in cur.description]
+                    else:
+                        itens, cols_itens = [], []
 
-                    cur.execute("SELECT * FROM programacao_itens WHERE codigo_programacao=?", (prog,))
-                    itens = cur.fetchall()
-                    cols_itens = [d[0] for d in cur.description]
+                    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='recebimentos'")
+                    if cur.fetchone():
+                        cur.execute("SELECT * FROM recebimentos WHERE codigo_programacao=?", (prog,))
+                        rec = cur.fetchall()
+                        cols_rec = [d[0] for d in cur.description]
+                    else:
+                        rec, cols_rec = [], []
 
-                    cur.execute("SELECT * FROM recebimentos WHERE codigo_programacao=?", (prog,))
-                    rec = cur.fetchall()
-                    cols_rec = [d[0] for d in cur.description]
-
-                    cur.execute("SELECT * FROM despesas WHERE codigo_programacao=?", (prog,))
-                    desp = cur.fetchall()
-                    cols_desp = [d[0] for d in cur.description]
+                    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='despesas'")
+                    if cur.fetchone():
+                        cur.execute("SELECT * FROM despesas WHERE codigo_programacao=?", (prog,))
+                        desp = cur.fetchall()
+                        cols_desp = [d[0] for d in cur.description]
+                    else:
+                        desp, cols_desp = [], []
 
                 df_itens = pd.DataFrame(itens, columns=cols_itens)
                 df_rec = pd.DataFrame(rec, columns=cols_rec)
@@ -26602,7 +27338,8 @@ class RelatoriosPage(PageBase):
                 f"desktop/rotas/{urllib.parse.quote(upper(prog))}/status",
                 payload={
                     "status": "FINALIZADA",
-                    "finalizada_no_app": 0,
+                    "status_operacional": "FINALIZADA",
+                    "finalizada_no_app": 1,
                 },
                 extra_headers={"X-Desktop-Secret": desktop_secret},
             )
@@ -26724,6 +27461,25 @@ class BackupExportarPage(PageBase):
         with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
             shutil.copyfileobj(fsrc, fdst)
 
+    def _sqlite_backup_copy(self, src: str, dst: str):
+        """Cópia consistente de banco SQLite, inclusive com WAL ativo."""
+        import sqlite3
+
+        src_conn = sqlite3.connect(src)
+        dst_conn = sqlite3.connect(dst)
+        try:
+            with dst_conn:
+                src_conn.backup(dst_conn)
+        finally:
+            try:
+                dst_conn.close()
+            except Exception:
+                logging.debug("Falha ignorada")
+            try:
+                src_conn.close()
+            except Exception:
+                logging.debug("Falha ignorada")
+
     def _cleanup_sqlite_wal(self, db_path: str):
         for suffix in ("-wal", "-shm"):
             p = f"{db_path}{suffix}"
@@ -26741,7 +27497,10 @@ class BackupExportarPage(PageBase):
             base_dir = os.path.dirname(DB_PATH) or "."
             auto_name = f"auto_backup_before_restore_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
             auto_path = os.path.join(base_dir, auto_name)
-            self._make_safe_copy(DB_PATH, auto_path)
+            try:
+                self._sqlite_backup_copy(DB_PATH, auto_path)
+            except Exception:
+                self._make_safe_copy(DB_PATH, auto_path)
             return auto_path
         except Exception:
             return ""
@@ -26763,13 +27522,7 @@ class BackupExportarPage(PageBase):
         try:
             # melhor pratica: usar SQLite backup API quando possivel
             try:
-                import sqlite3
-                src = sqlite3.connect(DB_PATH)
-                dst = sqlite3.connect(path)
-                with dst:
-                    src.backup(dst)
-                dst.close()
-                src.close()
+                self._sqlite_backup_copy(DB_PATH, path)
             except Exception:
                 # fallback: cópia binária (mantém funcionamento se der algo no backup API)
                 self._make_safe_copy(DB_PATH, path)
@@ -26807,6 +27560,15 @@ class BackupExportarPage(PageBase):
             return
 
         try:
+            try:
+                validate_database_identity(path, APP_CONFIG)
+            except Exception as ident_exc:
+                messagebox.showerror(
+                    "ERRO",
+                    "O banco selecionado nao e compativel com este ambiente/tenant/company.\n\n"
+                    f"Detalhes: {str(ident_exc)}"
+                )
+                return
             # âÅâ€œââ‚¬¦ cria backup automático do DB atual
             auto_backup = self._backup_current_db_automatic()
 
@@ -26826,7 +27588,14 @@ class BackupExportarPage(PageBase):
 
             # âÅâ€œââ‚¬¦ restaura por cópia binária (simples e compatÃÂÂvel)
             # Observação: se houver conexão aberta, pode falhar no Windows.
-            self._make_safe_copy(path, DB_PATH)
+            try:
+                self._sqlite_backup_copy(path, DB_PATH)
+            except Exception:
+                self._make_safe_copy(path, DB_PATH)
+            try:
+                self._cleanup_sqlite_wal(DB_PATH)
+            except Exception:
+                logging.debug("Falha ignorada")
 
             msg = "Banco restaurado! Reinicie o sistema."
             if auto_backup:
@@ -26858,6 +27627,11 @@ class BackupExportarPage(PageBase):
 
         try:
             with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='vendas_importadas'")
+                if not cur.fetchone():
+                    messagebox.showwarning("ATENÇÃO", "A tabela de vendas importadas não existe nesta base.")
+                    return
                 df = pd.read_sql_query("SELECT * FROM vendas_importadas ORDER BY id DESC", conn)
 
             if df.empty:
