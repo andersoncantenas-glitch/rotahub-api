@@ -1,3 +1,8 @@
+2026-03-12 10:15:00 - v4.1.1
+- Release automatizada (patch).
+- Versao anterior: v4.1.0.
+- Correcao do empacotamento do desktop com tkinter e novo instalador para testes.
+
 2026-03-11 00:00:00 - v4.0.17
 - Release automatizada (patch).
 - Versao anterior: v4.0.16.
