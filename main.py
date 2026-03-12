@@ -16395,6 +16395,180 @@ class RecebimentosPage(PageBase):
                 )
             return False
 
+    def _rehydrate_programacao_missing_on_server(self, prog: str) -> bool:
+        prog = upper(str(prog or "").strip())
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if not prog or not desktop_secret or not is_desktop_api_sync_enabled():
+            return False
+
+        try:
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='programacoes'")
+                if not cur.fetchone():
+                    return False
+
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM programacoes
+                    WHERE codigo_programacao=?
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (prog,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return False
+                rota = dict(row) if hasattr(row, "keys") else {}
+
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='programacao_itens'")
+                itens = []
+                if cur.fetchone():
+                    cur.execute(
+                        """
+                        SELECT *
+                        FROM programacao_itens
+                        WHERE codigo_programacao=?
+                        ORDER BY id ASC
+                        """,
+                        (prog,),
+                    )
+                    for rr in (cur.fetchall() or []):
+                        itens.append(dict(rr) if hasattr(rr, "keys") else {})
+
+                linked_venda_ids = []
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='vendas_importadas'")
+                if cur.fetchone():
+                    cur.execute("PRAGMA table_info(vendas_importadas)")
+                    cols_vendas = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+                    if {"id", "codigo_programacao"}.issubset(cols_vendas):
+                        usada_expr = "COALESCE(usada,0)" if "usada" in cols_vendas else "0"
+                        cur.execute(
+                            f"""
+                            SELECT id
+                            FROM vendas_importadas
+                            WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))
+                              AND {usada_expr}=1
+                            ORDER BY id ASC
+                            """,
+                            (prog,),
+                        )
+                        linked_venda_ids = [safe_int(r[0], 0) for r in (cur.fetchall() or []) if safe_int(r[0], 0) > 0]
+        except Exception:
+            logging.debug("Falha ao ler programação local para reidratar no servidor.", exc_info=True)
+            return False
+
+        def _pick(src: dict, *keys, default=None):
+            for key in keys:
+                if key in src and src.get(key) not in (None, ""):
+                    return src.get(key)
+            return default
+
+        try:
+            itens_payload = []
+            for it in (itens or []):
+                cod_cliente = upper(_pick(it, "cod_cliente"))
+                nome_cliente = upper(_pick(it, "nome_cliente"))
+                if not cod_cliente or not nome_cliente:
+                    continue
+                itens_payload.append(
+                    {
+                        "cod_cliente": cod_cliente,
+                        "nome_cliente": nome_cliente,
+                        "qnt_caixas": safe_int(_pick(it, "qnt_caixas", "caixas_atual"), 0),
+                        "kg": safe_float(_pick(it, "kg"), 0.0),
+                        "preco": safe_float(_pick(it, "preco"), 0.0),
+                        "endereco": upper(_pick(it, "endereco")),
+                        "vendedor": upper(_pick(it, "vendedor")),
+                        "pedido": upper(_pick(it, "pedido")),
+                        "produto": upper(_pick(it, "produto")),
+                        "obs": upper(_pick(it, "obs")),
+                    }
+                )
+
+            status_local = upper(str(_pick(rota, "status") or "").strip())
+            status_operacional_local = upper(str(_pick(rota, "status_operacional") or "").strip())
+            prestacao_local = upper(str(_pick(rota, "prestacao_status", default="PENDENTE") or "PENDENTE").strip())
+            finalizada_local = safe_int(_pick(rota, "finalizada_no_app"), 0)
+            status_exec = status_operacional_local or status_local
+            if status_exec in {"FINALIZADA", "FINALIZADO"} and finalizada_local != 1:
+                finalizada_local = 1
+
+            payload_sync = {
+                "codigo_programacao": prog,
+                "data_criacao": str(_pick(rota, "data_criacao", "data") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                "motorista": upper(_pick(rota, "motorista")),
+                "motorista_id": safe_int(_pick(rota, "motorista_id"), 0),
+                "motorista_codigo": upper(_pick(rota, "motorista_codigo", "codigo_motorista")),
+                "codigo_motorista": upper(_pick(rota, "codigo_motorista", "motorista_codigo")),
+                "veiculo": upper(_pick(rota, "veiculo")),
+                "equipe": upper(_pick(rota, "equipe")),
+                "kg_estimado": safe_float(_pick(rota, "kg_estimado"), 0.0),
+                "tipo_estimativa": upper(str(_pick(rota, "tipo_estimativa", default="KG") or "KG")),
+                "caixas_estimado": safe_int(_pick(rota, "caixas_estimado"), 0),
+                "status": status_local or "ATIVA",
+                "local_rota": upper(_pick(rota, "local_rota", "tipo_rota")),
+                "local_carregamento": upper(_pick(rota, "local_carregamento", "local_carregado", "granja_carregada", "local_carreg")),
+                "local_carregado": upper(_pick(rota, "local_carregado", "local_carregamento", "granja_carregada", "local_carreg")),
+                "adiantamento": safe_float(_pick(rota, "adiantamento", "adiantamento_rota"), 0.0),
+                "total_caixas": safe_int(_pick(rota, "total_caixas", "nf_caixas", "caixas_carregadas"), 0),
+                "quilos": safe_float(_pick(rota, "quilos", "nf_kg", "kg_carregado"), 0.0),
+                "nf_kg": safe_float(_pick(rota, "nf_kg", "kg_nf"), 0.0),
+                "nf_preco": safe_float(_pick(rota, "nf_preco", "preco_nf"), 0.0),
+                "nf_caixas": safe_int(_pick(rota, "nf_caixas", "caixas_carregadas", "qnt_cx_carregada"), 0),
+                "caixas_carregadas": safe_int(_pick(rota, "caixas_carregadas", "nf_caixas", "qnt_cx_carregada"), 0),
+                "usuario_criacao": upper(_pick(rota, "usuario_criacao")),
+                "usuario_ultima_edicao": upper(_pick(rota, "usuario_ultima_edicao", "usuario_criacao")),
+                "linked_venda_ids": linked_venda_ids,
+                "vendas_usada_em": str(_pick(rota, "data_criacao", "data") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                "itens": itens_payload,
+            }
+            _call_api(
+                "POST",
+                "desktop/rotas/upsert",
+                payload=payload_sync,
+                extra_headers={"X-Desktop-Secret": desktop_secret},
+            )
+
+            payload_status = {
+                "status": status_local or None,
+                "prestacao_status": prestacao_local or "PENDENTE",
+                "status_operacional": status_operacional_local or None,
+                "finalizada_no_app": int(finalizada_local or 0),
+            }
+            if any(v not in (None, "", 0) for v in payload_status.values()) or payload_status.get("finalizada_no_app") == 0:
+                _call_api(
+                    "PUT",
+                    f"desktop/rotas/{urllib.parse.quote(prog)}/status",
+                    payload=payload_status,
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+
+            data_saida_n = normalize_date(_pick(rota, "data_saida"))
+            hora_saida_n = normalize_time(_pick(rota, "hora_saida"))
+            data_chegada_n = normalize_date(_pick(rota, "data_chegada"))
+            hora_chegada_n = normalize_time(_pick(rota, "hora_chegada"))
+            diaria_motorista = _pick(rota, "diaria_motorista_valor")
+            if any([data_saida_n, hora_saida_n, data_chegada_n, hora_chegada_n, diaria_motorista not in (None, "")]):
+                _call_api(
+                    "PUT",
+                    f"desktop/rotas/{urllib.parse.quote(prog)}/cabecalho",
+                    payload={
+                        "data_saida": data_saida_n or "",
+                        "hora_saida": hora_saida_n or "",
+                        "data_chegada": data_chegada_n or "",
+                        "hora_chegada": hora_chegada_n or "",
+                        "diaria_motorista_valor": safe_float(diaria_motorista, 0.0) if diaria_motorista not in (None, "") else None,
+                    },
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+            return True
+        except Exception:
+            logging.debug("Falha ao reidratar programação ausente no servidor.", exc_info=True)
+            return False
+
     # -------------------------
     # Regras: bloqueio quando FECHADA
     # -------------------------
@@ -16780,9 +16954,34 @@ class RecebimentosPage(PageBase):
                 logging.debug("Falha ao carregar programacao em recebimentos via API; usando fallback local.", exc_info=True)
 
         if api_enabled and api_checked and (not api_failed) and (not found_prog):
-            messagebox.showwarning("ATENÇÃO", f"Programação não encontrada no servidor: {prog}")
-            self._reset_view()
-            return
+            recovered = False
+            try:
+                recovered = self._rehydrate_programacao_missing_on_server(prog)
+            except Exception:
+                logging.debug("Falha ao tentar reidratar programação ausente no servidor.", exc_info=True)
+            if recovered:
+                try:
+                    resp = self._api_bundle_prestacao(prog) if hasattr(self, "_api_bundle_prestacao") else None
+                    rota_obj = resp.get("rota") if isinstance(resp, dict) else None
+                    if isinstance(rota_obj, dict):
+                        motorista = str(rota_obj.get("motorista") or "")
+                        veiculo = str(rota_obj.get("veiculo") or "")
+                        equipe = str(rota_obj.get("equipe") or "")
+                        nf = str(rota_obj.get("num_nf") or rota_obj.get("nf_numero") or "")
+                        data_saida = str(rota_obj.get("data_saida") or "")
+                        hora_saida = str(rota_obj.get("hora_saida") or "")
+                        data_chegada = str(rota_obj.get("data_chegada") or "")
+                        hora_chegada = str(rota_obj.get("hora_chegada") or "")
+                        rota = str(rota_obj.get("local_rota") or rota_obj.get("tipo_rota") or "")
+                        diaria_motorista = safe_float(rota_obj.get("diaria_motorista_valor"), 0.0)
+                        found_prog = True
+                        self.set_status(f"STATUS: Programação {prog} reidratada no servidor para Recebimentos.")
+                except Exception:
+                    logging.debug("Falha ao recarregar programação após reidratar no servidor.", exc_info=True)
+            if not found_prog:
+                messagebox.showwarning("ATENÇÃO", f"Programação não encontrada no servidor: {prog}")
+                self._reset_view()
+                return
 
         if not found_prog:
             with get_db() as conn:
