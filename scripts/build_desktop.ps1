@@ -31,6 +31,15 @@ if (-not (Test-Path $py)) {
     throw "Python da venv nao encontrado em $py"
 }
 
+$pythonBase = & $py -c "import sys; print(sys.base_prefix)"
+if ([string]::IsNullOrWhiteSpace($pythonBase)) {
+    throw "Nao foi possivel identificar o Python base usado pela venv."
+}
+$stdlibTkinter = Join-Path $pythonBase "Lib\tkinter"
+if (-not (Test-Path $stdlibTkinter)) {
+    throw "Pacote tkinter nao encontrado em $stdlibTkinter"
+}
+
 Write-Host "==> Instalando dependencias de desktop"
 & $py -m pip install --upgrade pip
 & $py -m pip install -r requirements_desktop.txt
@@ -65,6 +74,20 @@ Start-Sleep -Milliseconds 500
 Remove-DirWithRetry -Path "build"
 Remove-DirWithRetry -Path "dist"
 
+$tkInfo = & $py -c "import os, sys; base = sys.base_prefix; tcl_root = os.path.join(base, 'tcl'); pairs = [];`nfor name in sorted(os.listdir(tcl_root)) if os.path.isdir(tcl_root) else []:`n    full = os.path.join(tcl_root, name)`n    if os.path.isdir(full) and (name.startswith('tcl8.') or name.startswith('tk8.')):`n        pairs.append(f'{name}={full}')`nprint('\n'.join(pairs))"
+$tkMap = @{}
+foreach ($line in $tkInfo) {
+    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+    $parts = $line -split '=', 2
+    if ($parts.Count -eq 2) {
+        $tkMap[$parts[0]] = $parts[1]
+    }
+}
+
+if (-not $tkMap.ContainsKey("tcl8.6") -or -not $tkMap.ContainsKey("tk8.6")) {
+    throw "Nao foi possivel localizar as bibliotecas Tcl/Tk do Python em $($py)."
+}
+
 Write-Host "==> Gerando EXE (PyInstaller)"
 & $py -m PyInstaller `
   --noconfirm `
@@ -75,12 +98,18 @@ Write-Host "==> Gerando EXE (PyInstaller)"
   --hidden-import "pandas" `
   --hidden-import "openpyxl" `
   --hidden-import "xlrd" `
+  --hidden-import "tkinter" `
+  --hidden-import "_tkinter" `
   --collect-all "pandas" `
   --collect-all "openpyxl" `
   --collect-all "xlrd" `
+  --runtime-hook "scripts\pyi_rth_tkinter.py" `
+  --add-data "$stdlibTkinter;tkinter" `
   --add-data "assets;assets" `
   --add-data "certificados;certificados" `
   --add-data "config;config" `
+  --add-data "$($tkMap['tcl8.6']);tcl\tcl8.6" `
+  --add-data "$($tkMap['tk8.6']);tcl\tk8.6" `
   main.py
 
 Write-Host "==> Build concluido em: dist\RotaHubDesktop\RotaHubDesktop.exe"

@@ -1,9 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('assets', 'assets'), ('certificados', 'certificados'), ('config', 'config')]
+datas = [('C:\\Users\\fisca\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\tkinter', 'tkinter'), ('assets', 'assets'), ('certificados', 'certificados'), ('config', 'config'), ('C:\\Users\\fisca\\AppData\\Local\\Programs\\Python\\Python314\\tcl\\tcl8.6', 'tcl\\tcl8.6'), ('C:\\Users\\fisca\\AppData\\Local\\Programs\\Python\\Python314\\tcl\\tk8.6', 'tcl\\tk8.6')]
 binaries = []
-hiddenimports = ['pandas', 'openpyxl', 'xlrd']
+hiddenimports = ['pandas', 'openpyxl', 'xlrd', 'tkinter', '_tkinter']
 tmp_ret = collect_all('pandas')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('openpyxl')
@@ -20,7 +20,7 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=['scripts\\pyi_rth_tkinter.py'],
     excludes=[],
     noarchive=False,
     optimize=0,
