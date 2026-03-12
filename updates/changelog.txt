@@ -1,3 +1,9 @@
+2026-03-12 10:40:00 - v4.1.2
+- Release automatizada (patch).
+- Versao anterior: v4.1.1.
+- Correcao da listagem de vendas importadas na API central.
+- Melhoria da confirmacao visual do processo de atualizacao no desktop.
+
 2026-03-12 10:15:00 - v4.1.1
 - Release automatizada (patch).
 - Versao anterior: v4.1.0.

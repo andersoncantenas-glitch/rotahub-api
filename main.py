@@ -5056,6 +5056,25 @@ class HomePage(PageBase):
         else:
             subprocess.Popen([setup_path], shell=False)
 
+    def _mark_update_pending(self, target_version: str, setup_path: str):
+        st = self._load_update_state()
+        st["pending_update_version"] = str(target_version or "").strip()
+        st["pending_setup_path"] = str(setup_path or "").strip()
+        st["pending_update_started_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._save_update_state(st)
+
+    def _clear_update_pending_if_installed(self):
+        st = self._load_update_state()
+        pending_version = str(st.get("pending_update_version") or "").strip()
+        if not pending_version:
+            return
+        if self._version_tuple(APP_VERSION) < self._version_tuple(pending_version):
+            return
+        st.pop("pending_update_version", None)
+        st.pop("pending_setup_path", None)
+        st.pop("pending_update_started_at", None)
+        self._save_update_state(st)
+
     def _update_now(self):
         local_v = self._version_tuple(APP_VERSION)
         remote_v = self._version_tuple(self._remote_version)
@@ -5088,10 +5107,15 @@ class HomePage(PageBase):
             target_v = self._remote_version or "latest"
             self.set_status(f"STATUS: Baixando atualização {target_v}...")
             setup_path = self._download_setup_to_temp(url, target_v)
+            self._mark_update_pending(target_v, setup_path)
             self._run_setup_installer(setup_path)
             messagebox.showinfo(
                 "Atualização",
-                "Instalador aberto com sucesso.\nConclua a instalação para atualizar o Desktop.",
+                "Instalador aberto com sucesso.\n\n"
+                f"Versão atual em execução: {APP_VERSION}\n"
+                f"Versão alvo da instalação: {target_v}\n\n"
+                "Conclua a instalação, feche o Desktop e abra novamente.\n"
+                "A versão local só muda na tela depois da reabertura.",
             )
         except Exception as e:
             messagebox.showerror("ERRO", f"Falha ao atualizar automaticamente:\n{e}")
@@ -5236,6 +5260,7 @@ class HomePage(PageBase):
             messagebox.showerror("ERRO", f"Falha ao publicar versao:\n{e}")
 
     def _apply_manifest(self, manifest: dict):
+        self._clear_update_pending_if_installed()
         remote_version = str(manifest.get("version") or "-").strip() or "-"
         self._remote_version = remote_version
         self._remote_setup_url = str(manifest.get("setup_url") or self._remote_setup_url or "").strip()
@@ -5256,6 +5281,14 @@ class HomePage(PageBase):
             # Evita instalar downgrade quando manifesto remoto estiver atrasado.
             self._remote_setup_url = ""
         remote_display = remote_version if (remote_version != "-" and has_new_version) else "-"
+
+        st = self._load_update_state()
+        pending_version = str(st.get("pending_update_version") or "").strip()
+        if pending_version and self._version_tuple(APP_VERSION) < self._version_tuple(pending_version):
+            if remote_display != "-":
+                remote_display = f"{remote_display} | instalacao pendente: {pending_version}"
+            else:
+                remote_display = f"instalacao pendente: {pending_version}"
 
         self.lbl_version_remote.config(text=f"Versao disponivel: {remote_display}")
         self.lbl_alerts.config(text=alert_txt or "Sem alertas.")

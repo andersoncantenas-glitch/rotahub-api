@@ -8076,7 +8076,7 @@ def desktop_listar_vendas_importadas(
         cur = conn.cursor()
         if term:
             cur.execute(
-                """
+                f"""
                 SELECT id, COALESCE(selecionada,0) AS selecionada, COALESCE(pedido,'') AS pedido,
                        COALESCE(data_venda,'') AS data_venda, COALESCE(cliente,'') AS cliente,
                        COALESCE(nome_cliente,'') AS nome_cliente, COALESCE(produto,'') AS produto,
@@ -8096,7 +8096,7 @@ def desktop_listar_vendas_importadas(
             )
         else:
             cur.execute(
-                """
+                f"""
                 SELECT id, COALESCE(selecionada,0) AS selecionada, COALESCE(pedido,'') AS pedido,
                        COALESCE(data_venda,'') AS data_venda, COALESCE(cliente,'') AS cliente,
                        COALESCE(nome_cliente,'') AS nome_cliente, COALESCE(produto,'') AS produto,

@@ -1,11 +1,12 @@
 {
-  "version": "4.1.1",
-  "setup_url": "https://github.com/andersoncantenas-glitch/rotahub-api/releases/download/v4.1.1/RotaHubDesktop_Setup_4.1.1.exe",
+  "version": "4.1.2",
+  "setup_url": "https://github.com/andersoncantenas-glitch/rotahub-api/releases/download/v4.1.2/RotaHubDesktop_Setup_4.1.2.exe",
   "changelog_url": "https://raw.githubusercontent.com/andersoncantenas-glitch/rotahub-api/main/updates/changelog.txt",
   "release_kind": "patch",
-  "released_at": "2026-03-12 10:15:00",
+  "released_at": "2026-03-12 10:40:00",
   "alert": "",
   "alerts": [
-    "Melhorias no desempenho."
+    "Correcao da listagem em Importar Vendas.",
+    "Melhoria da confirmacao visual do processo de atualizacao."
   ]
 }
