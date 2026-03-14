@@ -1,0 +1,40 @@
+{
+  "app_env": "development",
+  "tenant": {
+    "tenant_id": "default-company",
+    "company_id": "default-company"
+  },
+  "runtime": {
+    "data_root": ".rotahub_runtime",
+    "db_path": ".rotahub_runtime/server/development/default-company/rotahub_server.db",
+    "sync_enabled": false,
+    "sql_mirror_api": false,
+    "require_server_binding": false,
+    "allow_remote_write": false,
+    "allow_remote_read": false,
+    "allow_dev_data_upload": false,
+    "allow_seed_db": false,
+    "allow_version_update": false,
+    "tenant_mode": "database-per-tenant",
+    "source_of_truth": "sqlite-local",
+    "schema_version": 1,
+    "desktop_secret": "rota-secreta-local"
+  },
+  "api": {
+    "base_url": "http://127.0.0.1:8000",
+    "timeout": 60.0
+  },
+  "logging": {
+    "level": "DEBUG"
+  },
+  "update": {
+    "channel": "disabled",
+    "manifest_url": "https://raw.githubusercontent.com/andersoncantenas-glitch/rotahub-api/main/updates/version.json",
+    "setup_url": "",
+    "changelog_url": "https://raw.githubusercontent.com/andersoncantenas-glitch/rotahub-api/main/updates/changelog.txt"
+  },
+  "support": {
+    "whatsapp": "",
+    "email": ""
+  }
+}

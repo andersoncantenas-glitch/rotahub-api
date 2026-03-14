@@ -1,12 +1,12 @@
 {
-  "version": "4.1.4",
-  "setup_url": "https://github.com/andersoncantenas-glitch/rotahub-api/releases/download/v4.1.4/RotaHubDesktop_Setup_4.1.4.exe",
+  "version": "4.1.5",
+  "setup_url": "",
   "changelog_url": "https://raw.githubusercontent.com/andersoncantenas-glitch/rotahub-api/main/updates/changelog.txt",
   "release_kind": "patch",
-  "released_at": "2026-03-12 11:55:00",
+  "released_at": "2026-03-13 20:55:00",
   "alert": "",
   "alerts": [
-    "Recuperacao automatica da programacao ausente no servidor em Recebimentos.",
-    "Melhoria da confirmacao visual do processo de atualizacao."
+    "Recebimentos agora consulta corretamente a API de integracao local antes do fallback da base local.",
+    "Novo fluxo separado para API local, desktop integrado e ambiente publicado."
   ]
 }

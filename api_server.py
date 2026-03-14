@@ -3855,12 +3855,17 @@ def rota_detalhe(codigo_programacao: str, m=Depends(get_current_motorista)):
         controles = cur.fetchall()
 
         rota = row_to_dict(pr)
-        rota = _apply_equipe_nome(rota, equipes_map, cur)
-        rota = _decorate_rota_row(rota, cur)
-        pend_sub = _has_pending_substituicao(cur, codigo_programacao)
-        rota["substituicao_pendente"] = 1 if pend_sub else 0
-        rota["status_operacional"] = _status_operacional_especial(rota, pend_substituicao=pend_sub)
-        rota["substituicoes"] = _list_substituicoes_por_rota(cur, codigo_programacao, limit=20)
+        try:
+            rota = _apply_equipe_nome(rota, equipes_map, cur)
+            rota = _decorate_rota_row(rota, cur)
+            pend_sub = _has_pending_substituicao(cur, codigo_programacao)
+            rota["substituicao_pendente"] = 1 if pend_sub else 0
+            rota["status_operacional"] = _status_operacional_especial(rota, pend_substituicao=pend_sub)
+            rota["substituicoes"] = _list_substituicoes_por_rota(cur, codigo_programacao, limit=20)
+        except Exception:
+            logging.debug("Falha ao decorar rota desktop; retornando cabecalho bruto.", exc_info=True)
+            rota.setdefault("substituicao_pendente", 0)
+            rota.setdefault("substituicoes", [])
 
         controle_map = {}
         for row in controles:
@@ -3934,29 +3939,44 @@ def rota_detalhe_desktop(codigo_programacao: str, _ok: bool = Depends(_require_d
         if not pr:
             raise HTTPException(status_code=404, detail="Rota não encontrada")
 
-        equipes_map = _load_equipes_map(cur)
-        itens_select_expr = _programacao_itens_select_expr(conn, "pi")
-        cur.execute(
-            """
-            SELECT """ + itens_select_expr + """
-            FROM programacao_itens pi
-            WHERE pi.codigo_programacao=?
-            ORDER BY id ASC
-            LIMIT 2000
-            """,
-            (codigo_programacao,),
-        )
-        itens = cur.fetchall()
+        try:
+            equipes_map = _load_equipes_map(cur)
+        except Exception:
+            logging.debug("Falha ao carregar equipes para rota desktop; usando fallback vazio.", exc_info=True)
+            equipes_map = {}
 
-        cur.execute(
-            """
-            SELECT *
-            FROM programacao_itens_controle
-            WHERE codigo_programacao=?
-            """,
-            (codigo_programacao,),
-        )
-        controles = cur.fetchall()
+        itens = []
+        try:
+            itens_select_expr = _programacao_itens_select_expr(conn, "pi")
+            cur.execute(
+                """
+                SELECT """ + itens_select_expr + """
+                FROM programacao_itens pi
+                WHERE pi.codigo_programacao=?
+                ORDER BY id ASC
+                LIMIT 2000
+                """,
+                (codigo_programacao,),
+            )
+            itens = cur.fetchall() or []
+        except Exception:
+            logging.debug("Falha ao carregar itens da programacao no detalhe desktop; retornando lista vazia.", exc_info=True)
+            itens = []
+
+        controles = []
+        try:
+            cur.execute(
+                """
+                SELECT *
+                FROM programacao_itens_controle
+                WHERE codigo_programacao=?
+                """,
+                (codigo_programacao,),
+            )
+            controles = cur.fetchall() or []
+        except Exception:
+            logging.debug("Falha ao carregar controles da programacao no detalhe desktop; retornando lista vazia.", exc_info=True)
+            controles = []
 
         # Último log por cliente/pedido para enriquecer rastreabilidade
         log_map = {}
@@ -3994,12 +4014,17 @@ def rota_detalhe_desktop(codigo_programacao: str, _ok: bool = Depends(_require_d
             log_map = {}
 
         rota = row_to_dict(pr)
-        rota = _apply_equipe_nome(rota, equipes_map, cur)
-        rota = _decorate_rota_row(rota, cur)
-        pend_sub = _has_pending_substituicao(cur, codigo_programacao)
-        rota["substituicao_pendente"] = 1 if pend_sub else 0
-        rota["status_operacional"] = _status_operacional_especial(rota, pend_substituicao=pend_sub)
-        rota["substituicoes"] = _list_substituicoes_por_rota(cur, codigo_programacao, limit=20)
+        try:
+            rota = _apply_equipe_nome(rota, equipes_map, cur)
+            rota = _decorate_rota_row(rota, cur)
+            pend_sub = _has_pending_substituicao(cur, codigo_programacao)
+            rota["substituicao_pendente"] = 1 if pend_sub else 0
+            rota["status_operacional"] = _status_operacional_especial(rota, pend_substituicao=pend_sub)
+            rota["substituicoes"] = _list_substituicoes_por_rota(cur, codigo_programacao, limit=20)
+        except Exception:
+            logging.debug("Falha ao decorar rota desktop; retornando cabecalho bruto.", exc_info=True)
+            rota.setdefault("substituicao_pendente", 0)
+            rota.setdefault("substituicoes", [])
 
         controle_map = {}
         for row in controles:

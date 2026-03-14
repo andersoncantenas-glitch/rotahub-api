@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 # ==========================
 # ===== INCIO DA PARTE 1 =====
 # ==========================
@@ -16914,7 +16914,9 @@ class RecebimentosPage(PageBase):
 
         synced_api = False
         try:
-            synced_api = self._sync_programacao_from_api(prog, silent=True)
+            synced_api = self._sync_programacao_from_api_desktop(prog, silent=True)
+            if not synced_api:
+                synced_api = self._sync_programacao_from_api(prog, silent=True)
         except Exception:
             logging.debug("Falha ignorada")
 
@@ -28069,6 +28071,18 @@ class LoginWindow(tk.Tk):
         self.user = user
         self.destroy()
 
+
+
+# Compartilha helpers de sincronizacao desktop com Recebimentos.
+for _shared_method in (
+    "_api_bundle_prestacao",
+    "_sync_programacao_from_api_desktop",
+    "_apply_api_programacao",
+    "_apply_api_clientes",
+    "_normalize_media_kg_ave",
+):
+    if not hasattr(RecebimentosPage, _shared_method) and hasattr(DespesasPage, _shared_method):
+        setattr(RecebimentosPage, _shared_method, getattr(DespesasPage, _shared_method))
 
 def abrir_login():
     win = LoginWindow()

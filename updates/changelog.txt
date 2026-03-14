@@ -1,3 +1,8 @@
+2026-03-13 20:55:00 - v4.1.5
+- Release automatizada (patch).
+- Versao anterior: v4.1.4.
+- Correcao do carregamento de programacoes em Recebimentos via API de integracao local e scripts dedicados para API local/desktop integrado.
+
 2026-03-12 11:55:00 - v4.1.4
 - Release automatizada (patch).
 - Versao anterior: v4.1.3.
