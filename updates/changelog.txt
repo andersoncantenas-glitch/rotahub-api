@@ -1,3 +1,8 @@
+2026-03-14 18:31:41 - v4.1.6
+- Release automatizada (patch).
+- Versao anterior: v4.1.5.
+- Correcao do bloqueio indevido por vendas antigas ausentes na fila de importacao e isolamento da reidratacao local para o servidor.
+
 2026-03-13 20:55:00 - v4.1.5
 - Release automatizada (patch).
 - Versao anterior: v4.1.4.

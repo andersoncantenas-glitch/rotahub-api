@@ -16438,24 +16438,6 @@ class RecebimentosPage(PageBase):
                     for rr in (cur.fetchall() or []):
                         itens.append(dict(rr) if hasattr(rr, "keys") else {})
 
-                linked_venda_ids = []
-                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='vendas_importadas'")
-                if cur.fetchone():
-                    cur.execute("PRAGMA table_info(vendas_importadas)")
-                    cols_vendas = {str(r[1]).lower() for r in (cur.fetchall() or [])}
-                    if {"id", "codigo_programacao"}.issubset(cols_vendas):
-                        usada_expr = "COALESCE(usada,0)" if "usada" in cols_vendas else "0"
-                        cur.execute(
-                            f"""
-                            SELECT id
-                            FROM vendas_importadas
-                            WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))
-                              AND {usada_expr}=1
-                            ORDER BY id ASC
-                            """,
-                            (prog,),
-                        )
-                        linked_venda_ids = [safe_int(r[0], 0) for r in (cur.fetchall() or []) if safe_int(r[0], 0) > 0]
         except Exception:
             logging.debug("Falha ao ler programação local para reidratar no servidor.", exc_info=True)
             return False
@@ -16521,7 +16503,7 @@ class RecebimentosPage(PageBase):
                 "caixas_carregadas": safe_int(_pick(rota, "caixas_carregadas", "nf_caixas", "qnt_cx_carregada"), 0),
                 "usuario_criacao": upper(_pick(rota, "usuario_criacao")),
                 "usuario_ultima_edicao": upper(_pick(rota, "usuario_ultima_edicao", "usuario_criacao")),
-                "linked_venda_ids": linked_venda_ids,
+                "linked_venda_ids": [],
                 "vendas_usada_em": str(_pick(rota, "data_criacao", "data") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
                 "itens": itens_payload,
             }

@@ -2950,10 +2950,19 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
             venda_map = {int(r["id"] or 0): r for r in venda_rows}
             missing_ids = [rid for rid in linked_venda_ids if rid not in venda_map]
             if missing_ids:
-                raise HTTPException(
-                    status_code=409,
-                    detail="existem vendas vinculadas informadas que nao existem mais na fila de importacao.",
-                )
+                if pid > 0:
+                    logging.warning(
+                        "desktop_rotas_upsert(%s): ignorando %s venda(s) antiga(s) ausente(s) na fila de importacao: %s",
+                        codigo,
+                        len(missing_ids),
+                        missing_ids,
+                    )
+                    linked_venda_ids = [rid for rid in linked_venda_ids if rid in venda_map]
+                else:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="existem vendas vinculadas informadas que nao existem mais na fila de importacao.",
+                    )
             for rid in linked_venda_ids:
                 row_v = venda_map.get(rid)
                 venda_prog = str((row_v["codigo_programacao"] if row_v else "") or "").strip().upper()
