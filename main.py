@@ -129,6 +129,177 @@ def compute_sidebar_width(win) -> int:
     return 290
 
 
+ROUTINE_DEFINITIONS = (
+    {
+        "page_name": "Home",
+        "sidebar_key": "home",
+        "code": 100,
+        "icon": "\U0001F3E0",
+        "nav_label": "Home",
+        "title_label": "Home",
+    },
+    {
+        "page_name": "Cadastros",
+        "sidebar_key": "cadastros",
+        "code": 300,
+        "icon": "\U0001F4CB",
+        "nav_label": "Cadastros",
+        "title_label": "Cadastros",
+    },
+    {
+        "page_name": "Rotas",
+        "sidebar_key": "rotas",
+        "code": 200,
+        "icon": "\U0001F5FA",
+        "nav_label": "Rotas",
+        "title_label": "Rotas",
+    },
+    {
+        "page_name": "ImportarVendas",
+        "sidebar_key": "vendas",
+        "code": 400,
+        "icon": "\U0001F4E5",
+        "nav_label": "Importar Vendas",
+        "title_label": "Importar Vendas",
+        "aliases": ("Importar Vendas (Excel)",),
+    },
+    {
+        "page_name": "Programacao",
+        "sidebar_key": "programacao",
+        "code": 500,
+        "icon": "\U0001F4C5",
+        "nav_label": "Programacao",
+        "title_label": "Programacao",
+    },
+    {
+        "page_name": "Recebimentos",
+        "sidebar_key": "recebimentos",
+        "code": 600,
+        "icon": "\U0001F4B5",
+        "nav_label": "Recebimentos",
+        "title_label": "Recebimentos",
+    },
+    {
+        "page_name": "Despesas",
+        "sidebar_key": "despesas",
+        "code": 700,
+        "icon": "\U0001F4B8",
+        "nav_label": "Despesas",
+        "title_label": "Despesas",
+    },
+    {
+        "page_name": "Escala",
+        "sidebar_key": "escala",
+        "code": 800,
+        "icon": "\U0001F4CA",
+        "nav_label": "Escala",
+        "title_label": "Escala",
+    },
+    {
+        "page_name": "CentroCustos",
+        "sidebar_key": "centro_custos",
+        "code": 900,
+        "icon": "\U0001F4C8",
+        "nav_label": "Centro de Custos",
+        "title_label": "Centro de Custos",
+        "aliases": ("Centro de Custos",),
+    },
+    {
+        "page_name": "Relatorios",
+        "sidebar_key": "relatorios",
+        "code": 1000,
+        "icon": "\U0001F4D1",
+        "nav_label": "Relatorios",
+        "title_label": "Relatorios",
+    },
+    {
+        "page_name": "BackupExportar",
+        "sidebar_key": "backup",
+        "code": 1100,
+        "icon": "\U0001F4E6",
+        "nav_label": "Backup / Exportar",
+        "title_label": "Backup / Exportar",
+        "aliases": ("Backup / Exportar",),
+    },
+)
+
+# Mapa central das rotinas: altere apenas aqui para renumerar o sistema
+# sem mexer nas chaves internas das paginas ou no fluxo atual.
+ROUTINE_BY_PAGE = {item["page_name"]: item for item in ROUTINE_DEFINITIONS}
+ROUTINE_BY_ALIAS = {}
+for _routine_item in ROUTINE_DEFINITIONS:
+    _aliases = {
+        _routine_item.get("page_name"),
+        _routine_item.get("nav_label"),
+        _routine_item.get("title_label"),
+    }
+    _aliases.update(_routine_item.get("aliases") or ())
+    for _alias in _aliases:
+        _alias_key = str(_alias or "").strip().lower()
+        if _alias_key:
+            ROUTINE_BY_ALIAS[_alias_key] = _routine_item["page_name"]
+
+
+def get_routine_meta(name_or_alias):
+    raw = str(name_or_alias or "").strip()
+    if not raw:
+        return None
+    meta = ROUTINE_BY_PAGE.get(raw)
+    if meta:
+        return meta
+    resolved = ROUTINE_BY_ALIAS.get(raw.lower())
+    return ROUTINE_BY_PAGE.get(resolved) if resolved else None
+
+
+def get_routine_code(name_or_alias) -> str:
+    meta = get_routine_meta(name_or_alias)
+    return str(meta.get("code") or "").strip() if meta else ""
+
+
+def format_routine_nav_label(name_or_alias, include_code: bool = False) -> str:
+    meta = get_routine_meta(name_or_alias)
+    if not meta:
+        return str(name_or_alias or "").strip()
+    label = str(meta.get("nav_label") or meta.get("title_label") or meta.get("page_name") or "").strip()
+    code = get_routine_code(name_or_alias)
+    if include_code and code:
+        return f"{code} - {label}"
+    return label
+
+
+def format_routine_title(name_or_alias, include_code: bool = False) -> str:
+    meta = get_routine_meta(name_or_alias)
+    if not meta:
+        return str(name_or_alias or "").strip()
+    label = str(meta.get("title_label") or meta.get("nav_label") or meta.get("page_name") or "").strip()
+    routine_text = f"Rotina {label}".strip()
+    code = get_routine_code(name_or_alias)
+    if include_code and code:
+        return f"{code} - {routine_text}"
+    return routine_text
+
+
+def get_routine_sidebar_key(name_or_alias):
+    meta = get_routine_meta(name_or_alias)
+    return str(meta.get("sidebar_key") or "").strip() if meta else ""
+
+
+def format_subroutine_code(name_or_alias, submenu_index) -> str:
+    # Reserva a dezena/centena base para a rotina principal e usa +1..+99
+    # para subrotinas/tabs/submenus da mesma area.
+    code = get_routine_code(name_or_alias)
+    if not code:
+        return ""
+    try:
+        base_code = int(code)
+        offset = int(str(submenu_index).strip())
+    except Exception:
+        return ""
+    if offset < 1 or offset > 99:
+        return ""
+    return str(base_code + offset)
+
+
 enable_high_dpi_awareness()
 
 
@@ -2376,9 +2547,11 @@ def apply_style(root):
 # =========================================================
 class PageBase(ttk.Frame):
     """Classe base para todas as páginas da aplicação"""
-    def __init__(self, parent, app, title):
+    def __init__(self, parent, app, page_name, title=None):
         super().__init__(parent, style="Content.TFrame")
         self.app = app
+        self.page_name = page_name
+        self.page_title_override = title
 
         # Estrutura
         self.grid_rowconfigure(2, weight=1)
@@ -2390,7 +2563,8 @@ class PageBase(ttk.Frame):
         header.grid_columnconfigure(1, weight=0)
         self.header = header
 
-        ttk.Label(header, text=title, style="Title.TLabel").grid(row=0, column=0, sticky="w")
+        self.lbl_title = ttk.Label(header, text=self._resolve_header_title(), style="Title.TLabel")
+        self.lbl_title.grid(row=0, column=0, sticky="w")
 
         self.lbl_status = ttk.Label(
             header,
@@ -2462,6 +2636,17 @@ class PageBase(ttk.Frame):
 
         self.footer_right = ttk.Frame(footer, style="Content.TFrame")
         self.footer_right.grid(row=0, column=1, sticky="e")
+
+    def _resolve_header_title(self) -> str:
+        if self.page_title_override:
+            return str(self.page_title_override)
+        if hasattr(self.app, "get_routine_title"):
+            return self.app.get_routine_title(self.page_name)
+        return str(self.page_name)
+
+    def refresh_header_title(self):
+        """Reaplica o titulo visual da rotina quando houver renumeracao central."""
+        self.lbl_title.config(text=self._resolve_header_title())
 
     def set_status(self, txt):
         """Atualiza texto de status na página"""
@@ -4293,17 +4478,14 @@ class Sidebar(ttk.Frame):
         self.canvas.bind("<Configure>", _on_canvas_configure)
 
         # Itens do menu
-        self._add_btn("home", "\U0001F3E0 Home", lambda: app.show_page("Home"))
-        self._add_btn("cadastros", "\U0001F4CB Cadastros", lambda: app.show_page("Cadastros"))
-        self._add_btn("rotas", "\U0001F5FA Rotas", lambda: app.show_page("Rotas"))
-        self._add_btn("vendas", "\U0001F4E5 Importar Vendas", lambda: app.show_page("ImportarVendas"))
-        self._add_btn("programacao", "\U0001F4C5 Programacao", lambda: app.show_page("Programacao"))
-        self._add_btn("recebimentos", "\U0001F4B5 Recebimentos", lambda: app.show_page("Recebimentos"))
-        self._add_btn("despesas", "\U0001F4B8 Despesas", lambda: app.show_page("Despesas"))
-        self._add_btn("escala", "\U0001F4CA Escala", lambda: app.show_page("Escala"))
-        self._add_btn("centro_custos", "\U0001F4C8 Centro de Custos", lambda: app.show_page("CentroCustos"))
-        self._add_btn("relatorios", "\U0001F4D1 Relatorios", lambda: app.show_page("Relatorios"))
-        self._add_btn("backup", "\U0001F4E6 Backup / Exportar", lambda: app.show_page("BackupExportar"))
+        for routine in app.iter_routines():
+            page_name = routine["page_name"]
+            btn_text = f"{routine['icon']} {app.get_routine_nav_label(page_name)}"
+            self._add_btn(
+                routine["sidebar_key"],
+                btn_text,
+                lambda page_name=page_name: app.show_page(page_name),
+            )
 
         # Rodapé
         bottom = ttk.Frame(self, style="Sidebar.TFrame", padding=(12, 14))
@@ -4454,42 +4636,56 @@ class App(tk.Tk):
         """Cria apenas páginas essenciais na inicialização para evitar travamento."""
         self._create_page_if_needed("Home")
 
+    def iter_routines(self):
+        return ROUTINE_DEFINITIONS
+
+    def get_routine_meta(self, name_or_alias):
+        return get_routine_meta(name_or_alias)
+
+    def get_routine_code(self, name_or_alias) -> str:
+        return get_routine_code(name_or_alias)
+
+    def get_routine_nav_label(self, name_or_alias, include_code: bool = False) -> str:
+        return format_routine_nav_label(name_or_alias, include_code=include_code)
+
+    def get_routine_title(self, name_or_alias, include_code: bool = False) -> str:
+        return format_routine_title(name_or_alias, include_code=include_code)
+
+    def get_routine_sidebar_key(self, name_or_alias):
+        return get_routine_sidebar_key(name_or_alias)
+
+    def get_subroutine_code(self, name_or_alias, submenu_index) -> str:
+        return format_subroutine_code(name_or_alias, submenu_index)
+
     def show_page(self, name):
         """Exibe página e atualiza menu lateral"""
-        mapping = {
-            "Home": "home",
-            "Cadastros": "cadastros",
-            "Rotas": "rotas",
-            "ImportarVendas": "vendas",
-            "Programacao": "programacao",
-            "Recebimentos": "recebimentos",
-            "Despesas": "despesas",
-            "Escala": "escala",
-            "CentroCustos": "centro_custos",
-            "Relatorios": "relatorios",
-            "BackupExportar": "backup",
-        }
-
-        if name in mapping:
-            self.sidebar.set_active(mapping[name])
+        sidebar_key = self.get_routine_sidebar_key(name)
+        if sidebar_key:
+            self.sidebar.set_active(sidebar_key)
 
         page = self._create_page_if_needed(name)
         if not page:
-            messagebox.showwarning("ATENÇÃO", f"Página '{name}' não encontrada.")
+            messagebox.showwarning("ATENÇÃO", f"Rotina '{self.get_routine_nav_label(name)}' não encontrada.")
             return
 
         page.tkraise()
         self.current_page_name = name
+        try:
+            self.title(f"{APP_TITLE_DESKTOP} | {self.get_routine_title(name)}")
+        except Exception:
+            logging.debug("Falha ignorada")
         started = time.perf_counter()
 
         def _run_on_show():
             try:
                 if page.winfo_exists() and self.current_page_name == name:
+                    if hasattr(page, "refresh_header_title"):
+                        page.refresh_header_title()
                     page.on_show()
                     elapsed_ms = (time.perf_counter() - started) * 1000.0
-                    logging.info("Tela %s exibida | %.0f ms", name, elapsed_ms)
+                    logging.info("Rotina %s exibida | %.0f ms", self.get_routine_title(name), elapsed_ms)
             except Exception as e:
-                messagebox.showerror("ERRO", f"Erro ao abrir página '{name}':\n\n{e}")
+                messagebox.showerror("ERRO", f"Erro ao abrir rotina '{self.get_routine_title(name)}':\n\n{e}")
 
         self.after_idle(_run_on_show)
 
@@ -4821,13 +5017,28 @@ class HomePage(PageBase):
         quick = ttk.Frame(card, style="CardInset.TFrame")
         quick.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         quick.grid_columnconfigure((0, 1, 2), weight=1)
-        ttk.Button(quick, text="Cadastros", style="Ghost.TButton", command=lambda: self.app.show_page("Cadastros")).grid(
+        ttk.Button(
+            quick,
+            text=self.app.get_routine_nav_label("Cadastros"),
+            style="Ghost.TButton",
+            command=lambda: self.app.show_page("Cadastros"),
+        ).grid(
             row=0, column=0, sticky="ew"
         )
-        ttk.Button(quick, text="Programacao", style="Primary.TButton", command=lambda: self.app.show_page("Programacao")).grid(
+        ttk.Button(
+            quick,
+            text=self.app.get_routine_nav_label("Programacao"),
+            style="Primary.TButton",
+            command=lambda: self.app.show_page("Programacao"),
+        ).grid(
             row=0, column=1, sticky="ew", padx=6
         )
-        ttk.Button(quick, text="Rotas", style="Ghost.TButton", command=lambda: self.app.show_page("Rotas")).grid(
+        ttk.Button(
+            quick,
+            text=self.app.get_routine_nav_label("Rotas"),
+            style="Ghost.TButton",
+            command=lambda: self.app.show_page("Rotas"),
+        ).grid(
             row=0, column=2, sticky="ew"
         )
 
@@ -4907,10 +5118,15 @@ class HomePage(PageBase):
             style="CardLabel.TLabel",
         )
         self.lbl_footer_source.pack(side="left", padx=(8, 0))
-        ttk.Button(self.footer_right, text="Atualizar Home", style="Ghost.TButton", command=self.on_show).pack(side="right")
         ttk.Button(
             self.footer_right,
-            text="Abrir Programacao",
+            text=f"Atualizar {self.app.get_routine_nav_label('Home')}",
+            style="Ghost.TButton",
+            command=self.on_show,
+        ).pack(side="right")
+        ttk.Button(
+            self.footer_right,
+            text=f"Abrir {self.app.get_routine_nav_label('Programacao')}",
             style="Primary.TButton",
             command=lambda: self.app.show_page("Programacao"),
         ).pack(side="right", padx=(0, 8))
@@ -9664,7 +9880,7 @@ class CadastrosPage(PageBase):
 # =========================================================
 class ImportarVendasPage(PageBase):
     def __init__(self, parent, app):
-        super().__init__(parent, app, "Importar Vendas (Excel)")
+        super().__init__(parent, app, "ImportarVendas")
         self._load_seq = 0
         self._import_seq = 0
         self._vinc_seq = 0
@@ -12312,6 +12528,76 @@ class ProgramacaoPage(PageBase):
             ])
         return rows
 
+    def _next_programacao_codigo(self) -> str:
+        prefix = f"PG{datetime.now().strftime('%Y')}"
+        max_suffix = 0
+
+        def _consume(codigo_ref):
+            nonlocal max_suffix
+            codigo_up = upper(str(codigo_ref or "").strip())
+            if not codigo_up.startswith(prefix):
+                return
+            tail = codigo_up[len(prefix):]
+            digits = "".join(ch for ch in tail if ch.isdigit())
+            seq = safe_int(digits, 0) if digits else 0
+            if seq > max_suffix:
+                max_suffix = seq
+
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and is_desktop_api_sync_enabled():
+            try:
+                resp = _call_api(
+                    "GET",
+                    "desktop/programacoes?modo=todas&limit=1200",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                for row in ((resp or {}).get("programacoes") or []):
+                    if isinstance(row, dict):
+                        _consume(row.get("codigo_programacao"))
+            except Exception:
+                logging.debug("Falha ao calcular proximo codigo de programacao via API.", exc_info=True)
+
+        try:
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT codigo_programacao FROM programacoes WHERE codigo_programacao LIKE ?",
+                    (f"{prefix}%",),
+                )
+                for row in (cur.fetchall() or []):
+                    _consume(row[0] if row else "")
+        except Exception:
+            logging.debug("Falha ao calcular proximo codigo de programacao local.", exc_info=True)
+
+        return f"{prefix}{max_suffix + 1:02d}"
+
+    def _increment_programacao_codigo(self, codigo: str) -> str:
+        codigo_up = upper(str(codigo or "").strip())
+        prefix = f"PG{datetime.now().strftime('%Y')}"
+        if not codigo_up.startswith(prefix):
+            return self._next_programacao_codigo()
+        tail = codigo_up[len(prefix):]
+        digits = "".join(ch for ch in tail if ch.isdigit())
+        seq = safe_int(digits, 0)
+        return f"{prefix}{seq + 1:02d}"
+
+    def _refresh_next_programacao_codigo_preview(self, force: bool = False):
+        if not hasattr(self, "ent_codigo"):
+            return
+        if upper(str(self._editing_programacao_codigo or "").strip()):
+            return
+        codigo_atual = upper(str(self.ent_codigo.get() or "").strip())
+        if codigo_atual and not force:
+            return
+        try:
+            proximo_codigo = self._next_programacao_codigo()
+            self.ent_codigo.config(state="normal")
+            self.ent_codigo.delete(0, "end")
+            self.ent_codigo.insert(0, proximo_codigo)
+            self.ent_codigo.config(state="readonly")
+        except Exception:
+            logging.debug("Falha ao atualizar preview do codigo da programacao.", exc_info=True)
+
     def _on_tree_scroll(self, event=None):
         if self._editing:
             self._commit_edit()
@@ -12547,6 +12833,7 @@ class ProgramacaoPage(PageBase):
         self.set_status("STATUS: Carregue vendas e ajuste dados antes de salvar a programação.")
         self.refresh_comboboxes()
         self._on_estimativa_tipo_change()
+        self._refresh_next_programacao_codigo_preview()
         self._refresh_programacao_status_badge()
 
     def _reset_form_after_save(self):
@@ -12573,6 +12860,7 @@ class ProgramacaoPage(PageBase):
             self._refresh_ajudantes_selected_label()
             self.limpar_itens()
             self._on_estimativa_tipo_change()
+            self._refresh_next_programacao_codigo_preview(force=True)
             self._refresh_programacao_status_badge()
         except Exception:
             logging.debug("Falha ignorada")
@@ -13733,8 +14021,9 @@ class ProgramacaoPage(PageBase):
 
                 max_tries = 5 if not is_update_existing else 1
                 last_api_error = None
+                next_codigo_try = codigo_atual if is_update_existing else self._next_programacao_codigo()
                 for _ in range(max_tries):
-                    codigo_try = codigo_atual if is_update_existing else generate_program_code()
+                    codigo_try = next_codigo_try
                     payload_sync = {
                         "codigo_programacao": codigo_try,
                         "data_criacao": data_criacao,
@@ -13749,8 +14038,11 @@ class ProgramacaoPage(PageBase):
                         "caixas_estimado": safe_int(caixas_estimado, 0),
                         "status": "ATIVA",
                         "local_rota": local_rota,
+                        "tipo_rota": local_rota,
                         "local_carregamento": local_carreg,
                         "local_carregado": local_carreg,
+                        "granja_carregada": local_carreg,
+                        "local_carreg": local_carreg,
                         "adiantamento": safe_float(adiantamento_val, 0.0),
                         "total_caixas": caixas_programadas_sync,
                         "quilos": kg_programado_sync,
@@ -13777,6 +14069,7 @@ class ProgramacaoPage(PageBase):
                         last_api_error = exc_try
                         if is_update_existing:
                             break
+                        next_codigo_try = self._increment_programacao_codigo(codigo_try)
                 if (not api_saved) and last_api_error:
                     logging.warning(
                         "Falha ao salvar programacao via API. Erro: %s",
@@ -13938,14 +14231,15 @@ class ProgramacaoPage(PageBase):
                 # Insert compatÃÂÂvel (tenta gerar código único)
                 if not row_exist:
                     inserted = False
+                    codigo = self._next_programacao_codigo()
                     for _ in range(5):
-                        codigo = generate_program_code()
                         try:
                             cur.execute(
                                 "SELECT 1 FROM programacoes WHERE codigo_programacao=? ORDER BY id DESC LIMIT 1",
                                 (codigo,)
                             )
                             if cur.fetchone():
+                                codigo = self._increment_programacao_codigo(codigo)
                                 continue
                         except Exception:
                             logging.debug("Falha ignorada")
@@ -13969,6 +14263,7 @@ class ProgramacaoPage(PageBase):
                             inserted = True
                             break
                         except sqlite3.IntegrityError:
+                            codigo = self._increment_programacao_codigo(codigo)
                             continue
                         except Exception:
                             try:
@@ -13979,6 +14274,7 @@ class ProgramacaoPage(PageBase):
                                 inserted = True
                                 break
                             except sqlite3.IntegrityError:
+                                codigo = self._increment_programacao_codigo(codigo)
                                 continue
 
                     if not inserted:
@@ -14244,7 +14540,11 @@ class ProgramacaoPage(PageBase):
                     "caixas_estimado": safe_int(caixas_estimado, 0),
                     "status": "ATIVA",
                     "local_rota": local_rota,
+                    "tipo_rota": local_rota,
                     "local_carregamento": local_carreg,
+                    "local_carregado": local_carreg,
+                    "granja_carregada": local_carreg,
+                    "local_carreg": local_carreg,
                     "adiantamento": safe_float(adiantamento_val, 0.0),
                     "total_caixas": safe_int(total_caixas, 0),
                     "quilos": safe_float(total_quilos, 0.0),
@@ -14293,6 +14593,495 @@ class ProgramacaoPage(PageBase):
 
         self._reset_form_after_save()
 
+    def _preview_sheet_mode_label(self, mode_value: str) -> str:
+        return {
+            "fit_page": "Inteira",
+            "fit_width": "Largura",
+            "actual": "Real",
+        }.get(str(mode_value or "").strip(), "Inteira")
+
+    def _get_default_windows_printer(self) -> dict:
+        if os.name != "nt":
+            return {}
+        try:
+            winspool = ctypes.windll.winspool.drv
+            needed = ctypes.c_uint(0)
+            winspool.GetDefaultPrinterW(None, ctypes.byref(needed))
+            if needed.value <= 0:
+                return {}
+            buf = ctypes.create_unicode_buffer(needed.value)
+            if not winspool.GetDefaultPrinterW(buf, ctypes.byref(needed)):
+                return {}
+            name = str(buf.value or "").strip()
+            if name:
+                return {"name": name, "driver": "", "port": "", "default": True}
+        except Exception:
+            logging.debug("Falha ao obter impressora padrao do Windows.", exc_info=True)
+        return {}
+
+    def _list_windows_printers(self, force: bool = False):
+        cached = tuple(getattr(self, "_windows_printers_cache", ()) or ())
+        cached_at = safe_float(getattr(self, "_windows_printers_cache_at", 0.0), 0.0)
+        if cached and not force and (time.time() - cached_at) <= 20.0:
+            return [dict(item) for item in cached]
+
+        printers = []
+        if os.name == "nt":
+            try:
+                ps_exe = os.path.join(
+                    os.environ.get("WINDIR", r"C:\Windows"),
+                    "System32",
+                    "WindowsPowerShell",
+                    "v1.0",
+                    "powershell.exe",
+                )
+                cmd = [
+                    ps_exe if os.path.exists(ps_exe) else "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    "Get-CimInstance Win32_Printer | "
+                    "Select-Object Name,DriverName,PortName,Default | "
+                    "ConvertTo-Json -Compress",
+                ]
+                resp = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=12,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                raw = str(resp.stdout or "").strip()
+                if resp.returncode == 0 and raw and raw.lower() != "null":
+                    data = json.loads(raw)
+                    if isinstance(data, dict):
+                        data = [data]
+                    for item in data or []:
+                        if not isinstance(item, dict):
+                            continue
+                        name = str(item.get("Name") or item.get("name") or "").strip()
+                        if not name:
+                            continue
+                        printers.append(
+                            {
+                                "name": name,
+                                "driver": str(item.get("DriverName") or item.get("driver") or "").strip(),
+                                "port": str(item.get("PortName") or item.get("port") or "").strip(),
+                                "default": bool(item.get("Default") or item.get("default")),
+                            }
+                        )
+                elif resp.returncode != 0:
+                    logging.debug(
+                        "Falha ao consultar impressoras via PowerShell: %s",
+                        (resp.stderr or resp.stdout or "").strip(),
+                    )
+            except Exception:
+                logging.debug("Falha ao listar impressoras instaladas.", exc_info=True)
+
+        if not printers:
+            default = self._get_default_windows_printer()
+            if default:
+                printers = [default]
+
+        dedup = {}
+        for item in printers:
+            key = upper(item.get("name") or "")
+            if key and key not in dedup:
+                dedup[key] = item
+        printers = sorted(dedup.values(), key=lambda item: (not bool(item.get("default")), upper(item.get("name") or "")))
+
+        self._windows_printers_cache = tuple(dict(item) for item in printers)
+        self._windows_printers_cache_at = time.time()
+        return [dict(item) for item in printers]
+
+    def _select_windows_printer(
+        self,
+        parent,
+        document_label: str,
+        sheet_mode: str = "",
+        zoom_percent=None,
+        extra_hint: str = "",
+    ):
+        printers = self._list_windows_printers()
+        if not printers:
+            messagebox.showerror(
+                "Impressoras",
+                "Nenhuma impressora instalada foi encontrada no Windows.\n\n"
+                "Verifique o cadastro da impressora e tente novamente.",
+                parent=parent or self.app,
+            )
+            return None
+
+        win = tk.Toplevel(parent or self.app)
+        win.title("Selecionar Impressora")
+        win.geometry("640x360")
+        win.resizable(False, False)
+        win.transient(parent or self.app)
+        win.grab_set()
+
+        outer = ttk.Frame(win, style="Content.TFrame", padding=14)
+        outer.pack(fill="both", expand=True)
+        card = ttk.Frame(outer, style="Card.TFrame", padding=14)
+        card.pack(fill="both", expand=True)
+        card.grid_columnconfigure(0, weight=1)
+
+        ttk.Label(card, text="Imprimir", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            card,
+            text=f"Documento: {document_label}",
+            style="CardLabel.TLabel",
+            wraplength=500,
+            justify="left",
+        ).grid(row=1, column=0, sticky="w", pady=(8, 4))
+
+        if sheet_mode or zoom_percent not in (None, ""):
+            ajuste_txt = f"Ajuste de folha no preview: {sheet_mode or '-'}"
+            if zoom_percent not in (None, ""):
+                ajuste_txt += f" | Zoom: {safe_int(zoom_percent, 100)}%"
+            ttk.Label(card, text=ajuste_txt, style="CardLabel.TLabel").grid(row=2, column=0, sticky="w", pady=(0, 10))
+
+        if extra_hint:
+            ttk.Label(
+                card,
+                text=extra_hint,
+                style="CardLabel.TLabel",
+                wraplength=500,
+                justify="left",
+            ).grid(row=3, column=0, sticky="w", pady=(0, 10))
+            combo_row = 4
+        else:
+            combo_row = 3
+
+        ttk.Label(card, text="Impressora instalada", style="CardLabel.TLabel").grid(row=combo_row, column=0, sticky="w")
+        cb = ttk.Combobox(card, state="readonly", width=68)
+        cb.grid(row=combo_row + 1, column=0, sticky="ew", pady=(4, 0))
+
+        labels = []
+        label_to_printer = {}
+        default_index = 0
+        for idx, item in enumerate(printers):
+            suffix = " (PADRAO)" if item.get("default") else ""
+            label = f"{item.get('name') or '-'}{suffix}"
+            labels.append(label)
+            label_to_printer[label] = item
+            if item.get("default"):
+                default_index = idx
+        cb["values"] = labels
+        cb.current(default_index)
+
+        detail_var = tk.StringVar()
+        ttk.Label(card, textvariable=detail_var, style="CardLabel.TLabel", wraplength=500, justify="left").grid(
+            row=combo_row + 2, column=0, sticky="w", pady=(10, 0)
+        )
+
+        result = {"printer": None}
+
+        def _refresh_detail(_e=None):
+            printer = label_to_printer.get(cb.get()) or {}
+            tipo = "Padrao do Windows" if printer.get("default") else "Impressora instalada"
+            detail_var.set(
+                f"{tipo} | Driver: {printer.get('driver') or '-'} | Porta: {printer.get('port') or '-'}"
+            )
+
+        def _confirm():
+            result["printer"] = label_to_printer.get(cb.get())
+            win.destroy()
+
+        def _cancel():
+            result["printer"] = None
+            win.destroy()
+
+        cb.bind("<<ComboboxSelected>>", _refresh_detail)
+        win.bind("<Return>", lambda _e: _confirm())
+        win.bind("<Escape>", lambda _e: _cancel())
+        win.protocol("WM_DELETE_WINDOW", _cancel)
+        _refresh_detail()
+
+        btns = ttk.Frame(card, style="Card.TFrame")
+        btns.grid(row=combo_row + 3, column=0, sticky="e", pady=(16, 0))
+        ttk.Button(btns, text="CANCELAR", style="Ghost.TButton", command=_cancel).pack(side="right")
+        ttk.Button(btns, text="IMPRIMIR", style="Primary.TButton", command=_confirm).pack(side="right", padx=(0, 8))
+
+        try:
+            win.update_idletasks()
+            screen_w = max(int(win.winfo_screenwidth() or 0), 900)
+            screen_h = max(int(win.winfo_screenheight() or 0), 680)
+            req_w = max(640, min(int(outer.winfo_reqwidth() + 44), screen_w - 40))
+            req_h = max(360, min(int(outer.winfo_reqheight() + 44), screen_h - 60))
+
+            owner = parent or self.app
+            try:
+                owner.update_idletasks()
+                base_x = int(owner.winfo_rootx() or 0)
+                base_y = int(owner.winfo_rooty() or 0)
+                base_w = max(int(owner.winfo_width() or 0), req_w)
+                base_h = max(int(owner.winfo_height() or 0), req_h)
+                pos_x = base_x + max(int((base_w - req_w) / 2), 16)
+                pos_y = base_y + max(int((base_h - req_h) / 2), 16)
+            except Exception:
+                pos_x = max(int((screen_w - req_w) / 2), 16)
+                pos_y = max(int((screen_h - req_h) / 2), 16)
+
+            pos_x = max(8, min(pos_x, max(screen_w - req_w - 8, 8)))
+            pos_y = max(8, min(pos_y, max(screen_h - req_h - 32, 8)))
+            win.geometry(f"{req_w}x{req_h}+{pos_x}+{pos_y}")
+        except Exception:
+            logging.debug("Falha ao ajustar dimensoes da janela de impressora.", exc_info=True)
+
+        win.wait_window()
+        return result.get("printer")
+
+    def _shell_print_error_text(self, code: int) -> str:
+        return {
+            0: "Memoria insuficiente.",
+            2: "Arquivo nao encontrado.",
+            3: "Caminho nao encontrado.",
+            5: "Acesso negado.",
+            8: "Memoria insuficiente.",
+            26: "Nao foi possivel compartilhar o arquivo para impressao.",
+            27: "Associacao de impressao incompleta no Windows.",
+            28: "Tempo esgotado ao iniciar o app de impressao.",
+            29: "Falha ao executar o app associado ao PDF.",
+            30: "A impressora esta ocupada ou sem resposta.",
+            31: "Nenhum aplicativo associado ao PDF com suporte de impressao.",
+        }.get(int(code or 0), f"Codigo do Windows: {int(code or 0)}")
+
+    def _quote_windows_print_arg(self, value: str) -> str:
+        return '"' + str(value or "").replace('"', '""') + '"'
+
+    def _send_file_to_windows_printer(self, file_path: str, printer: dict):
+        if os.name != "nt":
+            raise RuntimeError("Impressao direta disponivel apenas no Windows.")
+
+        file_path = os.path.abspath(file_path)
+        printer_name = str((printer or {}).get("name") or "").strip()
+        driver_name = str((printer or {}).get("driver") or "").strip()
+        port_name = str((printer or {}).get("port") or "").strip()
+
+        shell32 = ctypes.windll.shell32
+        result = 0
+
+        if printer_name:
+            params = " ".join(
+                self._quote_windows_print_arg(part)
+                for part in (printer_name, driver_name, port_name)
+                if str(part or "").strip()
+            )
+            if params:
+                result = int(shell32.ShellExecuteW(None, "printto", file_path, params, None, 0))
+            if result <= 32:
+                result = int(
+                    shell32.ShellExecuteW(
+                        None,
+                        "printto",
+                        file_path,
+                        self._quote_windows_print_arg(printer_name),
+                        None,
+                        0,
+                    )
+                )
+
+        if result <= 32 and (not printer_name or printer.get("default")):
+            result = int(shell32.ShellExecuteW(None, "print", file_path, None, None, 0))
+
+        if result <= 32:
+            raise RuntimeError(self._shell_print_error_text(result))
+
+    def _build_temp_pdf_path(self, prefix: str, codigo: str) -> str:
+        safe_code = re.sub(r"[^A-Z0-9_-]+", "_", upper(str(codigo or "").strip()) or "DOC")
+        file_name = f"{prefix}_{safe_code}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.pdf"
+        return os.path.join(tempfile.gettempdir(), file_name)
+
+    def _gerar_pdf_programacao_salva_em_path(
+        self,
+        path,
+        codigo,
+        motorista,
+        veiculo,
+        equipe,
+        kg_estimado,
+        tipo_estimativa="KG",
+        caixas_estimado=0,
+        usuario_criacao="",
+        itens_override=None,
+        usuario_edicao_override="",
+        data_emissao_override="",
+    ):
+        itens = list(itens_override or [])
+        if not itens:
+            for iid in self.tree.get_children():
+                itens.append(self._get_row_values(iid))
+
+        if not itens:
+            raise ValueError("Sem itens na programacao.")
+
+        usuario_edicao = upper(str(usuario_edicao_override or "").strip())
+        try:
+            meta_prog = self._buscar_meta_programacao(codigo)
+            usuario_criacao = upper(str(meta_prog.get("usuario_criacao") or usuario_criacao or "").strip())
+            usuario_edicao = upper(str(meta_prog.get("usuario_ultima_edicao") or usuario_edicao or "").strip())
+        except Exception:
+            usuario_criacao = upper((usuario_criacao or "").strip())
+            usuario_edicao = upper((usuario_edicao or "").strip())
+
+        c = canvas.Canvas(path, pagesize=A4)
+        w, h = A4
+        to_txt = lambda v: fix_mojibake_text(str(v or ""))
+
+        y = h - 60
+        c.setFont("Helvetica-Bold", 14)
+        c.drawString(40, y, f"PROGRAMACAO: {to_txt(codigo)}")
+        y -= 22
+
+        c.setFont("Helvetica", 10)
+        data_emissao = str(data_emissao_override or datetime.now().strftime('%d/%m/%Y %H:%M'))
+        c.drawString(40, y, f"Data: {data_emissao}")
+        y -= 16
+        equipe_txt = self._resolve_equipe_ajudantes(equipe)
+        c.drawString(40, y, f"Motorista: {to_txt(motorista)}  |  Veiculo: {to_txt(veiculo)}  |  Equipe: {to_txt(equipe_txt)}")
+        y -= 16
+        if upper(tipo_estimativa) == "CX":
+            c.drawString(40, y, f"Estimado (FOB): {safe_int(caixas_estimado, 0)} CX")
+        else:
+            c.drawString(40, y, f"Estimado (CIF): {safe_float(kg_estimado, 0.0):.2f} KG")
+        y -= 16
+        c.drawString(
+            40,
+            y,
+            f"Criado por: {to_txt(usuario_criacao or '-')}  |  Ultima edicao: {to_txt(usuario_edicao or '-')}",
+        )
+        y -= 24
+
+        c.setFont("Helvetica-Bold", 9)
+        c.drawString(40, y, "CLIENTE / ENDERECO")
+        c.drawString(320, y, "CX")
+        c.drawString(370, y, "PRECO")
+        c.drawString(430, y, "VENDEDOR")
+        c.drawString(520, y, "PEDIDO")
+        y -= 10
+        c.line(40, y, w - 40, y)
+        y -= 14
+
+        c.setFont("Helvetica", 8)
+
+        def _extrair_cidade(endereco_raw):
+            txt = upper(str(endereco_raw or "").strip())
+            if not txt:
+                return ""
+            for sep in (" - ", ",", "/", ";"):
+                if sep in txt:
+                    partes = [p.strip() for p in txt.split(sep) if p.strip()]
+                    if partes:
+                        return partes[-1]
+            return txt
+
+        for (cod_cliente, nome_cliente, produto, endereco, caixas, kg, preco, vendedor, pedido, obs) in itens:
+            if y < 95:
+                c.showPage()
+                y = h - 60
+                c.setFont("Helvetica", 8)
+
+            cidade = _extrair_cidade(endereco)
+            linha_cliente = f"{cidade} - {cod_cliente} - {nome_cliente}" if cidade else f"{cod_cliente} - {nome_cliente}"
+            if len(linha_cliente) > 78:
+                linha_cliente = linha_cliente[:78] + "..."
+
+            c.drawString(40, y, to_txt(linha_cliente))
+            c.drawRightString(340, y, str(caixas))
+            c.drawRightString(410, y, str(preco))
+            c.drawString(430, y, to_txt(vendedor)[:12])
+            c.drawString(520, y, to_txt(pedido)[:18])
+            y -= 12
+
+            if obs:
+                obs_line = f"OBS: {to_txt(obs)}"
+                if len(obs_line) > 110:
+                    obs_line = obs_line[:110] + "..."
+            else:
+                obs_line = "OBS: ________________________________________________"
+            c.setFont("Helvetica-Oblique", 8)
+            c.drawString(50, y, obs_line)
+            c.setFont("Helvetica", 8)
+            y -= 10
+            y -= 4
+
+        if y < 40:
+            c.showPage()
+            y = h - 60
+
+        c.setFont("Helvetica-Oblique", 9)
+        c.drawCentredString(w / 2, 26, '"Tudo posso naquele que me fortalece." (Filipenses 4:13)')
+        c.save()
+        return path
+
+    def _imprimir_programacao_salva(
+        self,
+        codigo,
+        motorista,
+        veiculo,
+        equipe,
+        kg_estimado,
+        tipo_estimativa="KG",
+        caixas_estimado=0,
+        usuario_criacao="",
+        itens_override=None,
+        usuario_edicao_override="",
+        data_emissao_override="",
+        parent=None,
+        preview_mode="fit_page",
+        preview_zoom=100,
+    ):
+        if not require_reportlab():
+            return None
+
+        printer = self._select_windows_printer(
+            parent=parent or self.app,
+            document_label=f"Folha da Programacao {codigo}",
+            sheet_mode=self._preview_sheet_mode_label(preview_mode),
+            zoom_percent=preview_zoom,
+            extra_hint=(
+                "O preview continua com os ajustes de folha/zoom. "
+                "A regulagem final de papel depende do driver da impressora selecionada."
+            ),
+        )
+        if not printer:
+            return None
+
+        path = self._build_temp_pdf_path("PROGRAMACAO", codigo)
+        try:
+            self._gerar_pdf_programacao_salva_em_path(
+                path,
+                codigo,
+                motorista,
+                veiculo,
+                equipe,
+                kg_estimado,
+                tipo_estimativa,
+                caixas_estimado,
+                usuario_criacao,
+                itens_override=itens_override,
+                usuario_edicao_override=usuario_edicao_override,
+                data_emissao_override=data_emissao_override,
+            )
+            self._send_file_to_windows_printer(path, printer)
+            messagebox.showinfo(
+                "Impressao enviada",
+                f"Folha da programacao {codigo} enviada para:\n{printer.get('name') or 'IMPRESSORA PADRAO'}",
+                parent=parent or self.app,
+            )
+            return path
+        except Exception as exc:
+            messagebox.showerror(
+                "ERRO",
+                "Nao foi possivel enviar a folha da programacao para a impressora.\n\n"
+                f"Detalhe: {exc}",
+                parent=parent or self.app,
+            )
+            return None
+
     def gerar_pdf_programacao_salva(
         self,
         codigo,
@@ -14319,121 +15108,24 @@ class ProgramacaoPage(PageBase):
         if not path:
             return None
 
-        itens = list(itens_override or [])
-        if not itens:
-            for iid in self.tree.get_children():
-                itens.append(self._get_row_values(iid))
-
-        if not itens:
-            messagebox.showwarning("ATENÇÃO", "Sem itens na programação.")
-            return
-
         try:
-            usuario_edicao = upper(str(usuario_edicao_override or "").strip())
-            try:
-                meta_prog = self._buscar_meta_programacao(codigo)
-                usuario_criacao = upper(str(meta_prog.get("usuario_criacao") or usuario_criacao or "").strip())
-                usuario_edicao = upper(str(meta_prog.get("usuario_ultima_edicao") or usuario_edicao or "").strip())
-            except Exception:
-                usuario_criacao = upper((usuario_criacao or "").strip())
-                usuario_edicao = upper((usuario_edicao or "").strip())
-
-            c = canvas.Canvas(path, pagesize=A4)
-            w, h = A4
-            to_txt = lambda v: fix_mojibake_text(str(v or ""))
-
-            y = h - 60
-            c.setFont("Helvetica-Bold", 14)
-            c.drawString(40, y, f"PROGRAMACAO: {to_txt(codigo)}")
-            y -= 22
-
-            c.setFont("Helvetica", 10)
-            data_emissao = str(data_emissao_override or datetime.now().strftime('%d/%m/%Y %H:%M'))
-            c.drawString(40, y, f"Data: {data_emissao}")
-            y -= 16
-            equipe_txt = self._resolve_equipe_ajudantes(equipe)
-            c.drawString(40, y, f"Motorista: {to_txt(motorista)}  |  Veiculo: {to_txt(veiculo)}  |  Equipe: {to_txt(equipe_txt)}")
-            y -= 16
-            if upper(tipo_estimativa) == "CX":
-                c.drawString(40, y, f"Estimado (FOB): {safe_int(caixas_estimado, 0)} CX")
-            else:
-                c.drawString(40, y, f"Estimado (CIF): {safe_float(kg_estimado, 0.0):.2f} KG")
-            y -= 16
-            c.drawString(
-                40,
-                y,
-                f"Criado por: {to_txt(usuario_criacao or '-')}  |  Ultima edicao: {to_txt(usuario_edicao or '-')}",
+            self._gerar_pdf_programacao_salva_em_path(
+                path,
+                codigo,
+                motorista,
+                veiculo,
+                equipe,
+                kg_estimado,
+                tipo_estimativa,
+                caixas_estimado,
+                usuario_criacao,
+                itens_override=itens_override,
+                usuario_edicao_override=usuario_edicao_override,
+                data_emissao_override=data_emissao_override,
             )
-            y -= 24
-
-            c.setFont("Helvetica-Bold", 9)
-            c.drawString(40, y, "CLIENTE / ENDERECO")
-            c.drawString(320, y, "CX")
-            c.drawString(370, y, "PRECO")
-            c.drawString(430, y, "VENDEDOR")
-            c.drawString(520, y, "PEDIDO")
-            y -= 10
-            c.line(40, y, w - 40, y)
-            y -= 14
-
-            c.setFont("Helvetica", 8)
-
-            def _extrair_cidade(endereco_raw):
-                txt = upper(str(endereco_raw or "").strip())
-                if not txt:
-                    return ""
-                for sep in (" - ", ",", "/", ";"):
-                    if sep in txt:
-                        partes = [p.strip() for p in txt.split(sep) if p.strip()]
-                        if partes:
-                            return partes[-1]
-                return txt
-
-            for (cod_cliente, nome_cliente, produto, endereco, caixas, kg, preco, vendedor, pedido, obs) in itens:
-                # Espaco minimo para 2 linhas (cliente + observacao) + espaco extra
-                if y < 95:
-                    c.showPage()
-                    y = h - 60
-                    c.setFont("Helvetica", 8)
-
-                cidade = _extrair_cidade(endereco)
-                linha_cliente = f"{cidade} - {cod_cliente} - {nome_cliente}" if cidade else f"{cod_cliente} - {nome_cliente}"
-                if len(linha_cliente) > 78:
-                    linha_cliente = linha_cliente[:78] + "..."
-
-                c.drawString(40, y, to_txt(linha_cliente))
-                c.drawRightString(340, y, str(caixas))
-                c.drawRightString(410, y, str(preco))
-                c.drawString(430, y, to_txt(vendedor)[:12])
-                c.drawString(520, y, to_txt(pedido)[:18])
-                y -= 12
-
-                # Campo de observacao no espaco abaixo do cliente
-                if obs:
-                    obs_line = f"OBS: {to_txt(obs)}"
-                    if len(obs_line) > 110:
-                        obs_line = obs_line[:110] + "..."
-                else:
-                    obs_line = "OBS: ________________________________________________"
-                c.setFont("Helvetica-Oblique", 8)
-                c.drawString(50, y, obs_line)
-                c.setFont("Helvetica", 8)
-                y -= 10
-
-                # Espaco extra entre clientes
-                y -= 4
-
-            if y < 40:
-                c.showPage()
-                y = h - 60
-
-            c.setFont("Helvetica-Oblique", 9)
-            c.drawCentredString(w / 2, 26, '"Tudo posso naquele que me fortalece." (Filipenses 4:13)')
-
-            c.save()
             messagebox.showinfo("OK", "PDF gerado com sucesso! (A4 pronto para impressão)")
             if perguntar_romaneios and messagebox.askyesno("Romaneios", "Deseja gerar os romaneios de entrega desta programacao agora?"):
-                self.imprimir_romaneios_programacao()
+                self.imprimir_romaneios_programacao(codigo_override=codigo)
             return path
 
         except Exception as e:
@@ -14805,8 +15497,40 @@ class ProgramacaoPage(PageBase):
                 data_emissao_override=meta_preview.get("data_emissao") or "",
             )
 
+        def _imprimir_programacao():
+            return self._imprimir_programacao_salva(
+                codigo,
+                motorista,
+                veiculo,
+                equipe,
+                kg_estimado,
+                tipo_estimativa,
+                caixas_estimado,
+                usuario_criacao,
+                itens_override=[
+                    (
+                        item.get("cod_cliente"),
+                        item.get("nome_cliente"),
+                        "",
+                        item.get("endereco"),
+                        item.get("qnt_caixas"),
+                        0,
+                        item.get("preco"),
+                        item.get("vendedor"),
+                        item.get("pedido"),
+                        item.get("obs"),
+                    )
+                    for item in itens_preview
+                ],
+                usuario_edicao_override=meta_preview.get("usuario_ultima_edicao") or "",
+                data_emissao_override=meta_preview.get("data_emissao") or "",
+                parent=top,
+                preview_mode=preview_mode.get(),
+                preview_zoom=preview_zoom.get(),
+            )
+
         ttk.Button(toolbar, text="Atualizar", style="Ghost.TButton", command=_abrir_mesma_preview).pack(side="left")
-        ttk.Button(toolbar, text="\U0001F5A8 Imprimir", style="Primary.TButton", command=_gerar_pdf).pack(side="left", padx=(8, 0))
+        ttk.Button(toolbar, text="\U0001F5A8 Imprimir", style="Primary.TButton", command=_imprimir_programacao).pack(side="left", padx=(8, 0))
         ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=10)
         ttk.Label(toolbar, text="Folha:", style="CardLabel.TLabel").pack(side="left", padx=(0, 4))
         ttk.Radiobutton(toolbar, text="Inteira", value="fit_page", variable=preview_mode).pack(side="left")
@@ -14856,6 +15580,12 @@ class ProgramacaoPage(PageBase):
 
         ttk.Button(footer, text="Fechar", style="Ghost.TButton", command=top.destroy).pack(side="right")
         ttk.Button(footer, text="GERAR PDF", style="Primary.TButton", command=_gerar_pdf).pack(side="right", padx=(0, 8))
+        ttk.Button(
+            footer,
+            text="IMPRIMIR ROMANEIOS",
+            style="Ghost.TButton",
+            command=lambda: self.imprimir_romaneios_programacao(codigo_override=codigo),
+        ).pack(side="right", padx=(0, 8))
 
 
     def _normalizar_preco_item(self, valor):
@@ -15178,6 +15908,41 @@ class ProgramacaoPage(PageBase):
 
         c.save()
 
+    def _imprimir_romaneios(self, codigo: str, itens: list, meta: dict, parent=None):
+        if not require_reportlab():
+            return None
+
+        printer = self._select_windows_printer(
+            parent=parent or self.app,
+            document_label=f"Romaneios de Entrega {codigo}",
+            sheet_mode="Formulario continuo 240 x 279,4 mm",
+            extra_hint=(
+                "Os romaneios serao enviados com as duas vias (cliente e empresa) "
+                "para a impressora selecionada."
+            ),
+        )
+        if not printer:
+            return None
+
+        path = self._build_temp_pdf_path("ROMANEIOS", codigo)
+        try:
+            self._gerar_pdf_romaneios(path, codigo, itens, meta)
+            self._send_file_to_windows_printer(path, printer)
+            messagebox.showinfo(
+                "Impressao enviada",
+                f"Romaneios da programacao {codigo} enviados para:\n{printer.get('name') or 'IMPRESSORA PADRAO'}",
+                parent=parent or self.app,
+            )
+            return path
+        except Exception as exc:
+            messagebox.showerror(
+                "ERRO",
+                "Nao foi possivel enviar os romaneios para a impressora.\n\n"
+                f"Detalhe: {exc}",
+                parent=parent or self.app,
+            )
+            return None
+
     def _draw_romaneio_preview_on_canvas(self, cv, w: int, h: int, codigo: str, meta: dict, item: dict, via_label: str):
         cv.delete("all")
         # Mantem preview com proporcao real da via: 240mm x 139,7mm
@@ -15406,9 +16171,16 @@ class ProgramacaoPage(PageBase):
             except Exception as e:
                 messagebox.showerror("ERRO", f"Erro ao gerar romaneios: {str(e)}")
 
+        def _imprimir():
+            self._imprimir_romaneios(codigo, itens, meta, parent=win)
+
+        ttk.Label(top, text="Folha: formulário contínuo 240 x 279,4 mm", style="CardLabel.TLabel").pack(side="left", padx=(18, 0))
+        ttk.Button(top, text="\U0001F5A8 Imprimir", style="Primary.TButton", command=_imprimir).pack(side="right")
+
         ttk.Button(bottom, text="Anterior", style="Ghost.TButton", command=_prev).pack(side="left")
         ttk.Button(bottom, text="Proximo", style="Ghost.TButton", command=_next).pack(side="left", padx=8)
         ttk.Button(bottom, text="GERAR PDF", style="Primary.TButton", command=_export_pdf).pack(side="right")
+        ttk.Button(bottom, text="IMPRIMIR", style="Ghost.TButton", command=_imprimir).pack(side="right", padx=(0, 8))
         ttk.Button(bottom, text="Fechar", style="Danger.TButton", command=win.destroy).pack(side="right", padx=8)
 
         cb.bind("<<ComboboxSelected>>", _on_sel)
@@ -15416,11 +16188,11 @@ class ProgramacaoPage(PageBase):
         preview.bind("<Configure>", lambda _e: _render())
         _render()
 
-    def imprimir_romaneios_programacao(self):
+    def imprimir_romaneios_programacao(self, codigo_override=None):
         if not require_reportlab():
             return
 
-        codigo = upper((self.ent_codigo.get() or "").strip())
+        codigo = upper(str(codigo_override or "").strip()) or upper((self.ent_codigo.get() or "").strip())
         if not codigo:
             codigo = upper(simple_input("Romaneios", "Informe o codigo da programacao:", master=self.app, allow_empty=False) or "")
         if not codigo:
@@ -16491,9 +17263,12 @@ class RecebimentosPage(PageBase):
                 "tipo_estimativa": upper(str(_pick(rota, "tipo_estimativa", default="KG") or "KG")),
                 "caixas_estimado": safe_int(_pick(rota, "caixas_estimado"), 0),
                 "status": status_local or "ATIVA",
-                "local_rota": upper(_pick(rota, "local_rota", "tipo_rota")),
+                "local_rota": upper(_pick(rota, "local_rota", "tipo_rota", "local")),
+                "tipo_rota": upper(_pick(rota, "tipo_rota", "local_rota", "local")),
                 "local_carregamento": upper(_pick(rota, "local_carregamento", "local_carregado", "granja_carregada", "local_carreg")),
                 "local_carregado": upper(_pick(rota, "local_carregado", "local_carregamento", "granja_carregada", "local_carreg")),
+                "granja_carregada": upper(_pick(rota, "granja_carregada", "local_carregamento", "local_carregado", "local_carreg")),
+                "local_carreg": upper(_pick(rota, "local_carreg", "local_carregamento", "local_carregado", "granja_carregada")),
                 "adiantamento": safe_float(_pick(rota, "adiantamento", "adiantamento_rota"), 0.0),
                 "total_caixas": safe_int(_pick(rota, "total_caixas", "nf_caixas", "caixas_carregadas"), 0),
                 "quilos": safe_float(_pick(rota, "quilos", "nf_kg", "kg_carregado"), 0.0),
@@ -16930,7 +17705,7 @@ class RecebimentosPage(PageBase):
                     hora_saida = str(rota_obj.get("hora_saida") or "")
                     data_chegada = str(rota_obj.get("data_chegada") or "")
                     hora_chegada = str(rota_obj.get("hora_chegada") or "")
-                    rota = str(rota_obj.get("local_rota") or rota_obj.get("tipo_rota") or "")
+                    rota = str(rota_obj.get("local_rota") or rota_obj.get("tipo_rota") or rota_obj.get("local") or "")
                     diaria_motorista = safe_float(rota_obj.get("diaria_motorista_valor"), 0.0)
                     found_prog = True
             except Exception:
@@ -16956,7 +17731,7 @@ class RecebimentosPage(PageBase):
                         hora_saida = str(rota_obj.get("hora_saida") or "")
                         data_chegada = str(rota_obj.get("data_chegada") or "")
                         hora_chegada = str(rota_obj.get("hora_chegada") or "")
-                        rota = str(rota_obj.get("local_rota") or rota_obj.get("tipo_rota") or "")
+                        rota = str(rota_obj.get("local_rota") or rota_obj.get("tipo_rota") or rota_obj.get("local") or "")
                         diaria_motorista = safe_float(rota_obj.get("diaria_motorista_valor"), 0.0)
                         found_prog = True
                         self.set_status(f"STATUS: Programação {prog} reidratada no servidor para Recebimentos.")
@@ -16975,7 +17750,11 @@ class RecebimentosPage(PageBase):
                     cols_prog = [str(r[1]).lower() for r in cur.fetchall()]
                 except Exception:
                     cols_prog = []
-                col_rota = "local_rota" if "local_rota" in cols_prog else ("tipo_rota" if "tipo_rota" in cols_prog else "''")
+                col_rota = (
+                    "local_rota"
+                    if "local_rota" in cols_prog
+                    else ("tipo_rota" if "tipo_rota" in cols_prog else ("local" if "local" in cols_prog else "''"))
+                )
                 col_diaria = "diaria_motorista_valor" if "diaria_motorista_valor" in cols_prog else "0"
                 col_nf = (
                     "COALESCE(NULLIF(num_nf,''), NULLIF(nf_numero,''), '')"
@@ -20579,6 +21358,9 @@ class DespesasPage(PageBase):
         valores_por_campo = {
             # status operacional da rota
             "status": _pick("status_operacional", "status"),
+            "local_rota": _pick("local_rota", "tipo_rota", "local"),
+            "tipo_rota": _pick("tipo_rota", "local_rota", "local"),
+            "local": _pick("local_rota", "tipo_rota", "local"),
             "num_nf": nf_numero,
             "nf_numero": nf_numero,
             "nf_kg": nf_kg,
@@ -22103,6 +22885,40 @@ class DespesasPage(PageBase):
                 avail = max(col_w - offset - 1.5 * mm, 10 * mm)
                 c.drawString(x + offset, y0, _clip_width(v, avail, "Helvetica", 9))
 
+            def _fmt_pdf_datetime(v):
+                raw = str(v or "").strip()
+                if not raw:
+                    return ""
+                try:
+                    dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                    return dt.strftime("%d/%m/%y %H:%M:%S")
+                except Exception:
+                    pass
+                try:
+                    parts = raw.split()
+                    d_part = parts[0] if parts else raw
+                    h_part = parts[1] if len(parts) > 1 else ""
+                    d_fmt = format_date_br_short(d_part)
+                    h_fmt = normalize_time(h_part) if h_part else ""
+                    h_fmt = h_fmt if h_fmt is not None else h_part
+                    return f"{d_fmt} {h_fmt}".strip()
+                except Exception:
+                    return raw
+
+            def _extract_qtd_diarias(raw_obs):
+                obs_up = upper(str(raw_obs or "").strip())
+                if not obs_up:
+                    return "-"
+                for pattern in (
+                    r"QTD\s*DIARIAS?\s*[:=-]\s*([0-9]+)",
+                    r"\b([0-9]+)\s*DIARIAS?\b",
+                    r"\b([0-9]+)\s*AJUDANTES?\b",
+                ):
+                    m = re.search(pattern, obs_up, flags=re.IGNORECASE)
+                    if m:
+                        return m.group(1).strip()
+                return "-"
+
             def _draw_retorno_sheet():
                 nonlocal y
                 meta_ret = fetch_programacao_meta_relatorio(prog)
@@ -22424,24 +23240,7 @@ class DespesasPage(PageBase):
                 c.setFont("Helvetica", 8)
 
             def _fmt_data_rec(v):
-                raw = str(v or "").strip()
-                if not raw:
-                    return ""
-                try:
-                    dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-                    return dt.strftime("%d/%m/%y %H:%M:%S")
-                except Exception:
-                    pass
-                try:
-                    parts = raw.split()
-                    d_part = parts[0] if parts else raw
-                    h_part = parts[1] if len(parts) > 1 else ""
-                    d_fmt = format_date_br_short(d_part)
-                    h_fmt = normalize_time(h_part) if h_part else ""
-                    h_fmt = h_fmt if h_fmt is not None else h_part
-                    return f"{d_fmt} {h_fmt}".strip()
-                except Exception:
-                    return raw
+                return _fmt_pdf_datetime(v)
 
             _draw_receb_header()
 
@@ -22485,6 +23284,96 @@ class DespesasPage(PageBase):
             y -= 8 * mm
 
             _draw_retorno_sheet()
+
+            meta_desp_pdf = fetch_programacao_meta_relatorio(prog)
+            itens_desp_pdf = fetch_programacao_itens(prog) or []
+            media_desp_pdf = self._normalize_media_kg_ave(safe_float(meta_desp_pdf.get("media"), 0.0))
+            if media_desp_pdf <= 0:
+                media_desp_pdf = self._normalize_media_kg_ave(nf_media_carregada)
+            data_saida_pdf, hora_saida_pdf = normalize_date_time_components(
+                meta_desp_pdf.get("data_saida"),
+                meta_desp_pdf.get("hora_saida"),
+            )
+            data_chegada_pdf, hora_chegada_pdf = normalize_date_time_components(
+                meta_desp_pdf.get("data_chegada"),
+                meta_desp_pdf.get("hora_chegada"),
+            )
+            aves_cx_desp_pdf = safe_int(meta_desp_pdf.get("aves_caixa_final"), 0)
+            if aves_cx_desp_pdf <= 0:
+                aves_cx_desp_pdf = safe_int(nf_caixa_final, 0)
+            if aves_cx_desp_pdf <= 0:
+                aves_cx_desp_pdf = 6
+
+            tot_cx_prog_pdf = 0
+            tot_kg_ent_pdf = 0.0
+            status_entregue_pdf = {"ENTREGUE", "FINALIZADO", "FINALIZADA", "CONCLUIDO", "CONCLUÍDO"}
+            status_cancelado_pdf = {"CANCELADO", "CANCELADA"}
+            for item_pdf in itens_desp_pdf:
+                status_item_pdf = upper(str(item_pdf.get("status_pedido") or "PENDENTE").strip()) or "PENDENTE"
+                cx_prog_pdf = max(safe_int(item_pdf.get("qnt_caixas"), 0), 0)
+                cx_alt_pdf = max(safe_int(item_pdf.get("caixas_atual"), 0), 0)
+                cx_ent_pdf = 0 if status_item_pdf in status_cancelado_pdf else (
+                    cx_alt_pdf if cx_alt_pdf > 0 else (cx_prog_pdf if status_item_pdf in status_entregue_pdf else 0)
+                )
+                kg_base_pdf = safe_float(item_pdf.get("peso_previsto"), 0.0) or safe_float(item_pdf.get("kg"), 0.0)
+                if kg_base_pdf <= 0 and media_desp_pdf > 0:
+                    base_cx_pdf = cx_ent_pdf if cx_ent_pdf > 0 else cx_prog_pdf
+                    kg_base_pdf = float(base_cx_pdf) * float(max(aves_cx_desp_pdf, 1)) * media_desp_pdf
+                aves_total_pdf = max((cx_ent_pdf if cx_ent_pdf > 0 else cx_prog_pdf) * max(aves_cx_desp_pdf, 1), 0)
+                media_cli_pdf = (kg_base_pdf / aves_total_pdf) if aves_total_pdf > 0 and kg_base_pdf > 0 else media_desp_pdf
+                mort_aves_pdf = max(safe_int(item_pdf.get("mortalidade_aves"), 0), 0)
+                mort_kg_pdf = mort_aves_pdf * media_cli_pdf if media_cli_pdf > 0 else 0.0
+                kg_ent_pdf = max(kg_base_pdf - mort_kg_pdf, 0.0) if status_item_pdf not in status_cancelado_pdf else 0.0
+                tot_cx_prog_pdf += cx_prog_pdf
+                tot_kg_ent_pdf += kg_ent_pdf
+
+            if not motorista:
+                motorista = str(meta_desp_pdf.get("motorista") or "")
+            if not veiculo:
+                veiculo = str(meta_desp_pdf.get("veiculo") or "")
+            if not equipe_txt:
+                equipe_txt = resolve_equipe_nomes(str(meta_desp_pdf.get("equipe") or equipe))
+            if not nf:
+                nf = str(meta_desp_pdf.get("num_nf") or "")
+            if not local_rota:
+                local_rota = str(meta_desp_pdf.get("local_rota") or "")
+            if not local_carreg:
+                local_carreg = str(meta_desp_pdf.get("local_carregamento") or "")
+            if nf_kg <= 0:
+                nf_kg = safe_float(meta_desp_pdf.get("nf_kg"), 0.0)
+            if nf_preco <= 0:
+                nf_preco = safe_float(meta_desp_pdf.get("nf_preco"), 0.0)
+            if not data_saida:
+                data_saida = data_saida_pdf
+            if not hora_saida:
+                hora_saida = hora_saida_pdf
+            if not data_chegada:
+                data_chegada = data_chegada_pdf
+            if not hora_chegada:
+                hora_chegada = hora_chegada_pdf
+            if nf_media_carregada <= 0:
+                nf_media_carregada = media_desp_pdf
+            if nf_caixas <= 0:
+                nf_caixas_meta = safe_int(meta_desp_pdf.get("nf_caixas"), 0)
+                nf_caixas = nf_caixas_meta if nf_caixas_meta > 0 else tot_cx_prog_pdf
+            if nf_caixa_final <= 0:
+                nf_caixa_final_meta = safe_int(meta_desp_pdf.get("aves_caixa_final"), 0)
+                if nf_caixa_final_meta > 0:
+                    nf_caixa_final = nf_caixa_final_meta
+            if nf_kg_carregado <= 0:
+                nf_kg_carregado = safe_float(meta_desp_pdf.get("nf_kg_carregado"), 0.0)
+                if nf_kg_carregado <= 0:
+                    nf_kg_carregado = safe_float(meta_desp_pdf.get("nf_kg"), 0.0)
+            if nf_kg_vendido <= 0:
+                nf_kg_vendido = tot_kg_ent_pdf
+            if abs(nf_saldo) < 0.0001 and (nf_kg_carregado > 0 or nf_kg_vendido > 0):
+                nf_saldo = nf_kg_carregado - nf_kg_vendido
+            if km_rodado <= 0 and km_final > 0 and km_inicial > 0:
+                km_rodado = max(km_final - km_inicial, 0.0)
+            if media_km_l <= 0 and litros > 0 and km_rodado > 0:
+                media_km_l = km_rodado / litros
+            if custo_km <= 0 and km_rodado > 0:
+                custo_km = total_desp / km_rodado
 
             # ===== FOLHA 2: DESPESAS =====
             new_page(f"FOLHA DE DESPESAS - PROGRAMACAO {prog}")
@@ -22572,53 +23461,81 @@ class DespesasPage(PageBase):
 
             table_x = left
             table_w = width - left - right
-            col_desc = table_w * 0.38
-            col_cat = table_w * 0.18
-            col_val = table_w * 0.14
-            col_obs = table_w * 0.30
+            col_desc = table_w * 0.25
+            col_cat = table_w * 0.13
+            col_val = table_w * 0.12
+            col_obs = table_w * 0.32
+            col_data = table_w - (col_desc + col_cat + col_val + col_obs)
 
             x_desc = table_x
             x_cat = x_desc + col_desc
             x_val = x_cat + col_cat
             x_obs = x_val + col_val
+            x_data = x_obs + col_obs
 
             row_h = 6.5 * mm
+            row_line_h = 4.2 * mm
 
-            c.setFont("Helvetica-Bold", 9)
-            c.rect(table_x, y - row_h + 1, table_w, row_h, stroke=1, fill=0)
-            c.drawString(x_desc + 2, y - row_h + 3, "DESCRICAO")
-            c.drawString(x_cat + 2, y - row_h + 3, "CATEGORIA")
-            c.drawRightString(x_val + col_val - 2, y - row_h + 3, "VALOR")
-            c.drawString(x_obs + 2, y - row_h + 3, "OBS")
-            y -= row_h
+            def _draw_desp_header():
+                nonlocal y
+                c.setFont("Helvetica-Bold", 8)
+                c.rect(table_x, y - row_h + 1, table_w, row_h, stroke=1, fill=0)
+                c.drawString(x_desc + 2, y - row_h + 3, "DESCRICAO")
+                c.drawString(x_cat + 2, y - row_h + 3, "CATEGORIA")
+                c.drawRightString(x_val + col_val - 2, y - row_h + 3, "VALOR")
+                c.drawString(x_obs + 2, y - row_h + 3, "OBS")
+                c.drawRightString(x_data + col_data - 2, y - row_h + 3, "DATA")
+                y -= row_h
+                c.setFont("Helvetica", 8)
 
-            c.setFont("Helvetica", 9)
+            _draw_desp_header()
+
             for desc, val, cat, obs, data_reg in despesas:
-                ensure_space(15)
                 desc_up = upper(str(desc or "").strip())
                 obs_txt = str(obs or "").strip()
-                if desc_up == "DIARIAS MOTORISTA":
+                if desc_up in {"DIARIAS MOTORISTA", "DIARIA MOTORISTA"}:
                     m_nome = motorista or "-"
-                    qtd_d = "-"
-                    m = re.search(r"QTD\s*DIARIAS\s*:\s*([^|]+)", obs_txt, flags=re.IGNORECASE)
-                    if m:
-                        qtd_d = m.group(1).strip()
+                    qtd_d = _extract_qtd_diarias(obs_txt)
                     obs_txt = f"QTD DIARIAS: {qtd_d} | MOTORISTA: {m_nome}"
-                elif desc_up == "DIARIAS AJUDANTES":
+                elif desc_up in {"DIARIAS AJUDANTES", "DIARIA AJUDANTE", "DIARIA AJUDANTES"}:
                     a_nome = equipe_txt or "-"
-                    qtd_d = "-"
-                    m = re.search(r"QTD\s*DIARIAS\s*:\s*([^|]+)", obs_txt, flags=re.IGNORECASE)
-                    if m:
-                        qtd_d = m.group(1).strip()
+                    qtd_d = _extract_qtd_diarias(obs_txt)
                     obs_txt = f"QTD DIARIAS: {qtd_d} | AJUDANTES: {a_nome}"
-                c.rect(table_x, y - row_h + 1, table_w, row_h, stroke=1, fill=0)
-                c.drawString(x_desc + 2, y - row_h + 3, str(desc or "")[:40])
-                c.drawString(x_cat + 2, y - row_h + 3, str(cat or "")[:14])
-                c.drawRightString(x_val + col_val - 2, y - row_h + 3, f"{float(val or 0):,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-                c.drawString(x_obs + 2, y - row_h + 3, _clip_width(obs_txt, col_obs - 4, "Helvetica", 9))
-                y -= row_h
+                desc_lines = self._wrap_pdf_lines(str(desc or ""), col_desc - 4, font_name="Helvetica", font_size=8) or [""]
+                cat_lines = self._wrap_pdf_lines(str(cat or ""), col_cat - 4, font_name="Helvetica", font_size=8) or [""]
+                obs_lines = self._wrap_pdf_lines(obs_txt, col_obs - 4, font_name="Helvetica", font_size=8) or [""]
+                data_lines = self._wrap_pdf_lines(_fmt_pdf_datetime(data_reg), col_data - 4, font_name="Helvetica", font_size=8) or [""]
+                line_count = max(len(desc_lines), len(cat_lines), len(obs_lines), len(data_lines), 1)
+                row_h_curr = max(row_h, (line_count * row_line_h) + 4)
+
+                if y < bottom + row_h_curr + (24 * mm):
+                    new_page(f"FOLHA DE DESPESAS - PROGRAMACAO {prog} (CONT.)")
+                    c.setFont("Helvetica-Bold", 10)
+                    c.drawString(left, y, "DESPESAS")
+                    y -= 6 * mm
+                    _draw_desp_header()
+
+                c.rect(table_x, y - row_h_curr + 1, table_w, row_h_curr, stroke=1, fill=0)
+                text_y = y - 10
+                for idx_line, line in enumerate(desc_lines):
+                    c.drawString(x_desc + 2, text_y - (idx_line * row_line_h), line)
+                for idx_line, line in enumerate(cat_lines):
+                    c.drawString(x_cat + 2, text_y - (idx_line * row_line_h), line)
+                c.drawRightString(
+                    x_val + col_val - 2,
+                    text_y,
+                    f"{float(val or 0):,.2f}".replace(",", "X").replace(".", ",").replace("X", "."),
+                )
+                for idx_line, line in enumerate(obs_lines):
+                    c.drawString(x_obs + 2, text_y - (idx_line * row_line_h), line)
+                for idx_line, line in enumerate(data_lines):
+                    c.drawRightString(x_data + col_data - 2, text_y - (idx_line * row_line_h), line)
+                y -= row_h_curr
 
             y -= 6 * mm
+
+            if y < bottom + (90 * mm):
+                new_page(f"FOLHA DE DESPESAS - PROGRAMACAO {prog} (CONT.)")
 
             # Resumo financeiro
             c.setFont("Helvetica-Bold", 10)
@@ -24430,7 +25347,7 @@ class EscalaPage(PageBase):
 
 class CentroCustosPage(PageBase):
     def __init__(self, parent, app):
-        super().__init__(parent, app, "Centro de Custos")
+        super().__init__(parent, app, "CentroCustos")
         self.body.grid_rowconfigure(3, weight=1)
         self.body.grid_columnconfigure(0, weight=1)
         self._chart_labels = []
@@ -27637,7 +28554,7 @@ class RelatoriosPage(PageBase):
 
 class BackupExportarPage(PageBase):
     def __init__(self, parent, app):
-        super().__init__(parent, app, "Backup / Exportar")
+        super().__init__(parent, app, "BackupExportar")
 
         self.app = app
 
