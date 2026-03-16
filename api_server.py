@@ -360,6 +360,14 @@ def _decorate_rota_row(row: Dict[str, Any], cur: Optional[sqlite3.Cursor] = None
                     return v
         return None
 
+    loc_rota = _first_non_empty(
+        "local_rota",
+        "tipo_rota",
+        "local",
+    )
+    if loc_rota is not None:
+        row["local_rota"] = str(loc_rota).strip()
+
     # Alias de local de carregamento (prioridade mobile).
     loc_car = _first_non_empty(
         "local_carregamento",
@@ -367,14 +375,15 @@ def _decorate_rota_row(row: Dict[str, Any], cur: Optional[sqlite3.Cursor] = None
         "local_carregado",
         "local_carreg",
         "carregou_em",
-        "local_rota",
-        "tipo_rota",
-        "local",
     )
+    if loc_car is None:
+        loc_car = loc_rota
     if loc_car is not None:
-        row["local_carregamento"] = str(loc_car).strip()
-    if not str(row.get("local_rota") or "").strip() and loc_car is not None:
-        row["local_rota"] = str(loc_car).strip()
+        loc_car_txt = str(loc_car).strip()
+        row["local_carregamento"] = loc_car_txt
+        row["granja_carregada"] = loc_car_txt
+        row["local_carregado"] = loc_car_txt
+        row["local_carreg"] = loc_car_txt
 
     # Aliases esperados pelo desktop (compatibilidade retroativa).
     sd = _first_non_empty("saida_data", "data_saida")
@@ -460,7 +469,20 @@ def _norm_pedido_key(v: Any) -> str:
 
 def _local_rota_expr(conn: sqlite3.Connection) -> str:
     candidates: List[str] = []
-    # Regra para o app mobile: priorizar LOCAL DE CARREGAMENTO.
+    if col_exists(conn, "programacoes", "local_rota"):
+        candidates.append("NULLIF(TRIM(p.local_rota), '')")
+    if col_exists(conn, "programacoes", "tipo_rota"):
+        candidates.append("NULLIF(TRIM(p.tipo_rota), '')")
+    if col_exists(conn, "programacoes", "local"):
+        candidates.append("NULLIF(TRIM(p.local), '')")
+
+    if not candidates:
+        return "'-' AS local_rota"
+    return f"COALESCE({', '.join(candidates)}, '-') AS local_rota"
+
+
+def _local_carregamento_expr(conn: sqlite3.Connection) -> str:
+    candidates: List[str] = []
     if col_exists(conn, "programacoes", "local_carregamento"):
         candidates.append("NULLIF(TRIM(p.local_carregamento), '')")
     if col_exists(conn, "programacoes", "granja_carregada"):
@@ -469,14 +491,18 @@ def _local_rota_expr(conn: sqlite3.Connection) -> str:
         candidates.append("NULLIF(TRIM(p.local_carregado), '')")
     if col_exists(conn, "programacoes", "local_carreg"):
         candidates.append("NULLIF(TRIM(p.local_carreg), '')")
+    if col_exists(conn, "programacoes", "carregou_em"):
+        candidates.append("NULLIF(TRIM(p.carregou_em), '')")
     if col_exists(conn, "programacoes", "local_rota"):
         candidates.append("NULLIF(TRIM(p.local_rota), '')")
     if col_exists(conn, "programacoes", "tipo_rota"):
         candidates.append("NULLIF(TRIM(p.tipo_rota), '')")
+    if col_exists(conn, "programacoes", "local"):
+        candidates.append("NULLIF(TRIM(p.local), '')")
 
     if not candidates:
-        return "'-' AS local_rota"
-    return f"COALESCE({', '.join(candidates)}, '-') AS local_rota"
+        return "'-' AS local_carregamento"
+    return f"COALESCE({', '.join(candidates)}, '-') AS local_carregamento"
 
 
 def _media_carregada_expr(conn: sqlite3.Connection) -> str:
@@ -1593,6 +1619,7 @@ class RotaAtivaOut(BaseModel):
     veiculo: str = ""
     equipe: str = ""
     local_rota: str = ""
+    local_carregamento: str = ""
     data_criacao: str = ""
     tipo_estimativa: Optional[str] = None
     unidade_estimativa: Optional[str] = None
@@ -3652,6 +3679,7 @@ def listar_rotas_ativas_todas(m=Depends(get_current_motorista)):
     with get_conn() as conn:
         cur = conn.cursor()
         local_expr = _local_rota_expr(conn)
+        local_carreg_expr = _local_carregamento_expr(conn)
         media_expr = _media_carregada_expr(conn)
         kg_carregado_expr = _kg_carregado_expr(conn)
         caixas_carregadas_expr = _caixas_carregadas_expr(conn)
@@ -3685,6 +3713,7 @@ def listar_rotas_ativas_todas(m=Depends(get_current_motorista)):
                 """ + equipe_id_select + """
                 """ + equipe_cols_expr + """,
                 """ + local_expr + """,
+                """ + local_carreg_expr + """,
                 """ + media_expr + """,
                 """ + kg_carregado_expr + """,
                 """ + caixas_carregadas_expr + """,
@@ -3729,6 +3758,7 @@ def rotas_ativas(m=Depends(get_current_motorista)):
     with get_conn() as conn:
         cur = conn.cursor()
         local_expr = _local_rota_expr(conn)
+        local_carreg_expr = _local_carregamento_expr(conn)
         media_expr = _media_carregada_expr(conn)
         kg_carregado_expr = _kg_carregado_expr(conn)
         caixas_carregadas_expr = _caixas_carregadas_expr(conn)
@@ -3763,6 +3793,7 @@ def rotas_ativas(m=Depends(get_current_motorista)):
                 """ + equipe_id_select + """
                 """ + equipe_cols_expr + """,
                 """ + local_expr + """,
+                """ + local_carreg_expr + """,
                 """ + media_expr + """,
                 """ + kg_carregado_expr + """,
                 """ + caixas_carregadas_expr + """,

@@ -23613,6 +23613,28 @@ class DespesasPage(PageBase):
     # =========================================================
     # 7.8 SALVAR TUDO (NF / KM / CÉDULAS / ADIANTAMENTO)
     # =========================================================
+    def _wrap_pdf_lines(self, text, max_width, font_name="Helvetica", font_size=9):
+        from reportlab.pdfbase.pdfmetrics import stringWidth
+
+        lines = []
+        for raw in str(text or "").splitlines():
+            words = raw.split()
+            if not words:
+                lines.append("")
+                continue
+            current = ""
+            for word in words:
+                candidate = word if not current else f"{current} {word}"
+                if stringWidth(candidate, font_name, font_size) <= max_width:
+                    current = candidate
+                else:
+                    if current:
+                        lines.append(current)
+                    current = word
+            if current:
+                lines.append(current)
+        return lines
+
     def salvar_tudo(self):
         if not self._can_edit_current_prog():
             return
