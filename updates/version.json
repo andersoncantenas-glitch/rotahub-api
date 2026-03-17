@@ -1,13 +1,12 @@
 {
-  "version": "4.2.1",
-  "setup_url": "",
+  "version": "4.2.2",
+  "setup_url": "https://github.com/andersoncantenas-glitch/rotahub-api/releases/download/v4.2.2/RotaHubDesktop_Setup_4.2.2.exe",
   "changelog_url": "https://raw.githubusercontent.com/andersoncantenas-glitch/rotahub-api/main/updates/changelog.txt",
   "release_kind": "patch",
-  "released_at": "2026-03-15 22:22:07",
+  "released_at": "2026-03-17 13:34:28",
   "alert": "",
   "alerts": [
-    "App do motorista voltou a receber Local carregado separado do Local da Rota.",
-    "Recebimentos voltou a exibir SERRA ou SERTAO no campo Rota, sem misturar com o carregamento.",
-    "Geracao de PDF em Despesas foi corrigida."
+    "Home agora permite recolher e expandir o diagnostico do ambiente sem quebrar os textos.",
+    "Assinaturas e conferencia do PDF da prestacao foram movidas para a folha de recebimentos."
   ]
 }

@@ -4978,6 +4978,7 @@ class HomePage(PageBase):
         self._remote_setup_url = SETUP_DOWNLOAD_URL
         self._remote_changelog_url = CHANGELOG_URL
         self._alerts_text = ""
+        self._runtime_diag_rows = {}
         self.body.grid_rowconfigure(0, weight=1)
 
         home_grid = ttk.Frame(self.body, style="Content.TFrame")
@@ -5167,10 +5168,10 @@ class HomePage(PageBase):
         )
         self.lbl_version_remote.grid(row=1, column=0, sticky="w", pady=(2, 0))
 
-        diag = ttk.Frame(panel, style="CardInset.TFrame")
+        diag = ttk.Frame(panel, style="CardInset.TFrame", padding=(10, 8))
         diag.grid(row=2, column=0, sticky="ew", pady=(10, 0))
-        diag.grid_columnconfigure(1, weight=1)
-        ttk.Label(diag, text="Diagnóstico do Ambiente", style="CardLabel.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
+        diag.grid_columnconfigure(0, weight=1)
+        ttk.Label(diag, text="Diagnóstico do Ambiente", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w")
         self.lbl_runtime_env = self._build_info_row(diag, 1, "Ambiente")
         self.lbl_runtime_db = self._build_info_row(diag, 2, "Banco")
         self.lbl_runtime_persist = self._build_info_row(diag, 3, "Persistência")
@@ -5211,11 +5212,11 @@ class HomePage(PageBase):
 
     def _refresh_runtime_diagnostics(self):
         db_dir = os.path.dirname(DB_PATH) or "."
-        self.lbl_runtime_env.config(text=f"{APP_ENV} | tenant={TENANT_ID} | empresa={COMPANY_ID} | sync={SYNC_MODE}")
-        self.lbl_runtime_db.config(text=DB_PATH)
-        self.lbl_runtime_persist.config(text=db_dir)
-        self.lbl_runtime_api.config(text=API_BASE_URL or "-")
-        self.lbl_runtime_cfg.config(text=CONFIG_SOURCE)
+        self._set_runtime_diag_value("Ambiente", f"{APP_ENV} | tenant={TENANT_ID} | empresa={COMPANY_ID} | sync={SYNC_MODE}")
+        self._set_runtime_diag_value("Banco", DB_PATH)
+        self._set_runtime_diag_value("Persistência", db_dir)
+        self._set_runtime_diag_value("API", API_BASE_URL or "-")
+        self._set_runtime_diag_value("Config", CONFIG_SOURCE)
 
     def _open_url_safe(self, url: str, label: str):
         if not url:
@@ -5856,17 +5857,105 @@ class HomePage(PageBase):
         return lbl
 
     def _build_info_row(self, parent, row, title):
-        ttk.Label(parent, text=f"{title}:", style="CardLabel.TLabel").grid(row=row, column=0, sticky="nw", pady=(5, 0), padx=(0, 8))
-        value = ttk.Label(
-            parent,
-            text="-",
+        item = ttk.Frame(parent, style="CardInset.TFrame")
+        item.grid(row=row, column=0, sticky="ew", pady=(8 if row == 1 else 6, 0))
+        item.grid_columnconfigure(0, weight=1)
+
+        header = ttk.Frame(item, style="CardInset.TFrame")
+        header.grid(row=0, column=0, sticky="ew")
+        header.grid_columnconfigure(0, weight=1)
+
+        title_lbl = ttk.Label(header, text=f"{title}:", style="CardLabel.TLabel")
+        title_lbl.grid(row=0, column=0, sticky="w")
+
+        btn = ttk.Button(
+            header,
+            text="Expandir",
+            style="Toggle.TButton",
+            command=lambda item_key=title: self._toggle_runtime_diag_item(item_key),
+        )
+        btn.grid(row=0, column=1, sticky="e", padx=(8, 0))
+
+        content = ttk.Frame(item, style="CardInset.TFrame")
+        content.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        content.grid_columnconfigure(0, weight=1)
+
+        value = tk.Text(
+            content,
+            height=1,
+            wrap="none",
+            font=("Segoe UI", 9),
             background="white",
             foreground="#111827",
-            justify="left",
-            wraplength=185,
+            relief="flat",
+            bd=0,
+            padx=6,
+            pady=6,
+            highlightthickness=1,
+            highlightbackground="#E5E7EB",
+            highlightcolor="#93C5FD",
+            insertwidth=0,
         )
-        value.grid(row=row, column=1, sticky="ew", pady=(4, 0))
+        value.grid(row=0, column=0, sticky="ew")
+        value.configure(state="disabled")
+
+        xscroll = ttk.Scrollbar(content, orient="horizontal", command=value.xview)
+        xscroll.grid(row=1, column=0, sticky="ew", pady=(2, 0))
+        value.configure(xscrollcommand=xscroll.set)
+        xscroll.grid_remove()
+        content.grid_remove()
+
+        title_lbl.bind("<Button-1>", lambda _event, item_key=title: self._toggle_runtime_diag_item(item_key), add="+")
+        title_lbl.configure(cursor="hand2")
+        value.bind("<Configure>", lambda _event, item_key=title: self._refresh_runtime_diag_scrollbar(item_key), add="+")
+
+        self._runtime_diag_rows[title] = {
+            "content": content,
+            "button": btn,
+            "text": value,
+            "scrollbar": xscroll,
+        }
         return value
+
+    def _set_runtime_diag_value(self, item_key, value):
+        row = self._runtime_diag_rows.get(item_key)
+        if not row:
+            return
+        text_widget = row["text"]
+        text_widget.configure(state="normal")
+        text_widget.delete("1.0", "end")
+        text_widget.insert("1.0", str(value or "-"))
+        text_widget.configure(state="disabled")
+        self.after_idle(lambda key=item_key: self._refresh_runtime_diag_scrollbar(key))
+
+    def _refresh_runtime_diag_scrollbar(self, item_key):
+        row = self._runtime_diag_rows.get(item_key)
+        if not row:
+            return
+        text_widget = row["text"]
+        scrollbar = row["scrollbar"]
+        try:
+            start, end = text_widget.xview()
+        except Exception:
+            return
+        if (end - start) >= 0.999:
+            scrollbar.grid_remove()
+        else:
+            scrollbar.grid()
+
+    def _toggle_runtime_diag_item(self, item_key):
+        row = self._runtime_diag_rows.get(item_key)
+        if not row:
+            return
+        content = row["content"]
+        button = row["button"]
+        if content.winfo_ismapped():
+            content.grid_remove()
+            button.configure(text="Expandir")
+            return
+        content.grid()
+        button.configure(text="Ocultar")
+        self.after_idle(lambda key=item_key: self._refresh_runtime_diag_scrollbar(key))
 
     def _build_pending_stat(self, parent, col, title):
         c = ttk.Frame(parent, style="CardInset.TFrame", padding=(10, 8))
@@ -22919,6 +23008,40 @@ class DespesasPage(PageBase):
                         return m.group(1).strip()
                 return "-"
 
+            receb_assinaturas_desenhadas = False
+            receb_reserva_assinaturas_mm = 70
+            receb_reserva_total_mm = 16
+
+            def _draw_receb_assinaturas():
+                nonlocal y, receb_assinaturas_desenhadas
+                c.setFont("Helvetica-Bold", 10)
+                c.drawString(left, y, "ASSINATURAS / CONFERENCIA")
+                y -= 10 * mm
+
+                block_w = (width - left - right - 10 * mm) / 2.0
+                block_h = 18 * mm
+                gap_x = 10 * mm
+                gap_y = 10 * mm
+
+                def assinatura_block(x, y_top, titulo):
+                    c.setLineWidth(0.8)
+                    c.rect(x, y_top - block_h, block_w, block_h, stroke=1, fill=0)
+                    c.setFont("Helvetica-Bold", 9)
+                    c.drawString(x + 3 * mm, y_top - 5 * mm, titulo)
+                    c.setFont("Helvetica", 9)
+                    c.line(x + 3 * mm, y_top - 13 * mm, x + block_w - 3 * mm, y_top - 13 * mm)
+                    c.drawString(x + 3 * mm, y_top - 16.5 * mm, "Assinatura / Carimbo")
+
+                x1 = left
+                x2 = left + block_w + gap_x
+
+                assinatura_block(x1, y, "SETOR FATURAMENTO")
+                assinatura_block(x2, y, "SETOR FINANCEIRO")
+                y -= (block_h + gap_y)
+                assinatura_block(x1, y, "SETOR DE CAIXA")
+                assinatura_block(x2, y, "SETOR DE CONFERENCIA")
+                receb_assinaturas_desenhadas = True
+
             def _draw_retorno_sheet():
                 nonlocal y
                 meta_ret = fetch_programacao_meta_relatorio(prog)
@@ -23251,12 +23374,11 @@ class DespesasPage(PageBase):
                 y -= row_h_rec
             else:
                 for cod_cli, nome_cli, valor_rec, forma_rec, obs_rec, data_rec in recebimentos:
-                    if y < bottom + 45 * mm:
-                        c.showPage()
-                        y = height - top
-                        c.setFont("Helvetica-Bold", 12)
-                        c.drawString(left, y, f"FOLHA DE RECEBIMENTOS - PROGRAMACAO {prog} (CONT.)")
-                        y -= 8 * mm
+                    reserva_mm = receb_reserva_assinaturas_mm if not receb_assinaturas_desenhadas else receb_reserva_total_mm
+                    if (y - row_h_rec) < bottom + (reserva_mm * mm):
+                        if not receb_assinaturas_desenhadas:
+                            _draw_receb_assinaturas()
+                        new_page(f"FOLHA DE RECEBIMENTOS - PROGRAMACAO {prog} (CONT.)")
                         _draw_receb_header()
 
                     c.rect(table_x, y - row_h_rec + 1, table_w, row_h_rec, stroke=1, fill=0)
@@ -23282,6 +23404,9 @@ class DespesasPage(PageBase):
             c.setFont("Helvetica-Bold", 10)
             c.drawRightString(width - right, y, f"TOTAL RECEBIMENTOS: {self._fmt_money(total_receb_detalhe)}")
             y -= 8 * mm
+
+            if not receb_assinaturas_desenhadas:
+                _draw_receb_assinaturas()
 
             _draw_retorno_sheet()
 
@@ -23557,34 +23682,6 @@ class DespesasPage(PageBase):
             y -= line_h
             draw_kv(col1_x, y, "Resultado", self._fmt_money(resultado), col1_w)
             y -= 10 * mm
-
-            # Assinaturas
-            c.setFont("Helvetica-Bold", 10)
-            c.drawString(left, y, "ASSINATURAS / CONFERENCIA")
-            y -= 10 * mm
-
-            block_w = (width - left - right - 10 * mm) / 2.0
-            block_h = 18 * mm
-            gap_x = 10 * mm
-            gap_y = 10 * mm
-
-            def assinatura_block(x, y_top, titulo):
-                c.setLineWidth(0.8)
-                c.rect(x, y_top - block_h, block_w, block_h, stroke=1, fill=0)
-                c.setFont("Helvetica-Bold", 9)
-                c.drawString(x + 3 * mm, y_top - 5 * mm, titulo)
-                c.setFont("Helvetica", 9)
-                c.line(x + 3 * mm, y_top - 13 * mm, x + block_w - 3 * mm, y_top - 13 * mm)
-                c.drawString(x + 3 * mm, y_top - 16.5 * mm, "Assinatura / Carimbo")
-
-            x1 = left
-            x2 = left + block_w + gap_x
-
-            assinatura_block(x1, y, "SETOR FATURAMENTO")
-            assinatura_block(x2, y, "SETOR FINANCEIRO")
-            y -= (block_h + gap_y)
-            assinatura_block(x1, y, "SETOR DE CAIXA")
-            assinatura_block(x2, y, "SETOR DE CONFERENCIA")
 
             c.setFont("Helvetica", 8)
             c.drawRightString(width - right, bottom - 2 * mm, f"Gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')}")
