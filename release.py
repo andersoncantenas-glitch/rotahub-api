@@ -3,14 +3,13 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 from urllib.parse import urlparse
 
 
@@ -82,6 +81,10 @@ def write_text(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+def repo_rel(path: Path) -> str:
+    return str(path.relative_to(ROOT)).replace("\\", "/")
+
+
 def replace_first(pattern: re.Pattern[str], content: str, new_version: str, label: str) -> str:
     new_content, count = pattern.subn(rf"\g<prefix>{new_version}\3", content, count=1)
     if count != 1:
@@ -127,7 +130,7 @@ def canonical_current_version(sources: Iterable[VersionSource]) -> tuple[str, li
     parsed = [(parse_semver(src.version), src) for src in src_list]
     parsed.sort(key=lambda item: item[0], reverse=True)
     current = parsed[0][1].version
-    mismatches = []
+    mismatches: list[str] = []
     distinct = {src.version for src in src_list}
     if len(distinct) > 1:
         for src in src_list:
@@ -183,6 +186,8 @@ def suggest_release_kind(files: Iterable[str]) -> str:
         "assets/",
         "installer/",
         "scripts/",
+        "app/",
+        "tests/",
     )
 
     if any(any(marker in item for marker in major_markers) for item in changed):
@@ -288,7 +293,7 @@ def update_installer(new_version: str) -> None:
 def capture_file_state(paths: Iterable[Path]) -> dict[Path, str]:
     state: dict[Path, str] = {}
     for path in paths:
-        if path.exists():
+        if path.exists() and path.is_file():
             state[path] = read_text(path)
         else:
             state[path] = ""
@@ -299,7 +304,7 @@ def changed_files_from_state(before: dict[Path, str], after: dict[Path, str]) ->
     changed = []
     for path in sorted(set(before) | set(after), key=lambda p: str(p).lower()):
         if before.get(path, "") != after.get(path, ""):
-            changed.append(str(path.relative_to(ROOT)).replace("\\", "/"))
+            changed.append(repo_rel(path))
     return changed
 
 
@@ -312,6 +317,22 @@ def restore_file_state(state: dict[Path, str]) -> None:
         write_text(path, content)
 
 
+def _iter_existing_reference_files(reference_paths: Iterable[Path]) -> Iterable[Path]:
+    for path in reference_paths:
+        if not path.exists():
+            continue
+        if path.is_dir():
+            for child in sorted(path.rglob("*")):
+                if "__pycache__" in child.parts:
+                    continue
+                if child.suffix.lower() in {".pyc", ".pyo"}:
+                    continue
+                if child.is_file():
+                    yield child
+            continue
+        yield path
+
+
 def dist_freshness_status(reference_files: Iterable[Path]) -> str:
     if not DIST_EXE.exists():
         return (
@@ -321,31 +342,56 @@ def dist_freshness_status(reference_files: Iterable[Path]) -> str:
 
     exe_mtime = DIST_EXE.stat().st_mtime
     newer_refs: list[str] = []
-    for path in reference_files:
-        if path.exists() and path.stat().st_mtime > exe_mtime:
-            newer_refs.append(str(path.relative_to(ROOT)).replace("\\", "/"))
+    for path in _iter_existing_reference_files(reference_files):
+        if path.stat().st_mtime > exe_mtime:
+            newer_refs.append(repo_rel(path))
 
     if newer_refs:
         return (
             "ATENCAO: o dist atual esta desatualizado em relacao a: "
-            + ", ".join(newer_refs)
+            + ", ".join(sorted(newer_refs))
             + ". Rode powershell -ExecutionPolicy Bypass -File .\\scripts\\build_desktop.ps1 antes do Inno Setup."
         )
 
     return "OK: dist atual parece alinhado com os arquivos de release."
 
 
-def git_commit_and_push(new_version: str, dry_run: bool) -> str:
-    commit_msg = f"release: versão {new_version}"
-    branch = current_branch()
-    if dry_run:
-        return f"DRY-RUN: git add . && git commit -m \"{commit_msg}\" && git push origin {branch}"
+def resolve_include_paths(raw_paths: Sequence[str]) -> list[Path]:
+    resolved: list[Path] = []
+    root_resolved = ROOT.resolve()
+    for raw in raw_paths:
+        candidate = (raw or "").strip()
+        if not candidate:
+            continue
+        full = (ROOT / candidate).resolve()
+        try:
+            full.relative_to(root_resolved)
+        except Exception as exc:
+            raise RuntimeError(f"Caminho fora do repositorio: {candidate}") from exc
+        if not full.exists():
+            raise RuntimeError(f"Caminho nao encontrado para incluir na release: {candidate}")
+        if full not in resolved:
+            resolved.append(full)
+    return resolved
 
-    run_git("add", ".")
+
+def git_commit_and_push(new_version: str, dry_run: bool, stage_paths: Sequence[Path], no_push: bool) -> str:
+    commit_msg = f"release: versao {new_version}"
+    branch = current_branch()
+    rel_paths = [repo_rel(path) for path in stage_paths]
+    if dry_run:
+        add_cmd = "git add -- " + " ".join(rel_paths)
+        push_cmd = "(skip push)" if no_push else f"git push origin {branch}"
+        return f'DRY-RUN: {add_cmd} && git commit -m "{commit_msg}" && {push_cmd}'
+
+    run_git("add", "--", *rel_paths)
     commit = run_git("commit", "-m", commit_msg, check=False)
     if commit.returncode != 0:
         stderr = (commit.stderr or commit.stdout or "").strip()
         raise RuntimeError(f"Falha no git commit: {stderr or 'sem detalhes'}")
+
+    if no_push:
+        return f"OK: commit criado localmente em {branch} (push desativado)"
 
     push = run_git("push", "origin", branch, check=False)
     if push.returncode != 0:
@@ -359,6 +405,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("kind", nargs="?", choices=RELEASE_KINDS, help="Tipo de release: patch, minor ou major.")
     parser.add_argument("--notes", default="", help="Observacao adicionada no changelog automatizado.")
     parser.add_argument("--dry-run", action="store_true", help="Atualiza arquivos localmente, mas nao executa git add/commit/push.")
+    parser.add_argument(
+        "--include-path",
+        action="append",
+        default=[],
+        help="Arquivo ou pasta adicional para incluir no commit de release. Pode ser repetido.",
+    )
+    parser.add_argument("--no-push", action="store_true", help="Cria o commit local, mas nao executa git push.")
     return parser
 
 
@@ -387,7 +440,14 @@ def main() -> int:
 
     after = capture_file_state(tracked_files)
     changed_files = changed_files_from_state(before, after)
-    push_status = git_commit_and_push(new_version, args.dry_run)
+    include_paths = resolve_include_paths(args.include_path)
+
+    stage_paths: list[Path] = []
+    for path in [*tracked_files, *include_paths]:
+        if path not in stage_paths:
+            stage_paths.append(path)
+
+    push_status = git_commit_and_push(new_version, args.dry_run, stage_paths, args.no_push)
 
     render_status = (
         "Render pronto: render.yaml encontrado; git push no branch atual deve acionar deploy se o servico estiver conectado."
@@ -403,7 +463,18 @@ def main() -> int:
         if INSTALLER_ISS.exists()
         else "Inno Setup: installer/rotahub.iss nao encontrado."
     )
-    dist_status = dist_freshness_status([VERSION_PY, MANIFEST_JSON, INSTALLER_ISS, API_SERVICE, CHANGELOG_TXT])
+    dist_status = dist_freshness_status(
+        [
+            VERSION_PY,
+            MANIFEST_JSON,
+            INSTALLER_ISS,
+            API_SERVICE,
+            CHANGELOG_TXT,
+            ROOT / "main.py",
+            ROOT / "db_bootstrap.py",
+            ROOT / "app",
+        ]
+    )
 
     summary = ReleaseSummary(
         previous_version=previous_version,
@@ -429,9 +500,13 @@ def main() -> int:
         print("Divergencias corrigidas:")
         for item in summary.mismatches:
             print(f"- {item}")
-    print("Arquivos alterados:")
+    print("Arquivos alterados pelo bump:")
     for path in summary.changed_files:
         print(f"- {path}")
+    if include_paths:
+        print("Arquivos/pastas extras incluidos no commit:")
+        for path in include_paths:
+            print(f"- {repo_rel(path)}")
     print(f"Status do git push: {summary.git_push_status}")
     print("Instrucoes finais:")
     print(f"- Render: {summary.render_status}")
@@ -440,6 +515,8 @@ def main() -> int:
     print(f"- Branch atual: {summary.branch}")
     if summary.dry_run:
         print("- Dry-run ativo: nenhum commit/push real foi executado.")
+    elif args.no_push:
+        print("- Push desativado: release criada apenas localmente.")
     return 0
 
 

@@ -13,6 +13,7 @@ PBKDF2_ITERATIONS = 200_000
 DEFAULT_ADMIN_PASSWORD = "123456"
 OPERATIONAL_TABLES = [
     "motoristas",
+    "vendedores",
     "veiculos",
     "ajudantes",
     "clientes",
@@ -31,6 +32,9 @@ OPERATIONAL_TABLES = [
     "vendas_importadas",
     "programacoes_avulsas",
     "programacoes_avulsas_itens",
+    "vendedor_rascunho_itens",
+    "vendedor_pre_programacoes",
+    "vendedor_pre_programacao_itens",
     "mobile_sync_idempotency",
 ]
 
@@ -93,6 +97,21 @@ def ensure_core_schema(conn: sqlite3.Connection) -> None:
     )
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS vendedores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            codigo TEXT UNIQUE,
+            nome TEXT,
+            telefone TEXT,
+            cidade_base TEXT,
+            status TEXT DEFAULT 'ATIVO',
+            senha TEXT,
+            ultimo_login_em TEXT,
+            ultimo_login_ip TEXT
+        )
+        """
+    )
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS veiculos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             placa TEXT,
@@ -137,6 +156,63 @@ def ensure_core_schema(conn: sqlite3.Connection) -> None:
             ajudante2 TEXT
         )
         """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS vendedor_rascunho_itens (
+            id TEXT PRIMARY KEY,
+            cod_cliente TEXT NOT NULL,
+            nome_cliente TEXT NOT NULL,
+            cidade TEXT,
+            bairro TEXT,
+            endereco TEXT,
+            vendedor_cadastro TEXT,
+            vendedor_origem TEXT NOT NULL,
+            preco REAL DEFAULT 0,
+            caixas INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'PENDENTE',
+            observacao TEXT DEFAULT '',
+            alerta_codigo_programacao TEXT,
+            alerta_status_rota TEXT,
+            criado_em TEXT DEFAULT (datetime('now')),
+            atualizado_em TEXT DEFAULT (datetime('now')),
+            criado_por_codigo TEXT,
+            atualizado_por_codigo TEXT
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS vendedor_pre_programacoes (
+            id TEXT PRIMARY KEY,
+            titulo TEXT NOT NULL,
+            observacao TEXT DEFAULT '',
+            status TEXT DEFAULT 'ABERTA',
+            criado_em TEXT DEFAULT (datetime('now')),
+            atualizado_em TEXT DEFAULT (datetime('now')),
+            criado_por_codigo TEXT,
+            atualizado_por_codigo TEXT
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS vendedor_pre_programacao_itens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pre_programacao_id TEXT NOT NULL,
+            rascunho_item_id TEXT NOT NULL,
+            ordem INTEGER DEFAULT 0,
+            criado_em TEXT DEFAULT (datetime('now')),
+            atualizado_em TEXT DEFAULT (datetime('now')),
+            UNIQUE(pre_programacao_id, rascunho_item_id)
+        )
+        """
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pre_programacao_itens_pp ON vendedor_pre_programacao_itens(pre_programacao_id, ordem, id)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pre_programacao_itens_rascunho ON vendedor_pre_programacao_itens(rascunho_item_id)"
     )
     cur.execute(
         """
@@ -331,3 +407,95 @@ def reset_operational_data(conn: sqlite3.Connection) -> Dict[str, int]:
     cur.execute("DELETE FROM usuarios WHERE UPPER(COALESCE(nome,'')) <> 'ADMIN'")
     conn.commit()
     return result
+
+
+def ensure_permission_system(conn: sqlite3.Connection) -> None:
+    """
+    Inicializa o sistema de permissões com as permissões padrão do sistema.
+    Garante que todas as permissões existem e o ADMIN tem acesso total.
+    """
+    cur = conn.cursor()
+    
+    # Criar tabelas se não existirem
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS permissoes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            modulo TEXT NOT NULL,
+            nome_permissao TEXT NOT NULL,
+            descricao TEXT,
+            ativo INTEGER DEFAULT 1
+        )
+    """)
+    
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS usuario_permissoes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            usuario_id INTEGER NOT NULL,
+            permissao_id INTEGER NOT NULL,
+            concedida_em TEXT DEFAULT (datetime('now')),
+            concedida_por TEXT,
+            UNIQUE(usuario_id, permissao_id),
+            FOREIGN KEY(usuario_id) REFERENCES usuarios(id),
+            FOREIGN KEY(permissao_id) REFERENCES permissoes(id)
+        )
+    """)
+    
+    # Permissões padrão por módulo
+    permissoes_padrao = [
+        # Programações
+        ("programacoes", "visualizar_programacoes", "Visualizar programações"),
+        ("programacoes", "criar_programacoes", "Criar novas programações"),
+        ("programacoes", "editar_programacoes", "Editar programações"),
+        ("programacoes", "deletar_programacoes", "Deletar programações"),
+        ("programacoes", "finalizar_programacoes", "Finalizar programações"),
+        
+        # Prestação de Contas
+        ("prestacao", "gerar_prestacao", "Gerar prestação de contas"),
+        ("prestacao", "editar_prestacao", "Editar prestação"),
+        ("prestacao", "fechar_prestacao", "Fechar prestação"),
+        
+        # Cadastros
+        ("cadastros", "gerenciar_clientes", "Gerenciar clientes"),
+        ("cadastros", "gerenciar_motoristas", "Gerenciar motoristas"),
+        ("cadastros", "gerenciar_vendedores", "Gerenciar vendedores"),
+        
+        # Relatórios
+        ("relatorios", "gerar_relatorios", "Gerar relatórios"),
+        ("relatorios", "exportar_dados", "Exportar dados para Excel/PDF"),
+        
+        # Sistema
+        ("sistema", "gerenciar_usuarios", "Gerenciar usuários e permissões"),
+        ("sistema", "acessar_ferramentas", "Acessar ferramentas do sistema"),
+        ("sistema", "fazer_backup", "Fazer backup do banco de dados"),
+        ("sistema", "restaurar_backup", "Restaurar backup"),
+        ("sistema", "limpar_logs", "Limpar logs do sistema"),
+        ("sistema", "ver_configuracoes", "Visualizar configurações"),
+        ("sistema", "editar_configuracoes", "Editar configurações"),
+    ]
+    
+    # Inserir permissões padrão se não existirem
+    for modulo, nome_perm, descricao in permissoes_padrao:
+        cur.execute(
+            "SELECT id FROM permissoes WHERE modulo=? AND nome_permissao=? LIMIT 1",
+            (modulo, nome_perm)
+        )
+        if not cur.fetchone():
+            cur.execute(
+                "INSERT INTO permissoes (modulo, nome_permissao, descricao, ativo) VALUES (?, ?, ?, 1)",
+                (modulo, nome_perm, descricao)
+            )
+    
+    # Garantir que o ADMIN tem acesso a todas as permissões
+    cur.execute("SELECT id FROM usuarios WHERE UPPER(COALESCE(nome,''))='ADMIN' LIMIT 1")
+    admin_row = cur.fetchone()
+    if admin_row:
+        admin_id = admin_row[0]
+        cur.execute("SELECT id FROM permissoes WHERE ativo=1")
+        for (perm_id,) in cur.fetchall():
+            cur.execute(
+                "INSERT OR IGNORE INTO usuario_permissoes (usuario_id, permissao_id, concedida_por) VALUES (?, ?, ?)",
+                (admin_id, perm_id, "SISTEMA")
+            )
+    
+    conn.commit()
+

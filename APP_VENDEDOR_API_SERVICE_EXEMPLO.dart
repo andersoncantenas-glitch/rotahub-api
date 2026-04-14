@@ -1,8 +1,20 @@
-// Service Flutter offline-first.
-// Regras:
+// Service Flutter de referencia para o APP_VENDEDOR_API.
+//
+// Regra arquitetural obrigatoria:
+// - `main.py`, `flutter_application_1` (projeto atual `flutter_vendedor_app`)
+//   e este service precisam falar com a mesma API central.
+// - A fonte de verdade compartilhada e `api_server.py`.
+// - Para endpoints `desktop/*`, use a mesma `baseUrl` e o mesmo
+//   `X-Desktop-Secret` do desktop.
+// - Para `auth/vendedor/login` e `vendedor/*`, use token `Bearer`.
+//
+// Este arquivo deve seguir o contrato do service real em:
+// `flutter_vendedor_app/lib/services/vendedor_api_service.dart`
+//
+// Regras de operacao:
 // 1) Primeiro acesso obrigatoriamente online para baixar base e marcar app habilitado.
 // 2) Depois disso, app opera offline e coloca mutacoes em fila local.
-// 3) Ao reconectar, fila e reenviada para o mesmo servidor.
+// 3) Ao reconectar, a fila e reenviada para o mesmo servidor/API central.
 //
 // Este arquivo e agnostico de storage/rede reativa.
 // Integre LocalSyncStore com Sqflite/Hive/Isar e dispare flushPendingQueue()
@@ -189,7 +201,7 @@ class VendedorApiService {
 
   Future<bool> isOnlineServerReachable() async {
     try {
-      await _get('/admin/motoristas/acesso');
+      await _get('/ping');
       return true;
     } catch (_) {
       return false;
@@ -215,10 +227,10 @@ class VendedorApiService {
     final ajudantes = await listarAjudantesOnline();
     final clientes = await buscarClientesOnline(
       '',
-      vendedor: vendedorPadrao,
-      cidade: cidadePadrao,
+      vendedor: '',
+      cidade: '',
       ordem: 'nome',
-      limit: 1500,
+      limit: 1000,
     );
 
     await store.putJson(_kRefMotoristas, motoristas);

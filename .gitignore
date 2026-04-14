@@ -32,10 +32,15 @@ dist_installer/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.codex_tmp/
+.vscode/
 
 # Local rescue/temporary files
 main_fixed.py
 restore_main.py
+flutter_run_log.txt
+*.patch
+*.diff
 
 # Diagnostics snapshots
 diagnostics/*
@@ -44,3 +49,4 @@ diagnostics/*
 .rotahub_runtime/
 cache/
 tmp/
+exports/

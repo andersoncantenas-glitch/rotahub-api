@@ -11,10 +11,10 @@ import logging
 import re
 from uuid import uuid4
 from datetime import datetime
-from typing import Optional, List, Dict, Any, Iterator
+from typing import Optional, List, Dict, Any, Iterator, Tuple
 from contextlib import contextmanager
 
-from fastapi import FastAPI, HTTPException, Depends, Query, Header
+from fastapi import FastAPI, HTTPException, Depends, Query, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
@@ -178,6 +178,48 @@ def authenticate_motorista(cur: sqlite3.Cursor, codigo: str, senha: str) -> tupl
         try:
             novo_hash = hash_password_pbkdf2(senha)
             cur.execute("UPDATE motoristas SET senha=? WHERE id=?", (novo_hash, row["id"]))
+        except Exception:
+            pass
+
+    return row, None
+
+
+def authenticate_vendedor(cur: sqlite3.Cursor, codigo: str, senha: str) -> tuple[Optional[sqlite3.Row], Optional[str]]:
+    identificador = (codigo or "").strip()
+    identificador_norm = identificador.casefold()
+    cur.execute(
+        """
+        SELECT id, nome, codigo, senha, COALESCE(status, 'ATIVO') AS status
+        FROM vendedores
+        """
+    )
+    rows = cur.fetchall() or []
+    row = None
+    for candidate in rows:
+        nome_norm = _clean_text(candidate["nome"]).casefold()
+        codigo_norm = _clean_text(candidate["codigo"]).casefold()
+        if nome_norm == identificador_norm:
+            row = candidate
+            break
+        if row is None and codigo_norm == identificador_norm:
+            row = candidate
+    if not row:
+        return None, "not_found"
+
+    status = str(row["status"] or "ATIVO").strip().upper()
+    if status not in {"ATIVO", ""}:
+        return None, "blocked"
+
+    senha_db = row["senha"] or ""
+    if str(senha_db).startswith("pbkdf2_sha256$"):
+        if not verify_password_pbkdf2(senha, senha_db):
+            return None, "invalid_password"
+    else:
+        if str(senha_db).strip() != senha:
+            return None, "invalid_password"
+        try:
+            novo_hash = hash_password_pbkdf2(senha)
+            cur.execute("UPDATE vendedores SET senha=? WHERE id=?", (novo_hash, row["id"]))
         except Exception:
             pass
 
@@ -873,6 +915,7 @@ def ensure_tables():
                 if name not in cols:
                     cur.execute(f"ALTER TABLE programacao_itens ADD COLUMN {ddl}")
 
+            add_col("observacao", "observacao TEXT")
             add_col("status_pedido", "status_pedido TEXT")
             add_col("alteracao_tipo", "alteracao_tipo TEXT")
             add_col("alteracao_detalhe", "alteracao_detalhe TEXT")
@@ -1011,6 +1054,43 @@ def ensure_tables():
                         f"UPDATE motoristas SET acesso_liberado=1 WHERE id IN ({qmarks})",
                         tuple(existing_ids),
                     )
+        except Exception:
+            pass
+
+        # cadastro/login do app vendedor
+        try:
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='vendedores'")
+            if cur.fetchone() is not None:
+                cur.execute("PRAGMA table_info(vendedores)")
+                cols_v = {row[1] for row in cur.fetchall() or []}
+
+                if "codigo" not in cols_v:
+                    cur.execute("ALTER TABLE vendedores ADD COLUMN codigo TEXT")
+                if "nome" not in cols_v:
+                    cur.execute("ALTER TABLE vendedores ADD COLUMN nome TEXT")
+                if "telefone" not in cols_v:
+                    cur.execute("ALTER TABLE vendedores ADD COLUMN telefone TEXT")
+                if "cidade_base" not in cols_v:
+                    cur.execute("ALTER TABLE vendedores ADD COLUMN cidade_base TEXT")
+                if "status" not in cols_v:
+                    cur.execute("ALTER TABLE vendedores ADD COLUMN status TEXT DEFAULT 'ATIVO'")
+                if "senha" not in cols_v:
+                    cur.execute("ALTER TABLE vendedores ADD COLUMN senha TEXT")
+                if "ultimo_login_em" not in cols_v:
+                    cur.execute("ALTER TABLE vendedores ADD COLUMN ultimo_login_em TEXT")
+                if "ultimo_login_ip" not in cols_v:
+                    cur.execute("ALTER TABLE vendedores ADD COLUMN ultimo_login_ip TEXT")
+
+                cur.execute(
+                    """
+                    UPDATE vendedores
+                    SET status='ATIVO'
+                    WHERE status IS NULL OR TRIM(status)=''
+                    """
+                )
+                cur.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_vendedores_codigo ON vendedores(codigo)"
+                )
         except Exception:
             pass
 
@@ -1489,6 +1569,78 @@ def reconcile_programacoes_motorista_links() -> int:
     return fixed
 
 
+def _resolve_motorista_vinculo(
+    cur: sqlite3.Cursor,
+    motorista_nome: str = "",
+    motorista_id: int = 0,
+    motorista_codigo: str = "",
+) -> tuple[str, int, str]:
+    nome = str(motorista_nome or "").strip().upper()
+    mot_id = int(motorista_id or 0)
+    codigo = str(motorista_codigo or "").strip().upper()
+    row = None
+
+    if mot_id > 0:
+        cur.execute(
+            """
+            SELECT id, COALESCE(nome,'') AS nome, COALESCE(codigo,'') AS codigo
+            FROM motoristas
+            WHERE id=?
+            LIMIT 1
+            """,
+            (mot_id,),
+        )
+        row = cur.fetchone()
+
+    if not row and codigo:
+        cur.execute(
+            """
+            SELECT id, COALESCE(nome,'') AS nome, COALESCE(codigo,'') AS codigo
+            FROM motoristas
+            WHERE UPPER(TRIM(codigo))=UPPER(TRIM(?))
+            LIMIT 1
+            """,
+            (codigo,),
+        )
+        row = cur.fetchone()
+
+    if not row and nome and "(" in nome and ")" in nome:
+        try:
+            code_in_name = nome[nome.rfind("(") + 1 : nome.rfind(")")].strip().upper()
+        except Exception:
+            code_in_name = ""
+        if code_in_name:
+            cur.execute(
+                """
+                SELECT id, COALESCE(nome,'') AS nome, COALESCE(codigo,'') AS codigo
+                FROM motoristas
+                WHERE UPPER(TRIM(codigo))=UPPER(TRIM(?))
+                LIMIT 1
+                """,
+                (code_in_name,),
+            )
+            row = cur.fetchone()
+
+    if not row and nome:
+        cur.execute(
+            """
+            SELECT id, COALESCE(nome,'') AS nome, COALESCE(codigo,'') AS codigo
+            FROM motoristas
+            WHERE UPPER(TRIM(nome))=UPPER(TRIM(?))
+            LIMIT 1
+            """,
+            (nome,),
+        )
+        row = cur.fetchone()
+
+    if row:
+        mot_id = int(row["id"] or 0)
+        nome = str(row["nome"] or "").strip().upper()
+        codigo = str(row["codigo"] or "").strip().upper()
+
+    return nome, mot_id, codigo
+
+
 @app.on_event("startup")
 def _startup():
     ensure_tables()
@@ -1532,11 +1684,14 @@ def _b64d(s: str) -> bytes:
     return base64.urlsafe_b64decode((s + pad).encode("utf-8"))
 
 
-def create_token(codigo: str) -> str:
+def create_token(codigo: str, perfil: str = "") -> str:
     payload = {
         "codigo": codigo,
         "exp": int(time.time()) + TOKEN_TTL_SECONDS,
     }
+    perfil_n = str(perfil or "").strip().lower()
+    if perfil_n:
+        payload["perfil"] = perfil_n
     payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
     sig = hmac.new(
@@ -1582,7 +1737,8 @@ def verify_token(token: str) -> Optional[Dict[str, Any]]:
         if not codigo:
             return None
 
-        return {"codigo": codigo, "exp": exp}
+        perfil = str(payload.get("perfil") or "").strip().lower()
+        return {"codigo": codigo, "exp": exp, "perfil": perfil}
     except Exception:
         return None
 
@@ -1598,6 +1754,46 @@ class LoginOut(BaseModel):
     token: str
     nome: str
     codigo: str
+
+
+class VendedorRascunhoItemIn(BaseModel):
+    id: Optional[str] = None
+    cod_cliente: str
+    nome_cliente: str
+    cidade: Optional[str] = None
+    bairro: Optional[str] = None
+    endereco: Optional[str] = None
+    vendedor_cadastro: Optional[str] = None
+    vendedor_origem: str
+    preco: float = 0.0
+    caixas: int = 0
+    status: Optional[str] = "PENDENTE"
+    observacao: Optional[str] = ""
+    alerta_codigo_programacao: Optional[str] = None
+    alerta_status_rota: Optional[str] = None
+
+
+class VendedorRascunhoCreateIn(BaseModel):
+    itens: List[VendedorRascunhoItemIn] = Field(default_factory=list)
+
+
+class VendedorRascunhoUpdateIn(BaseModel):
+    caixas: Optional[int] = None
+    preco: Optional[float] = None
+    observacao: Optional[str] = None
+    status: Optional[str] = None
+
+
+class VendedorRascunhoDeleteBulkIn(BaseModel):
+    ids: List[str] = Field(default_factory=list)
+
+
+class VendedorPreProgramacaoUpsertIn(BaseModel):
+    id: Optional[str] = None
+    titulo: Optional[str] = None
+    observacao: Optional[str] = ""
+    status: Optional[str] = "ABERTA"
+    item_ids: List[str] = Field(default_factory=list)
 
 
 class MotoristaAcessoIn(BaseModel):
@@ -1825,6 +2021,15 @@ class DesktopMotoristaUpsertIn(BaseModel):
     acesso_obs: Optional[str] = None
 
 
+class DesktopVendedorUpsertIn(BaseModel):
+    codigo: str
+    nome: str
+    telefone: Optional[str] = None
+    cidade_base: Optional[str] = None
+    status: Optional[str] = "ATIVO"
+    senha: Optional[str] = None
+
+
 class DesktopVeiculoUpsertIn(BaseModel):
     placa: str
     modelo: str
@@ -1981,6 +2186,9 @@ def get_current_motorista(
     data = verify_token(token)
     if not data:
         raise HTTPException(status_code=401, detail="Token inválido/expirado")
+    perfil = str(data.get("perfil") or "").strip().lower()
+    if perfil and perfil != "motorista":
+        raise HTTPException(status_code=401, detail="Token invalido para o app do motorista")
 
     codigo = data.get("codigo")
     if not codigo:
@@ -2008,6 +2216,46 @@ def get_current_motorista(
             raise HTTPException(status_code=403, detail="Acesso bloqueado. Solicite desbloqueio do administrador.")
 
     return {"codigo": m["codigo"], "nome": m["nome"], "id": m["id"]}
+
+
+def get_current_vendedor(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+) -> Dict[str, Any]:
+    token = credentials.credentials
+
+    data = verify_token(token)
+    if not data:
+        raise HTTPException(status_code=401, detail="Token invalido/expirado")
+    perfil = str(data.get("perfil") or "").strip().lower()
+    if perfil and perfil != "vendedor":
+        raise HTTPException(status_code=401, detail="Token invalido para o app do vendedor")
+
+    codigo = str(data.get("codigo") or "").strip().upper()
+    if not codigo:
+        raise HTTPException(status_code=401, detail="Token sem codigo do vendedor")
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='vendedores'")
+        if not cur.fetchone():
+            raise HTTPException(status_code=401, detail="Cadastro de vendedores indisponivel")
+        cur.execute(
+            """
+            SELECT id, COALESCE(nome,'') AS nome, COALESCE(codigo,'') AS codigo, COALESCE(status,'ATIVO') AS status
+            FROM vendedores
+            WHERE UPPER(TRIM(codigo))=?
+            LIMIT 1
+            """,
+            (codigo,),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=401, detail="Vendedor nao encontrado")
+        status = str(row["status"] or "ATIVO").strip().upper()
+        if status not in {"ATIVO", ""}:
+            raise HTTPException(status_code=403, detail="Acesso do vendedor bloqueado")
+
+    return {"codigo": row["codigo"], "nome": row["nome"], "id": row["id"]}
 
 
 def _owner_filter_for_programacoes(
@@ -2160,6 +2408,46 @@ def desktop_motoristas(_ok: bool = Depends(_require_desktop_secret)):
                     "codigo": str(r[1] or "").strip().upper(),
                     "nome": str(r[2] or "").strip().upper(),
                     "status": str(r[3] or "ATIVO").strip().upper(),
+                }
+            )
+        return out
+
+
+@app.get("/desktop/cadastros/vendedores")
+def desktop_vendedores(_ok: bool = Depends(_require_desktop_secret)):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='vendedores'")
+        if not cur.fetchone():
+            return []
+        cur.execute("PRAGMA table_info(vendedores)")
+        cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+        status_expr = "COALESCE(status,'ATIVO')" if "status" in cols else "'ATIVO'"
+        telefone_expr = "COALESCE(telefone,'')" if "telefone" in cols else "''"
+        cidade_expr = "COALESCE(cidade_base,'')" if "cidade_base" in cols else "''"
+        cur.execute(
+            f"""
+            SELECT
+                id,
+                COALESCE(codigo,''),
+                COALESCE(nome,''),
+                {telefone_expr} AS telefone,
+                {cidade_expr} AS cidade_base,
+                {status_expr} AS status
+            FROM vendedores
+            ORDER BY UPPER(COALESCE(nome,'')), UPPER(COALESCE(codigo,'')), id
+            """
+        )
+        out = []
+        for r in cur.fetchall() or []:
+            out.append(
+                {
+                    "id": int(r[0] or 0),
+                    "codigo": str(r[1] or "").strip().upper(),
+                    "nome": str(r[2] or "").strip().upper(),
+                    "telefone": str(r[3] or "").strip(),
+                    "cidade_base": str(r[4] or "").strip().upper(),
+                    "status": str(r[5] or "ATIVO").strip().upper(),
                 }
             )
         return out
@@ -2327,6 +2615,85 @@ def desktop_motoristas_upsert(payload: DesktopMotoristaUpsertIn, _ok: bool = Dep
 
         ph = ", ".join(["?"] * len(cols_ins))
         cur.execute(f"INSERT INTO motoristas ({', '.join(cols_ins)}) VALUES ({ph})", tuple(vals_ins))
+        return {"ok": True, "codigo": codigo, "created": 1}
+
+
+@app.post("/desktop/cadastros/vendedores/upsert")
+def desktop_vendedores_upsert(payload: DesktopVendedorUpsertIn, _ok: bool = Depends(_require_desktop_secret)):
+    codigo = _clean_text(payload.codigo).upper()
+    nome = _clean_text(payload.nome).upper()
+    if not codigo or not nome:
+        raise HTTPException(status_code=400, detail="codigo e nome sao obrigatorios.")
+
+    status = _clean_text(payload.status or "ATIVO").upper()
+    if status not in {"ATIVO", "DESATIVADO"}:
+        status = "ATIVO"
+
+    telefone = _clean_text(payload.telefone)
+    cidade_base = _clean_text(payload.cidade_base).upper()
+    senha_in = _clean_text(payload.senha)
+    senha_hash = ""
+    if senha_in:
+        senha_hash = senha_in if senha_in.startswith("pbkdf2_sha256$") else hash_password_pbkdf2(senha_in)
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(vendedores)")
+        cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+        if not cols:
+            raise HTTPException(status_code=500, detail="Tabela vendedores indisponivel.")
+
+        cur.execute(
+            "SELECT id, COALESCE(senha,'') AS senha FROM vendedores WHERE UPPER(TRIM(codigo))=? LIMIT 1",
+            (codigo,),
+        )
+        existing = cur.fetchone()
+
+        set_parts: List[str] = []
+        params: List[Any] = []
+        if "codigo" in cols:
+            set_parts.append("codigo=?")
+            params.append(codigo)
+        if "nome" in cols:
+            set_parts.append("nome=?")
+            params.append(nome)
+        if "telefone" in cols:
+            set_parts.append("telefone=?")
+            params.append(telefone)
+        if "cidade_base" in cols:
+            set_parts.append("cidade_base=?")
+            params.append(cidade_base)
+        if "status" in cols:
+            set_parts.append("status=?")
+            params.append(status)
+        if "senha" in cols:
+            current_hash = _clean_text(existing["senha"] if existing else "")
+            final_hash = senha_hash or current_hash
+            if final_hash:
+                set_parts.append("senha=?")
+                params.append(final_hash)
+
+        if existing:
+            if not set_parts:
+                return {"ok": True, "codigo": codigo, "updated": 0}
+            params.append(int(existing["id"]))
+            cur.execute(f"UPDATE vendedores SET {', '.join(set_parts)} WHERE id=?", tuple(params))
+            return {"ok": True, "codigo": codigo, "updated": int(cur.rowcount or 0)}
+
+        cols_ins: List[str] = ["codigo"]
+        vals_ins: List[Any] = [codigo]
+        if "nome" in cols:
+            cols_ins.append("nome"); vals_ins.append(nome)
+        if "telefone" in cols:
+            cols_ins.append("telefone"); vals_ins.append(telefone)
+        if "cidade_base" in cols:
+            cols_ins.append("cidade_base"); vals_ins.append(cidade_base)
+        if "status" in cols:
+            cols_ins.append("status"); vals_ins.append(status)
+        if "senha" in cols:
+            cols_ins.append("senha"); vals_ins.append(senha_hash or hash_password_pbkdf2("1234"))
+        ph = ", ".join(["?"] * len(cols_ins))
+        cur.execute(f"INSERT INTO vendedores ({', '.join(cols_ins)}) VALUES ({ph})", tuple(vals_ins))
         return {"ok": True, "codigo": codigo, "created": 1}
 
 
@@ -2549,6 +2916,21 @@ def desktop_motoristas_delete(codigo: str, _ok: bool = Depends(_require_desktop_
     return {"ok": True, "codigo": cod, "deleted": deleted}
 
 
+@app.delete("/desktop/cadastros/vendedores/{codigo}")
+def desktop_vendedores_delete(codigo: str, _ok: bool = Depends(_require_desktop_secret)):
+    cod = _clean_text(codigo).upper()
+    if not cod:
+        raise HTTPException(status_code=400, detail="codigo obrigatorio.")
+    with get_conn() as conn:
+        cur = conn.cursor()
+        bloqueio = _cadastro_delete_block_reason(cur, "vendedores", codigo=cod)
+        if bloqueio:
+            raise HTTPException(status_code=409, detail=f"{bloqueio} Use status DESATIVADO.")
+        cur.execute("DELETE FROM vendedores WHERE UPPER(TRIM(COALESCE(codigo,'')))=UPPER(TRIM(?))", (cod,))
+        deleted = int(cur.rowcount or 0)
+    return {"ok": True, "codigo": cod, "deleted": deleted}
+
+
 @app.delete("/desktop/cadastros/veiculos/{placa}")
 def desktop_veiculos_delete(placa: str, _ok: bool = Depends(_require_desktop_secret)):
     plc = _clean_text(placa).upper()
@@ -2719,29 +3101,28 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
         if tipo_estimativa not in ("KG", "CX"):
             tipo_estimativa = "KG"
 
-        if (not motorista_codigo) and motorista_id > 0:
-            cur.execute("SELECT COALESCE(codigo,'') AS codigo FROM motoristas WHERE id=? LIMIT 1", (motorista_id,))
-            rr = cur.fetchone()
-            motorista_codigo = str((rr["codigo"] if rr else "") or "").strip().upper()
-
-        if (not motorista_id) and motorista_codigo:
-            cur.execute("SELECT id FROM motoristas WHERE UPPER(TRIM(codigo))=UPPER(TRIM(?)) LIMIT 1", (motorista_codigo,))
-            rr = cur.fetchone()
-            motorista_id = int(rr["id"] or 0) if rr else 0
-
-        if (not motorista_id) and motorista:
-            cur.execute("SELECT id, COALESCE(codigo,'') AS codigo FROM motoristas WHERE UPPER(TRIM(nome))=UPPER(TRIM(?)) LIMIT 1", (motorista,))
-            rr = cur.fetchone()
-            if rr:
-                motorista_id = int(rr["id"] or 0)
-                if not motorista_codigo:
-                    motorista_codigo = str(rr["codigo"] or "").strip().upper()
+        select_parts = [
+            "id",
+            "COALESCE(status,'') AS status",
+            "COALESCE(status_operacional,'') AS status_operacional",
+            "COALESCE(motorista,'') AS motorista",
+        ]
+        if "motorista_id" in cols_prog:
+            select_parts.append("COALESCE(motorista_id,0) AS motorista_id")
+        else:
+            select_parts.append("0 AS motorista_id")
+        if "motorista_codigo" in cols_prog:
+            select_parts.append("COALESCE(motorista_codigo,'') AS motorista_codigo")
+        else:
+            select_parts.append("'' AS motorista_codigo")
+        if "codigo_motorista" in cols_prog:
+            select_parts.append("COALESCE(codigo_motorista,'') AS codigo_motorista")
+        else:
+            select_parts.append("'' AS codigo_motorista")
 
         cur.execute(
-            """
-            SELECT id,
-                   COALESCE(status,'') AS status,
-                   COALESCE(status_operacional,'') AS status_operacional
+            f"""
+            SELECT {", ".join(select_parts)}
             FROM programacoes
             WHERE codigo_programacao=?
             ORDER BY id DESC
@@ -2753,6 +3134,11 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
         pid = int(row["id"] or 0) if row else 0
         status_atual = str((row["status"] if row else "") or "").strip().upper()
         status_op_atual = str((row["status_operacional"] if row else "") or "").strip().upper()
+        motorista_atual = str((row["motorista"] if row else "") or "").strip().upper()
+        motorista_id_atual = int((row["motorista_id"] if row else 0) or 0)
+        motorista_codigo_atual = str(
+            ((row["motorista_codigo"] if row else "") or (row["codigo_motorista"] if row else "")) or ""
+        ).strip().upper()
         state_atual = _programacao_state(cur, codigo) if pid > 0 else None
 
         status_execucao = {"EM_ROTA", "EM ROTA", "INICIADA", "EM_ENTREGAS", "EM ENTREGAS", "CARREGADA"}
@@ -2782,6 +3168,36 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
             # Não deixa payload legacy degradar status para ATIVA indevidamente.
             if status not in status_edicao_desktop:
                 status = status_atual or "ATIVA"
+
+        if pid > 0:
+            if not motorista and motorista_atual:
+                motorista = motorista_atual
+            if motorista_id <= 0 and motorista_id_atual > 0:
+                motorista_id = motorista_id_atual
+            if not motorista_codigo and motorista_codigo_atual:
+                motorista_codigo = motorista_codigo_atual
+
+        motorista, motorista_id, motorista_codigo = _resolve_motorista_vinculo(
+            cur,
+            motorista_nome=motorista,
+            motorista_id=motorista_id,
+            motorista_codigo=motorista_codigo,
+        )
+
+        has_stable_motorista_link = any(
+            col in cols_prog for col in ("motorista_id", "motorista_codigo", "codigo_motorista")
+        )
+        if has_stable_motorista_link:
+            if motorista_id <= 0 or not motorista_codigo:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Programacao oficial exige motorista valido para vinculo com o app do motorista.",
+                )
+        elif not motorista:
+            raise HTTPException(
+                status_code=400,
+                detail="Programacao oficial exige motorista informado.",
+            )
 
         if pid > 0:
             sets = [
@@ -2935,31 +3351,45 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
             )
 
         # Itens da programação: substitui snapshot no servidor.
+        cur.execute("PRAGMA table_info(programacao_itens)")
+        cols_itens = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+        has_item_obs = "observacao" in cols_itens
         cur.execute("DELETE FROM programacao_itens WHERE codigo_programacao=?", (codigo,))
         for it in (payload.itens or []):
             cod_cli = str(it.cod_cliente or "").strip().upper()
             nome_cli = str(it.nome_cliente or "").strip().upper()
             if not cod_cli or not nome_cli:
                 continue
-            cur.execute(
-                """
-                INSERT INTO programacao_itens
-                    (codigo_programacao, cod_cliente, nome_cliente, qnt_caixas, kg, preco, endereco, vendedor, pedido, produto)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    codigo,
-                    cod_cli,
-                    nome_cli,
-                    int(it.qnt_caixas or 0),
-                    float(it.kg or 0.0),
-                    float(it.preco or 0.0),
-                    str(it.endereco or "").strip().upper(),
-                    str(it.vendedor or "").strip().upper(),
-                    str(it.pedido or "").strip().upper(),
-                    str(it.produto or "").strip().upper(),
-                ),
+            item_vals = (
+                codigo,
+                cod_cli,
+                nome_cli,
+                int(it.qnt_caixas or 0),
+                float(it.kg or 0.0),
+                float(it.preco or 0.0),
+                str(it.endereco or "").strip().upper(),
+                str(it.vendedor or "").strip().upper(),
+                str(it.pedido or "").strip().upper(),
+                str(it.produto or "").strip().upper(),
             )
+            if has_item_obs:
+                cur.execute(
+                    """
+                    INSERT INTO programacao_itens
+                        (codigo_programacao, cod_cliente, nome_cliente, qnt_caixas, kg, preco, endereco, vendedor, pedido, produto, observacao)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    item_vals + (str(it.obs or "").strip().upper(),),
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO programacao_itens
+                        (codigo_programacao, cod_cliente, nome_cliente, qnt_caixas, kg, preco, endereco, vendedor, pedido, produto)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    item_vals,
+                )
 
         if linked_venda_ids:
             placeholders = ",".join(["?"] * len(linked_venda_ids))
@@ -3523,8 +3953,586 @@ def autenticar_motorista(payload: LoginIn):
     if not m:
         raise HTTPException(status_code=401, detail="Codigo ou senha invalidos")
 
-    token = create_token(m["codigo"])
+    token = create_token(m["codigo"], perfil="motorista")
     return {"token": token, "nome": m["nome"], "codigo": m["codigo"]}
+
+
+@app.post("/auth/vendedor/login", response_model=LoginOut)
+def autenticar_vendedor(payload: LoginIn, request: Request):
+    codigo = (payload.codigo or "").strip()
+    senha = (payload.senha or "").strip()
+
+    if not codigo or not senha:
+        raise HTTPException(status_code=400, detail="Nome/codigo e senha sao obrigatorios")
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        v, auth_err = authenticate_vendedor(cur, codigo, senha)
+        if v:
+            try:
+                cur.execute("PRAGMA table_info(vendedores)")
+                cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+                set_parts: List[str] = []
+                params: List[Any] = []
+                if "ultimo_login_em" in cols:
+                    set_parts.append("ultimo_login_em=?")
+                    params.append(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                if "ultimo_login_ip" in cols:
+                    host = ""
+                    try:
+                        host = str(request.client.host or "").strip()
+                    except Exception:
+                        host = ""
+                    set_parts.append("ultimo_login_ip=?")
+                    params.append(host)
+                if set_parts:
+                    params.append(int(v["id"]))
+                    cur.execute(f"UPDATE vendedores SET {', '.join(set_parts)} WHERE id=?", tuple(params))
+            except Exception:
+                logging.debug("Falha ao registrar ultimo login do vendedor", exc_info=True)
+
+    if auth_err == "blocked":
+        raise HTTPException(status_code=403, detail="Acesso bloqueado. Procure o administrador.")
+    if not v:
+        raise HTTPException(status_code=401, detail="Nome/codigo ou senha invalidos")
+
+    token = create_token(v["codigo"], perfil="vendedor")
+    return {"token": token, "nome": v["nome"], "codigo": v["codigo"]}
+
+
+@app.get("/vendedor/rascunho")
+def vendedor_rascunho_listar(
+    limit: int = Query(500, ge=1, le=2000),
+    vendedor=Depends(get_current_vendedor),
+):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='vendedor_rascunho_itens'")
+        if not cur.fetchone():
+            return []
+        cur.execute(
+            """
+            SELECT
+                id,
+                COALESCE(cod_cliente,'') AS cod_cliente,
+                COALESCE(nome_cliente,'') AS nome_cliente,
+                COALESCE(cidade,'') AS cidade,
+                COALESCE(bairro,'') AS bairro,
+                COALESCE(endereco,'') AS endereco,
+                COALESCE(vendedor_cadastro,'') AS vendedor_cadastro,
+                COALESCE(vendedor_origem,'') AS vendedor_origem,
+                COALESCE(preco, 0) AS preco,
+                COALESCE(caixas, 0) AS caixas,
+                COALESCE(status,'PENDENTE') AS status,
+                COALESCE(observacao,'') AS observacao,
+                COALESCE(alerta_codigo_programacao,'') AS alerta_codigo_programacao,
+                COALESCE(alerta_status_rota,'') AS alerta_status_rota,
+                COALESCE(criado_em,'') AS criado_em,
+                COALESCE(atualizado_em,'') AS atualizado_em,
+                COALESCE(criado_por_codigo,'') AS criado_por_codigo,
+                COALESCE(atualizado_por_codigo,'') AS atualizado_por_codigo
+            FROM vendedor_rascunho_itens
+            ORDER BY COALESCE(atualizado_em, criado_em) DESC, id DESC
+            LIMIT ?
+            """,
+            (int(limit),),
+        )
+        out: List[Dict[str, Any]] = []
+        for row in cur.fetchall() or []:
+            out.append(
+                {
+                    "id": str(row["id"] or "").strip(),
+                    "cod_cliente": str(row["cod_cliente"] or "").strip().upper(),
+                    "nome_cliente": str(row["nome_cliente"] or "").strip().upper(),
+                    "cidade": str(row["cidade"] or "").strip().upper(),
+                    "bairro": str(row["bairro"] or "").strip().upper(),
+                    "endereco": str(row["endereco"] or "").strip().upper(),
+                    "vendedor_cadastro": str(row["vendedor_cadastro"] or "").strip().upper(),
+                    "vendedor_origem": str(row["vendedor_origem"] or "").strip().upper(),
+                    "preco": float(row["preco"] or 0.0),
+                    "caixas": int(row["caixas"] or 0),
+                    "status": str(row["status"] or "PENDENTE").strip().upper(),
+                    "observacao": str(row["observacao"] or "").strip(),
+                    "alerta_codigo_programacao": str(row["alerta_codigo_programacao"] or "").strip().upper(),
+                    "alerta_status_rota": str(row["alerta_status_rota"] or "").strip().upper(),
+                    "criado_em": str(row["criado_em"] or "").strip(),
+                    "updated_at": str(row["atualizado_em"] or "").strip(),
+                    "criado_por_codigo": str(row["criado_por_codigo"] or "").strip().upper(),
+                    "atualizado_por_codigo": str(row["atualizado_por_codigo"] or "").strip().upper(),
+                }
+            )
+        return out
+
+
+@app.post("/vendedor/rascunho/itens")
+def vendedor_rascunho_criar(
+    payload: VendedorRascunhoCreateIn,
+    vendedor=Depends(get_current_vendedor),
+):
+    itens = payload.itens or []
+    if not itens:
+        raise HTTPException(status_code=400, detail="itens obrigatorios.")
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ids: List[str] = []
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='vendedor_rascunho_itens'")
+        if not cur.fetchone():
+            raise HTTPException(status_code=500, detail="Tabela de rascunho indisponivel.")
+
+        for item in itens:
+            cod_cliente = _clean_text(item.cod_cliente).upper()
+            nome_cliente = _clean_text(item.nome_cliente).upper()
+            vendedor_origem = _clean_text(item.vendedor_origem or vendedor["codigo"]).upper() or str(vendedor["codigo"]).upper()
+            if not cod_cliente or not nome_cliente or not vendedor_origem:
+                continue
+            item_id = _clean_text(item.id) or uuid4().hex.upper()
+            status = _clean_text(item.status or "PENDENTE").upper()
+            if status not in {"PENDENTE", "FINALIZADA"}:
+                status = "PENDENTE"
+            ids.append(item_id)
+            cur.execute(
+                """
+                INSERT INTO vendedor_rascunho_itens (
+                    id, cod_cliente, nome_cliente, cidade, bairro, endereco,
+                    vendedor_cadastro, vendedor_origem, preco, caixas, status,
+                    observacao, alerta_codigo_programacao, alerta_status_rota,
+                    criado_em, atualizado_em, criado_por_codigo, atualizado_por_codigo
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    cod_cliente=excluded.cod_cliente,
+                    nome_cliente=excluded.nome_cliente,
+                    cidade=excluded.cidade,
+                    bairro=excluded.bairro,
+                    endereco=excluded.endereco,
+                    vendedor_cadastro=excluded.vendedor_cadastro,
+                    vendedor_origem=excluded.vendedor_origem,
+                    preco=excluded.preco,
+                    caixas=excluded.caixas,
+                    status=excluded.status,
+                    observacao=excluded.observacao,
+                    alerta_codigo_programacao=excluded.alerta_codigo_programacao,
+                    alerta_status_rota=excluded.alerta_status_rota,
+                    atualizado_em=excluded.atualizado_em,
+                    atualizado_por_codigo=excluded.atualizado_por_codigo
+                """,
+                (
+                    item_id,
+                    cod_cliente,
+                    nome_cliente,
+                    _clean_text(item.cidade).upper(),
+                    _clean_text(item.bairro).upper(),
+                    _clean_text(item.endereco).upper(),
+                    _clean_text(item.vendedor_cadastro).upper(),
+                    vendedor_origem,
+                    float(item.preco or 0.0),
+                    max(int(item.caixas or 0), 0),
+                    status,
+                    _clean_text(item.observacao),
+                    _clean_text(item.alerta_codigo_programacao).upper(),
+                    _clean_text(item.alerta_status_rota).upper(),
+                    now,
+                    now,
+                    str(vendedor["codigo"]).upper(),
+                    str(vendedor["codigo"]).upper(),
+                ),
+            )
+
+    return {"ok": True, "ids": ids, "count": len(ids)}
+
+
+@app.patch("/vendedor/rascunho/{item_id}")
+def vendedor_rascunho_atualizar(
+    item_id: str,
+    payload: VendedorRascunhoUpdateIn,
+    vendedor=Depends(get_current_vendedor),
+):
+    target = _clean_text(item_id)
+    if not target:
+        raise HTTPException(status_code=400, detail="item_id obrigatorio.")
+
+    sets: List[str] = []
+    params: List[Any] = []
+    if payload.caixas is not None:
+        sets.append("caixas=?")
+        params.append(max(int(payload.caixas or 0), 0))
+    if payload.preco is not None:
+        sets.append("preco=?")
+        params.append(float(payload.preco or 0.0))
+    if payload.observacao is not None:
+        sets.append("observacao=?")
+        params.append(_clean_text(payload.observacao))
+    if payload.status is not None:
+        status = _clean_text(payload.status).upper()
+        if status not in {"PENDENTE", "FINALIZADA"}:
+            raise HTTPException(status_code=400, detail="status invalido.")
+        sets.append("status=?")
+        params.append(status)
+
+    if not sets:
+        raise HTTPException(status_code=400, detail="Nenhum campo para atualizar.")
+
+    sets.append("atualizado_em=?")
+    params.append(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    sets.append("atualizado_por_codigo=?")
+    params.append(str(vendedor["codigo"]).upper())
+    params.append(target)
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"UPDATE vendedor_rascunho_itens SET {', '.join(sets)} WHERE id=?",
+            tuple(params),
+        )
+        if int(cur.rowcount or 0) <= 0:
+            raise HTTPException(status_code=404, detail="Item de rascunho nao encontrado.")
+    return {"ok": True, "id": target}
+
+
+@app.delete("/vendedor/rascunho/{item_id}")
+def vendedor_rascunho_remover(
+    item_id: str,
+    vendedor=Depends(get_current_vendedor),
+):
+    target = _clean_text(item_id)
+    if not target:
+        raise HTTPException(status_code=400, detail="item_id obrigatorio.")
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM vendedor_rascunho_itens WHERE id=?", (target,))
+        deleted = int(cur.rowcount or 0)
+    return {"ok": True, "id": target, "deleted": deleted}
+
+
+@app.post("/vendedor/rascunho/remover-em-lote")
+def vendedor_rascunho_remover_em_lote(
+    payload: VendedorRascunhoDeleteBulkIn,
+    vendedor=Depends(get_current_vendedor),
+):
+    ids = [str(item or "").strip() for item in (payload.ids or []) if str(item or "").strip()]
+    if not ids:
+        return {"ok": True, "deleted": 0}
+    with get_conn() as conn:
+        cur = conn.cursor()
+        qmarks = ",".join(["?"] * len(ids))
+        cur.execute(f"DELETE FROM vendedor_rascunho_itens WHERE id IN ({qmarks})", tuple(ids))
+        deleted = int(cur.rowcount or 0)
+    return {"ok": True, "deleted": deleted}
+
+
+@app.get("/vendedor/pre-programacoes")
+def vendedor_pre_programacoes_listar(
+    status: str = Query("ABERTA", description="ABERTA|FECHADA|TODAS"),
+    limit: int = Query(100, ge=1, le=500),
+    vendedor=Depends(get_current_vendedor),
+):
+    status_norm = _clean_text(status).upper() or "ABERTA"
+    with get_conn() as conn:
+        cur = conn.cursor()
+        if not table_exists(cur, "vendedor_pre_programacoes"):
+            return []
+
+        params: List[Any] = []
+        where_sql = ""
+        if status_norm not in {"", "TODAS"}:
+            where_sql = "WHERE UPPER(COALESCE(status,'ABERTA'))=?"
+            params.append(status_norm)
+
+        params.append(int(limit))
+        cur.execute(
+            f"""
+            SELECT
+                id,
+                COALESCE(titulo,'') AS titulo,
+                COALESCE(observacao,'') AS observacao,
+                COALESCE(status,'ABERTA') AS status,
+                COALESCE(criado_em,'') AS criado_em,
+                COALESCE(atualizado_em,'') AS atualizado_em,
+                COALESCE(criado_por_codigo,'') AS criado_por_codigo,
+                COALESCE(atualizado_por_codigo,'') AS atualizado_por_codigo
+            FROM vendedor_pre_programacoes
+            {where_sql}
+            ORDER BY COALESCE(atualizado_em, criado_em) DESC, id DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        )
+        headers = cur.fetchall() or []
+        if not headers:
+            return []
+
+        agrupado: Dict[str, Dict[str, Any]] = {}
+        ordered_ids: List[str] = []
+        for row in headers:
+            pid = str(row["id"] or "").strip()
+            if not pid:
+                continue
+            ordered_ids.append(pid)
+            agrupado[pid] = {
+                "id": pid,
+                "titulo": str(row["titulo"] or "").strip(),
+                "observacao": str(row["observacao"] or "").strip(),
+                "status": str(row["status"] or "ABERTA").strip().upper(),
+                "criado_em": str(row["criado_em"] or "").strip(),
+                "updated_at": str(row["atualizado_em"] or "").strip(),
+                "criado_por_codigo": str(row["criado_por_codigo"] or "").strip().upper(),
+                "atualizado_por_codigo": str(row["atualizado_por_codigo"] or "").strip().upper(),
+                "itens_total": 0,
+                "itens_pendentes": 0,
+                "itens_finalizadas": 0,
+                "vendedores": [],
+            }
+
+        qmarks = ",".join(["?"] * len(ordered_ids))
+        cur.execute(
+            f"""
+            SELECT
+                ppi.pre_programacao_id,
+                COALESCE(ppi.rascunho_item_id,'') AS rascunho_item_id,
+                COALESCE(vri.status,'') AS item_status,
+                UPPER(TRIM(COALESCE(vri.vendedor_origem, vri.vendedor_cadastro, ''))) AS vendedor_item
+            FROM vendedor_pre_programacao_itens ppi
+            LEFT JOIN vendedor_rascunho_itens vri
+              ON vri.id = ppi.rascunho_item_id
+            WHERE ppi.pre_programacao_id IN ({qmarks})
+            ORDER BY COALESCE(ppi.ordem,0), ppi.id
+            """,
+            tuple(ordered_ids),
+        )
+        for row in cur.fetchall() or []:
+            pid = str(row["pre_programacao_id"] or "").strip()
+            if not pid or pid not in agrupado:
+                continue
+            base = agrupado[pid]
+            rid = str(row["rascunho_item_id"] or "").strip()
+            if rid:
+                base["itens_total"] = int(base["itens_total"] or 0) + 1
+                item_status = str(row["item_status"] or "").strip().upper()
+                if item_status == "FINALIZADA":
+                    base["itens_finalizadas"] = int(base["itens_finalizadas"] or 0) + 1
+                else:
+                    base["itens_pendentes"] = int(base["itens_pendentes"] or 0) + 1
+                vendedor_item = str(row["vendedor_item"] or "").strip().upper()
+                if vendedor_item and vendedor_item not in base["vendedores"]:
+                    base["vendedores"].append(vendedor_item)
+
+        out = [agrupado[pid] for pid in ordered_ids if pid in agrupado]
+        for item in out:
+            item["vendedores"] = sorted(item["vendedores"])
+        return out
+
+
+@app.get("/vendedor/pre-programacoes/{pre_programacao_id}")
+def vendedor_pre_programacao_detalhe(
+    pre_programacao_id: str,
+    vendedor=Depends(get_current_vendedor),
+):
+    target = _clean_text(pre_programacao_id)
+    if not target:
+        raise HTTPException(status_code=400, detail="pre_programacao_id obrigatorio.")
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        if not table_exists(cur, "vendedor_pre_programacoes"):
+            raise HTTPException(status_code=404, detail="Pre-programacao nao encontrada.")
+        cur.execute(
+            """
+            SELECT
+                id,
+                COALESCE(titulo,'') AS titulo,
+                COALESCE(observacao,'') AS observacao,
+                COALESCE(status,'ABERTA') AS status,
+                COALESCE(criado_em,'') AS criado_em,
+                COALESCE(atualizado_em,'') AS atualizado_em,
+                COALESCE(criado_por_codigo,'') AS criado_por_codigo,
+                COALESCE(atualizado_por_codigo,'') AS atualizado_por_codigo
+            FROM vendedor_pre_programacoes
+            WHERE id=?
+            """,
+            (target,),
+        )
+        header = cur.fetchone()
+        if not header:
+            raise HTTPException(status_code=404, detail="Pre-programacao nao encontrada.")
+
+        cur.execute(
+            """
+            SELECT
+                COALESCE(ppi.ordem,0) AS ordem,
+                COALESCE(vri.id,'') AS id,
+                COALESCE(vri.cod_cliente,'') AS cod_cliente,
+                COALESCE(vri.nome_cliente,'') AS nome_cliente,
+                COALESCE(vri.cidade,'') AS cidade,
+                COALESCE(vri.bairro,'') AS bairro,
+                COALESCE(vri.endereco,'') AS endereco,
+                COALESCE(vri.vendedor_cadastro,'') AS vendedor_cadastro,
+                COALESCE(vri.vendedor_origem,'') AS vendedor_origem,
+                COALESCE(vri.preco,0) AS preco,
+                COALESCE(vri.caixas,0) AS caixas,
+                COALESCE(vri.status,'PENDENTE') AS status,
+                COALESCE(vri.observacao,'') AS observacao,
+                COALESCE(vri.alerta_codigo_programacao,'') AS alerta_codigo_programacao,
+                COALESCE(vri.alerta_status_rota,'') AS alerta_status_rota,
+                COALESCE(vri.criado_em,'') AS criado_em,
+                COALESCE(vri.atualizado_em,'') AS atualizado_em,
+                COALESCE(vri.criado_por_codigo,'') AS criado_por_codigo,
+                COALESCE(vri.atualizado_por_codigo,'') AS atualizado_por_codigo
+            FROM vendedor_pre_programacao_itens ppi
+            LEFT JOIN vendedor_rascunho_itens vri
+              ON vri.id = ppi.rascunho_item_id
+            WHERE ppi.pre_programacao_id=?
+            ORDER BY COALESCE(ppi.ordem,0), ppi.id
+            """,
+            (target,),
+        )
+        itens: List[Dict[str, Any]] = []
+        item_ids: List[str] = []
+        for row in cur.fetchall() or []:
+            item_id = str(row["id"] or "").strip()
+            if not item_id:
+                continue
+            item_ids.append(item_id)
+            itens.append(
+                {
+                    "id": item_id,
+                    "ordem": int(row["ordem"] or 0),
+                    "cod_cliente": str(row["cod_cliente"] or "").strip().upper(),
+                    "nome_cliente": str(row["nome_cliente"] or "").strip().upper(),
+                    "cidade": str(row["cidade"] or "").strip().upper(),
+                    "bairro": str(row["bairro"] or "").strip().upper(),
+                    "endereco": str(row["endereco"] or "").strip().upper(),
+                    "vendedor_cadastro": str(row["vendedor_cadastro"] or "").strip().upper(),
+                    "vendedor_origem": str(row["vendedor_origem"] or "").strip().upper(),
+                    "preco": float(row["preco"] or 0.0),
+                    "caixas": int(row["caixas"] or 0),
+                    "status": str(row["status"] or "PENDENTE").strip().upper(),
+                    "observacao": str(row["observacao"] or "").strip(),
+                    "alerta_codigo_programacao": str(row["alerta_codigo_programacao"] or "").strip().upper(),
+                    "alerta_status_rota": str(row["alerta_status_rota"] or "").strip().upper(),
+                    "criado_em": str(row["criado_em"] or "").strip(),
+                    "updated_at": str(row["atualizado_em"] or "").strip(),
+                    "criado_por_codigo": str(row["criado_por_codigo"] or "").strip().upper(),
+                    "atualizado_por_codigo": str(row["atualizado_por_codigo"] or "").strip().upper(),
+                }
+            )
+
+        return {
+            "pre_programacao": {
+                "id": str(header["id"] or "").strip(),
+                "titulo": str(header["titulo"] or "").strip(),
+                "observacao": str(header["observacao"] or "").strip(),
+                "status": str(header["status"] or "ABERTA").strip().upper(),
+                "criado_em": str(header["criado_em"] or "").strip(),
+                "updated_at": str(header["atualizado_em"] or "").strip(),
+                "criado_por_codigo": str(header["criado_por_codigo"] or "").strip().upper(),
+                "atualizado_por_codigo": str(header["atualizado_por_codigo"] or "").strip().upper(),
+            },
+            "item_ids": item_ids,
+            "itens": itens,
+        }
+
+
+@app.post("/vendedor/pre-programacoes/upsert")
+def vendedor_pre_programacao_upsert(
+    payload: VendedorPreProgramacaoUpsertIn,
+    vendedor=Depends(get_current_vendedor),
+):
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    pid = _clean_text(payload.id) or uuid4().hex.upper()
+    titulo = _clean_text(payload.titulo)
+    if not titulo:
+        titulo = f"PRE-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    status = _clean_text(payload.status or "ABERTA").upper() or "ABERTA"
+    if status not in {"ABERTA", "FECHADA"}:
+        raise HTTPException(status_code=400, detail="status invalido.")
+
+    cleaned_ids: List[str] = []
+    for item_id in payload.item_ids or []:
+        target = str(item_id or "").strip()
+        if target and target not in cleaned_ids:
+            cleaned_ids.append(target)
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        if not table_exists(cur, "vendedor_pre_programacoes"):
+            raise HTTPException(status_code=500, detail="Tabela de pre-programacao indisponivel.")
+        cur.execute(
+            """
+            INSERT INTO vendedor_pre_programacoes (
+                id, titulo, observacao, status,
+                criado_em, atualizado_em, criado_por_codigo, atualizado_por_codigo
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                titulo=excluded.titulo,
+                observacao=excluded.observacao,
+                status=excluded.status,
+                atualizado_em=excluded.atualizado_em,
+                atualizado_por_codigo=excluded.atualizado_por_codigo
+            """,
+            (
+                pid,
+                titulo,
+                _clean_text(payload.observacao),
+                status,
+                now,
+                now,
+                str(vendedor["codigo"]).upper(),
+                str(vendedor["codigo"]).upper(),
+            ),
+        )
+
+        valid_ids = cleaned_ids
+        if cleaned_ids:
+            qmarks = ",".join(["?"] * len(cleaned_ids))
+            cur.execute(
+                f"SELECT id FROM vendedor_rascunho_itens WHERE id IN ({qmarks})",
+                tuple(cleaned_ids),
+            )
+            existentes = {
+                str(row["id"] or "").strip()
+                for row in (cur.fetchall() or [])
+                if str(row["id"] or "").strip()
+            }
+            valid_ids = [item_id for item_id in cleaned_ids if item_id in existentes]
+
+        cur.execute(
+            "DELETE FROM vendedor_pre_programacao_itens WHERE pre_programacao_id=?",
+            (pid,),
+        )
+        for ordem, item_id in enumerate(valid_ids, start=1):
+            cur.execute(
+                """
+                INSERT INTO vendedor_pre_programacao_itens (
+                    pre_programacao_id, rascunho_item_id, ordem, criado_em, atualizado_em
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (pid, item_id, int(ordem), now, now),
+            )
+
+    return {"ok": True, "id": pid, "count": len(valid_ids)}
+
+
+@app.delete("/vendedor/pre-programacoes/{pre_programacao_id}")
+def vendedor_pre_programacao_remover(
+    pre_programacao_id: str,
+    vendedor=Depends(get_current_vendedor),
+):
+    target = _clean_text(pre_programacao_id)
+    if not target:
+        raise HTTPException(status_code=400, detail="pre_programacao_id obrigatorio.")
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "DELETE FROM vendedor_pre_programacao_itens WHERE pre_programacao_id=?",
+            (target,),
+        )
+        cur.execute("DELETE FROM vendedor_pre_programacoes WHERE id=?", (target,))
+        deleted = int(cur.rowcount or 0)
+    return {"ok": True, "id": target, "deleted": deleted}
 
 
 @app.get("/admin/motoristas/acesso")
@@ -5167,6 +6175,39 @@ def _cadastro_delete_block_reason(
             cur.execute(f"SELECT COUNT(*) AS qtd FROM programacoes WHERE {' OR '.join(conds)}", tuple(params))
             if int((cur.fetchone() or [0])[0] or 0) > 0:
                 return "Motorista vinculado a programacao/rota."
+            return ""
+
+        if table == "vendedores":
+            cod = (codigo or "").strip().upper()
+            if not cod:
+                return ""
+            if table_exists(cur, "clientes"):
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS qtd
+                    FROM clientes
+                    WHERE UPPER(TRIM(COALESCE(vendedor,'')))=UPPER(TRIM(?))
+                    """,
+                    (cod,),
+                )
+                if int((cur.fetchone() or [0])[0] or 0) > 0:
+                    return "Vendedor vinculado ao cadastro de clientes."
+            if table_exists(cur, "programacoes"):
+                cur.execute("PRAGMA table_info(programacoes)")
+                cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+                conds: List[str] = []
+                params: List[Any] = []
+                for col in ("usuario_criacao", "usuario_ultima_edicao"):
+                    if col in cols:
+                        conds.append(f"UPPER(TRIM(COALESCE({col},'')))=UPPER(TRIM(?))")
+                        params.append(cod)
+                if conds:
+                    cur.execute(
+                        f"SELECT COUNT(*) AS qtd FROM programacoes WHERE {' OR '.join(conds)}",
+                        tuple(params),
+                    )
+                    if int((cur.fetchone() or [0])[0] or 0) > 0:
+                        return "Vendedor vinculado a programacao."
             return ""
 
         if table == "veiculos":
@@ -6836,7 +7877,6 @@ def finalizar_rota(codigo_programacao: str, payload: FinalizarRotaIn, m=Depends(
                     f"Pedidos com saldo: {amostra}"
                 ),
             )
-
         cur.execute(
             """
             UPDATE programacoes
