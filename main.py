@@ -2879,9 +2879,19 @@ def build_folha_retorno_operacional(prog: str) -> str:
             kg_base = float(cx_prog) * float(max(aves_por_caixa, 1)) * media_carregada
 
         total_aves_cliente = max((cx_ent if cx_ent > 0 else cx_prog) * max(aves_por_caixa, 1), 0)
-        media_cliente = (kg_base / total_aves_cliente) if total_aves_cliente > 0 and kg_base > 0 else media_carregada
-        mort_kg = mort_aves * media_cliente if media_cliente > 0 else 0.0
+        media_cliente_base = (
+            (kg_base / total_aves_cliente)
+            if total_aves_cliente > 0 and kg_base > 0
+            else media_carregada
+        )
         kg_ent = kg_base if status_item not in status_cancelado else 0.0
+        aves_entregues_cliente = max(total_aves_cliente - mort_aves, 0)
+        media_cliente_entregue = (
+            (kg_ent / aves_entregues_cliente)
+            if aves_entregues_cliente > 0 and kg_ent > 0
+            else media_cliente_base
+        )
+        mort_kg = mort_aves * media_cliente_base if media_cliente_base > 0 else 0.0
         valor_total = max((kg_ent * preco_final), 0.0) if status_item not in status_cancelado else 0.0
         delta_kg = kg_ent - kg_orig if kg_orig > 0 else 0.0
 
@@ -2907,7 +2917,7 @@ def build_folha_retorno_operacional(prog: str) -> str:
                 "cliente": upper(str(item.get("nome_cliente") or "-"))[:28],
                 "st": status_item[:9],
                 "cx": f"{cx_prog}/{cx_ent}",
-                "med": f"{safe_float(media_cliente, 0.0):.3f}",
+                "med": f"{safe_float(media_cliente_entregue, 0.0):.3f}",
                 "kg": f"{safe_float(kg_ent, 0.0):.2f}",
                 "preco": f"{safe_float(preco_final, 0.0):.2f}",
                 "valor": f"{safe_float(valor_total, 0.0):.2f}",
@@ -2936,6 +2946,11 @@ def build_folha_retorno_operacional(prog: str) -> str:
     caixas_carregadas = safe_int(meta.get("nf_caixas"), 0)
     if caixas_carregadas <= 0:
         caixas_carregadas = tot_cx_prog
+    kg_entregue_resumo = (
+        kg_carregado
+        if kg_carregado > 0 and caixas_carregadas > 0 and caixas_carregadas == tot_cx_ent
+        else tot_kg_ent
+    )
     media_resumo = media_carregada
     if media_resumo <= 0 and caixas_carregadas > 0 and kg_carregado > 0:
         media_resumo = kg_carregado / float(caixas_carregadas * max(aves_por_caixa, 1))
@@ -2964,7 +2979,7 @@ def build_folha_retorno_operacional(prog: str) -> str:
         f"KG CARREGADOS: {kg_carregado:.2f}   CX CARREGADAS: {caixas_carregadas}   MEDIA CARREGADA: {media_resumo:.3f}"
     )
     lines.append(
-        f"KG ENTREGUE: {tot_kg_ent:.2f}   CX ENTREGUES: {tot_cx_ent}   MORTALIDADE TOTAL: {tot_mort_aves} AVES / {tot_mort_kg:.2f} KG"
+        f"KG ENTREGUE: {kg_entregue_resumo:.2f}   CX ENTREGUES: {tot_cx_ent}   MORTALIDADE TOTAL: {tot_mort_aves} AVES / {tot_mort_kg:.2f} KG"
     )
     lines.append(
         f"VALOR TOTAL ENTREGUE: {fmt_money(tot_valor)}   DIVERGENCIAS DE PESO: {divergencias} CLIENTE(S)"
@@ -9688,8 +9703,13 @@ class RecebimentosPage(PageBase):
         ttk.Button(top2, text="\U0001F9FD ZERAR RECEBIMENTO", style="Danger.TButton", command=self.zerar_recebimento)\
             .grid(row=0, column=1, padx=6)
 
-        ttk.Button(top2, text="\u27A1 IR PARA DESPESAS", style="Primary.TButton", command=self._ir_para_despesas)\
-            .grid(row=0, column=2, padx=6)
+        self.btn_ir_despesas = ttk.Button(
+            top2,
+            text="\u27A1 IR PARA DESPESAS",
+            style="Primary.TButton",
+            command=self._ir_para_despesas,
+        )
+        self.btn_ir_despesas.grid(row=0, column=2, padx=6)
 
         self.lbl_total = ttk.Label(
             top2,
@@ -9699,6 +9719,26 @@ class RecebimentosPage(PageBase):
             font=("Segoe UI", 10, "bold")
         )
         self.lbl_total.grid(row=0, column=30, sticky="e", padx=6)
+
+        self.despesas_loading_wrap = ttk.Frame(top2, style="Card.TFrame")
+        self.despesas_loading_wrap.grid(row=1, column=0, columnspan=31, sticky="ew", padx=6, pady=(10, 0))
+        self.despesas_loading_wrap.grid_columnconfigure(1, weight=1)
+        self.lbl_despesas_loading = ttk.Label(
+            self.despesas_loading_wrap,
+            text="",
+            background="white",
+            foreground="#374151",
+            font=("Segoe UI", 8, "bold"),
+        )
+        self.lbl_despesas_loading.grid(row=0, column=0, sticky="w", padx=(0, 10))
+        self.pb_ir_despesas = ttk.Progressbar(
+            self.despesas_loading_wrap,
+            orient="horizontal",
+            mode="determinate",
+            maximum=100,
+        )
+        self.pb_ir_despesas.grid(row=0, column=1, sticky="ew")
+        self.despesas_loading_wrap.grid_remove()
 
         ttk.Separator(self.card2).grid(row=1, column=0, sticky="ew", pady=10)
 
@@ -9941,6 +9981,49 @@ class RecebimentosPage(PageBase):
                     entry.configure(state=("readonly" if readonly_back else "normal"))
             except Exception:
                 logging.debug("Falha ignorada")
+
+    def _format_rota_exibicao(self, rota_raw: str) -> str:
+        txt = fix_mojibake_text(str(rota_raw or "").strip())
+        if not txt:
+            return ""
+        key = re.sub(r"[^A-Z0-9]", "", upper(txt))
+        if key.startswith("SERRA"):
+            return "SERRA"
+        if key.startswith("SERT"):
+            return "SERTÃO"
+        return upper(txt)
+
+    def _set_despesas_loading(self, visible: bool, text: str = "", value: float = 0.0):
+        wrap = getattr(self, "despesas_loading_wrap", None)
+        bar = getattr(self, "pb_ir_despesas", None)
+        lbl = getattr(self, "lbl_despesas_loading", None)
+        btn = getattr(self, "btn_ir_despesas", None)
+        if not wrap or not bar or not lbl:
+            return
+
+        if visible:
+            lbl.config(text=text or "Abrindo Despesas...")
+            bar["value"] = max(0.0, min(float(value or 0.0), 100.0))
+            wrap.grid()
+            if btn is not None:
+                try:
+                    btn.state(["disabled"])
+                except Exception:
+                    logging.debug("Falha ignorada")
+        else:
+            bar["value"] = 0
+            lbl.config(text="")
+            wrap.grid_remove()
+            if btn is not None:
+                try:
+                    btn.state(["!disabled"])
+                except Exception:
+                    logging.debug("Falha ignorada")
+
+        try:
+            self.update_idletasks()
+        except Exception:
+            logging.debug("Falha ignorada")
 
     # -------------------------
     # Resolução de nomes (motorista/equipe)
@@ -10811,26 +10894,30 @@ class RecebimentosPage(PageBase):
             messagebox.showwarning("ATENÇÃO", "Carregue uma programação primeiro.")
             return False
         prog = self._current_prog
-        # Tenta persistir o cabeçalho sem bloquear a navegação.
         try:
-            self.salvar_dados_rota(silent=True)
-        except Exception:
-            logging.debug("Falha ignorada")
-        synced = False
-        try:
-            synced = self._sync_programacao_from_api(prog, silent=True)
-        except Exception:
-            logging.debug("Falha ignorada")
-        try:
-            self.app.show_page("Despesas")
+            self._set_despesas_loading(True, "Preparando dados da rota...", 12)
+
+            # Tenta persistir o cabeçalho sem bloquear a navegação.
+            try:
+                self._set_despesas_loading(True, "Salvando cabeçalho da rota...", 34)
+                self.salvar_dados_rota(silent=True)
+            except Exception:
+                logging.debug("Falha ignorada")
+
+            synced = False
+            try:
+                self._set_despesas_loading(True, "Sincronizando programação...", 58)
+                synced = self._sync_programacao_from_api(prog, silent=True)
+            except Exception:
+                logging.debug("Falha ignorada")
+
             page = self.app.pages.get("Despesas") if hasattr(self.app, "pages") else None
             if page and hasattr(page, "set_programacao"):
+                self._set_despesas_loading(True, f"Preparando tela de despesas...", 78)
+                self._set_despesas_loading(True, f"Carregando despesas da rota {prog}...", 94)
                 page.set_programacao(prog)
-                try:
-                    if hasattr(page, "_load_by_programacao"):
-                        page._load_by_programacao()
-                except Exception:
-                    logging.debug("Falha ignorada")
+            self._set_despesas_loading(True, "Abrindo tela de despesas...", 100)
+            self.app.show_page("Despesas")
             if synced:
                 self.set_status(f"STATUS: Indo para DESPESAS - programação {prog} (dados sincronizados da API).")
             else:
@@ -10839,6 +10926,8 @@ class RecebimentosPage(PageBase):
         except Exception:
             logging.debug("Falha ignorada")
             return False
+        finally:
+            self._set_despesas_loading(False)
 
     def _ir_para_despesas(self):
         self._abrir_despesas_com_programacao()
@@ -10969,7 +11058,7 @@ class RecebimentosPage(PageBase):
         self.lbl_motorista_info.config(text=f"Motorista: {motorista_nome}")
         self.lbl_veiculo_info.config(text=f"Veiculo: {upper(veiculo)}")
         self.lbl_equipe_info.config(text=f"Equipe: {equipe_nomes}")
-        self._rota_atual = upper(rota or "")
+        self._rota_atual = self._format_rota_exibicao(rota)
         self.lbl_rota_info.config(text=f"Rota: {self._rota_atual or '-'}")
         self._safe_set_entry(self.ent_diaria_motorista, f"{safe_float(diaria_motorista, 0.0):.2f}".replace(".", ","), readonly_back=False)
 
@@ -12933,6 +13022,197 @@ class DespesasPage(PageBase):
         except Exception:
             logging.debug("Falha ao montar bundle de prestacao via API.", exc_info=True)
             return None
+
+    def _is_programacao_missing_error(self, exc: Exception) -> bool:
+        msg = _friendly_sync_error(exc, "").strip().casefold()
+        if not msg:
+            return False
+        return "programacao nao encontrada" in msg or ("404" in msg and "programacao" in msg and "nao encontrada" in msg)
+
+    def _rehydrate_programacao_missing_on_server(self, prog: str) -> bool:
+        prog = upper(str(prog or "").strip())
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if not prog or not desktop_secret or not is_desktop_api_sync_enabled():
+            return False
+
+        try:
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='programacoes'")
+                if not cur.fetchone():
+                    return False
+
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM programacoes
+                    WHERE codigo_programacao=?
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (prog,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return False
+                rota = dict(row) if hasattr(row, "keys") else {}
+
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='programacao_itens'")
+                itens = []
+                if cur.fetchone():
+                    cur.execute(
+                        """
+                        SELECT *
+                        FROM programacao_itens
+                        WHERE codigo_programacao=?
+                        ORDER BY id ASC
+                        """,
+                        (prog,),
+                    )
+                    for rr in (cur.fetchall() or []):
+                        itens.append(dict(rr) if hasattr(rr, "keys") else {})
+        except Exception:
+            logging.debug("Falha ao ler programacao local para reidratar no servidor.", exc_info=True)
+            return False
+
+        def _pick(src: dict, *keys, default=None):
+            for key in keys:
+                if key in src and src.get(key) not in (None, ""):
+                    return src.get(key)
+            return default
+
+        try:
+            itens_payload = []
+            for it in (itens or []):
+                cod_cliente = upper(_pick(it, "cod_cliente"))
+                nome_cliente = upper(_pick(it, "nome_cliente"))
+                if not cod_cliente or not nome_cliente:
+                    continue
+                itens_payload.append(
+                    {
+                        "cod_cliente": cod_cliente,
+                        "nome_cliente": nome_cliente,
+                        "qnt_caixas": safe_int(_pick(it, "qnt_caixas", "caixas_atual"), 0),
+                        "kg": safe_float(_pick(it, "kg"), 0.0),
+                        "preco": safe_float(_pick(it, "preco"), 0.0),
+                        "endereco": upper(_pick(it, "endereco")),
+                        "vendedor": upper(_pick(it, "vendedor")),
+                        "pedido": upper(_pick(it, "pedido")),
+                        "produto": upper(_pick(it, "produto")),
+                        "obs": upper(_pick(it, "obs", "observacao")),
+                    }
+                )
+
+            status_local = upper(str(_pick(rota, "status") or "").strip())
+            status_operacional_local = upper(str(_pick(rota, "status_operacional") or "").strip())
+            prestacao_local = upper(str(_pick(rota, "prestacao_status", default="PENDENTE") or "PENDENTE").strip())
+            finalizada_local = safe_int(_pick(rota, "finalizada_no_app"), 0)
+            status_exec = status_operacional_local or status_local
+            if status_exec in {"FINALIZADA", "FINALIZADO"} and finalizada_local != 1:
+                finalizada_local = 1
+
+            payload_sync = {
+                "codigo_programacao": prog,
+                "data_criacao": str(_pick(rota, "data_criacao", "data") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                "motorista": upper(_pick(rota, "motorista")),
+                "motorista_id": safe_int(_pick(rota, "motorista_id"), 0),
+                "motorista_codigo": upper(_pick(rota, "motorista_codigo", "codigo_motorista")),
+                "codigo_motorista": upper(_pick(rota, "codigo_motorista", "motorista_codigo")),
+                "veiculo": upper(_pick(rota, "veiculo")),
+                "equipe": upper(_pick(rota, "equipe")),
+                "kg_estimado": safe_float(_pick(rota, "kg_estimado"), 0.0),
+                "tipo_estimativa": upper(str(_pick(rota, "tipo_estimativa", default="KG") or "KG")),
+                "caixas_estimado": safe_int(_pick(rota, "caixas_estimado"), 0),
+                "status": status_local or "ATIVA",
+                "local_rota": upper(_pick(rota, "local_rota", "tipo_rota", "local")),
+                "tipo_rota": upper(_pick(rota, "tipo_rota", "local_rota", "local")),
+                "local_carregamento": upper(_pick(rota, "local_carregamento", "local_carregado", "granja_carregada", "local_carreg")),
+                "local_carregado": upper(_pick(rota, "local_carregado", "local_carregamento", "granja_carregada", "local_carreg")),
+                "granja_carregada": upper(_pick(rota, "granja_carregada", "local_carregamento", "local_carregado", "local_carreg")),
+                "local_carreg": upper(_pick(rota, "local_carreg", "local_carregamento", "local_carregado", "granja_carregada")),
+                "adiantamento": safe_float(_pick(rota, "adiantamento", "adiantamento_rota"), 0.0),
+                "total_caixas": safe_int(_pick(rota, "total_caixas", "nf_caixas", "caixas_carregadas"), 0),
+                "quilos": safe_float(_pick(rota, "quilos", "nf_kg", "kg_carregado"), 0.0),
+                "nf_kg": safe_float(_pick(rota, "nf_kg", "kg_nf"), 0.0),
+                "nf_preco": safe_float(_pick(rota, "nf_preco", "preco_nf"), 0.0),
+                "nf_caixas": safe_int(_pick(rota, "nf_caixas", "caixas_carregadas", "qnt_cx_carregada"), 0),
+                "caixas_carregadas": safe_int(_pick(rota, "caixas_carregadas", "nf_caixas", "qnt_cx_carregada"), 0),
+                "usuario_criacao": upper(_pick(rota, "usuario_criacao")),
+                "usuario_ultima_edicao": upper(_pick(rota, "usuario_ultima_edicao", "usuario_criacao")),
+                "linked_venda_ids": [],
+                "vendas_usada_em": str(_pick(rota, "data_criacao", "data") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                "itens": itens_payload,
+            }
+            _call_api(
+                "POST",
+                "desktop/rotas/upsert",
+                payload=payload_sync,
+                extra_headers={"X-Desktop-Secret": desktop_secret},
+            )
+
+            payload_status = {
+                "status": status_local or None,
+                "prestacao_status": prestacao_local or "PENDENTE",
+                "status_operacional": status_operacional_local or None,
+                "finalizada_no_app": int(finalizada_local or 0),
+            }
+            if any(v not in (None, "", 0) for v in payload_status.values()) or payload_status.get("finalizada_no_app") == 0:
+                _call_api(
+                    "PUT",
+                    f"desktop/rotas/{urllib.parse.quote(prog)}/status",
+                    payload=payload_status,
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+
+            data_saida_n = normalize_date(_pick(rota, "data_saida"))
+            hora_saida_n = normalize_time(_pick(rota, "hora_saida"))
+            data_chegada_n = normalize_date(_pick(rota, "data_chegada"))
+            hora_chegada_n = normalize_time(_pick(rota, "hora_chegada"))
+            diaria_motorista = _pick(rota, "diaria_motorista_valor")
+            if any([data_saida_n, hora_saida_n, data_chegada_n, hora_chegada_n, diaria_motorista not in (None, "")]):
+                _call_api(
+                    "PUT",
+                    f"desktop/rotas/{urllib.parse.quote(prog)}/cabecalho",
+                    payload={
+                        "data_saida": data_saida_n or "",
+                        "hora_saida": hora_saida_n or "",
+                        "data_chegada": data_chegada_n or "",
+                        "hora_chegada": hora_chegada_n or "",
+                        "diaria_motorista_valor": safe_float(diaria_motorista, 0.0) if diaria_motorista not in (None, "") else None,
+                    },
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+            return True
+        except Exception:
+            logging.debug("Falha ao reidratar programacao ausente no servidor.", exc_info=True)
+            return False
+
+    def _call_programacao_api_with_rehydrate(self, method: str, path: str, prog: str, payload=None):
+        prog = upper(str(prog or "").strip())
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        headers = {"X-Desktop-Secret": desktop_secret}
+        try:
+            return _call_api(
+                method,
+                path,
+                payload=payload,
+                extra_headers=headers,
+            )
+        except Exception as exc:
+            if self._is_programacao_missing_error(exc):
+                recovered = False
+                try:
+                    recovered = self._rehydrate_programacao_missing_on_server(prog)
+                except Exception:
+                    logging.debug("Falha ao tentar reidratar programacao ausente no servidor.", exc_info=True)
+                if recovered:
+                    return _call_api(
+                        method,
+                        path,
+                        payload=payload,
+                        extra_headers=headers,
+                    )
+            raise
 
     def _draw_km_pie(self, items):
         canvas = getattr(self, "canvas_km_pie", None)
@@ -15367,6 +15647,35 @@ class DespesasPage(PageBase):
         except Exception:
             return None
 
+    def _fit_despesa_modal(self, win, container, min_w=620, min_h=420):
+        try:
+            win.update_idletasks()
+            screen_w = max(int(win.winfo_screenwidth() or 0), 1024)
+            screen_h = max(int(win.winfo_screenheight() or 0), 720)
+            req_w = max(int(min_w), min(int(container.winfo_reqwidth() + 56), screen_w - 40))
+            req_h = max(int(min_h), min(int(container.winfo_reqheight() + 72), screen_h - 60))
+
+            owner = getattr(self, "app", None) or self
+            try:
+                owner.update_idletasks()
+                base_x = int(owner.winfo_rootx() or 0)
+                base_y = int(owner.winfo_rooty() or 0)
+                base_w = max(int(owner.winfo_width() or 0), req_w)
+                base_h = max(int(owner.winfo_height() or 0), req_h)
+                pos_x = base_x + max(int((base_w - req_w) / 2), 12)
+                pos_y = base_y + max(int((base_h - req_h) / 2), 12)
+            except Exception:
+                pos_x = max(int((screen_w - req_w) / 2), 12)
+                pos_y = max(int((screen_h - req_h) / 2), 12)
+
+            pos_x = max(8, min(pos_x, max(screen_w - req_w - 8, 8)))
+            pos_y = max(8, min(pos_y, max(screen_h - req_h - 32, 8)))
+
+            win.minsize(req_w, req_h)
+            win.geometry(f"{req_w}x{req_h}+{pos_x}+{pos_y}")
+        except Exception:
+            logging.debug("Falha ao ajustar dimensoes do modal de despesa.", exc_info=True)
+
     def _open_registrar_rapido(self):
         if not self._can_edit_current_prog():
             return
@@ -15375,9 +15684,10 @@ class DespesasPage(PageBase):
 
         win = tk.Toplevel(self)
         win.title("Registrar Despesa (Rápido)")
-        win.geometry("520x360")
+        win.geometry("640x430")
         win.grab_set()
-        win.resizable(False, False)
+        win.transient(getattr(self, "app", None) or self)
+        win.resizable(True, True)
 
         frm = ttk.Frame(win, padding=20)
         frm.pack(fill="both", expand=True)
@@ -15469,6 +15779,7 @@ class DespesasPage(PageBase):
         ttk.Button(btn_frame, text="\u274C CANCELAR", style="Ghost.TButton", command=win.destroy)\
             .grid(row=0, column=1, sticky="ew", padx=(6, 0))
 
+        self._fit_despesa_modal(win, frm, min_w=620, min_h=420)
         win.bind("<Return>", lambda e: salvar())
         ent_desc.focus_set()
 
@@ -15508,9 +15819,10 @@ class DespesasPage(PageBase):
 
         win = tk.Toplevel(self)
         win.title(f"Editar Despesa - ID {did}")
-        win.geometry("520x380")
+        win.geometry("640x460")
         win.grab_set()
-        win.resizable(False, False)
+        win.transient(getattr(self, "app", None) or self)
+        win.resizable(True, True)
 
         frm = ttk.Frame(win, padding=20)
         frm.pack(fill="both", expand=True)
@@ -15621,6 +15933,7 @@ class DespesasPage(PageBase):
         ttk.Button(btn_frame, text="\u274C CANCELAR", style="Ghost.TButton", command=win.destroy)\
             .grid(row=0, column=1, sticky="ew", padx=(6, 0))
 
+        self._fit_despesa_modal(win, frm, min_w=620, min_h=450)
         win.bind("<Return>", lambda e: salvar())
         ent_desc.focus_set()
 
@@ -16108,12 +16421,8 @@ class DespesasPage(PageBase):
             receb_reserva_assinaturas_mm = 70
             receb_reserva_total_mm = 16
 
-            def _draw_receb_assinaturas():
+            def _draw_receb_assinaturas(anchor_footer=False):
                 nonlocal y, receb_assinaturas_desenhadas
-                c.setFont("Helvetica-Bold", 10)
-                c.drawString(left, y, "ASSINATURAS / CONFERENCIA")
-                y -= 10 * mm
-
                 block_w = (width - left - right - 10 * mm) / 2.0
                 block_h = 18 * mm
                 gap_x = 10 * mm
@@ -16131,11 +16440,23 @@ class DespesasPage(PageBase):
                 x1 = left
                 x2 = left + block_w + gap_x
 
-                assinatura_block(x1, y, "SETOR FATURAMENTO")
-                assinatura_block(x2, y, "SETOR FINANCEIRO")
-                y -= (block_h + gap_y)
-                assinatura_block(x1, y, "SETOR DE CAIXA")
-                assinatura_block(x2, y, "SETOR DE CONFERENCIA")
+                title_y = y
+                if anchor_footer:
+                    # Mantem as assinaturas sempre ancoradas no rodape da primeira folha.
+                    title_y = bottom + (block_h * 2) + gap_y + (11 * mm)
+
+                c.setFont("Helvetica-Bold", 10)
+                c.drawString(left, title_y, "ASSINATURAS / CONFERENCIA")
+
+                first_row_top = title_y - (10 * mm)
+                second_row_top = first_row_top - (block_h + gap_y)
+
+                assinatura_block(x1, first_row_top, "SETOR FATURAMENTO")
+                assinatura_block(x2, first_row_top, "SETOR FINANCEIRO")
+                assinatura_block(x1, second_row_top, "SETOR DE CAIXA")
+                assinatura_block(x2, second_row_top, "SETOR DE CONFERENCIA")
+                if not anchor_footer:
+                    y = second_row_top
                 receb_assinaturas_desenhadas = True
 
             def _draw_retorno_sheet():
@@ -16180,10 +16501,16 @@ class DespesasPage(PageBase):
                         base_cx = cx_ent if cx_ent > 0 else cx_prog
                         kg_base = float(base_cx) * float(max(aves_cx, 1)) * media_carreg
                     aves_total = max((cx_ent if cx_ent > 0 else cx_prog) * max(aves_cx, 1), 0)
-                    media_cli = (kg_base / aves_total) if aves_total > 0 and kg_base > 0 else media_carreg
+                    media_cli_base = (kg_base / aves_total) if aves_total > 0 and kg_base > 0 else media_carreg
                     mort_aves = max(safe_int(item.get("mortalidade_aves"), 0), 0)
-                    mort_kg = mort_aves * media_cli if media_cli > 0 else 0.0
                     kg_ent = kg_base if status_item not in status_cancelado else 0.0
+                    aves_entregues = max(aves_total - mort_aves, 0)
+                    media_cli_entregue = (
+                        (kg_ent / aves_entregues)
+                        if aves_entregues > 0 and kg_ent > 0
+                        else media_cli_base
+                    )
+                    mort_kg = mort_aves * media_cli_base if media_cli_base > 0 else 0.0
                     valor_total = max(kg_ent * preco_final, 0.0) if status_item not in status_cancelado else 0.0
                     alterado = bool(
                         str(item.get("alterado_em") or "").strip()
@@ -16216,7 +16543,7 @@ class DespesasPage(PageBase):
                             upper(str(item.get("nome_cliente") or "-"))[:24],
                             status_item[:10],
                             f"{cx_prog}/{cx_ent}",
-                            f"{safe_float(media_cli, 0.0):.3f}",
+                            f"{safe_float(media_cli_entregue, 0.0):.3f}",
                             f"{safe_float(kg_ent, 0.0):.2f}",
                             f"{safe_float(preco_final, 0.0):.2f}",
                             f"{safe_float(valor_total, 0.0):.2f}",
@@ -16245,6 +16572,11 @@ class DespesasPage(PageBase):
                 caixas_carreg_ret = safe_int(meta_ret.get("nf_caixas"), 0)
                 if caixas_carreg_ret <= 0:
                     caixas_carreg_ret = tot_cx_prog
+                kg_entregue_resumo_ret = (
+                    kg_carregado_ret
+                    if kg_carregado_ret > 0 and caixas_carreg_ret > 0 and caixas_carreg_ret == tot_cx_ent
+                    else tot_kg_ent
+                )
 
                 data_saida_ret, hora_saida_ret = normalize_date_time_components(meta_ret.get("data_saida"), meta_ret.get("hora_saida"))
                 data_chegada_ret, hora_chegada_ret = normalize_date_time_components(meta_ret.get("data_chegada"), meta_ret.get("hora_chegada"))
@@ -16282,7 +16614,7 @@ class DespesasPage(PageBase):
                 _summary_box(left, y, "Clientes", str(len(itens_ret)))
                 _summary_box(left + box_w + box_gap, y, "Entregues/Cancel.", f"{tot_ent}/{tot_cancel}")
                 _summary_box(left + ((box_w + box_gap) * 2), y, "CX Carreg./Entreg.", f"{caixas_carreg_ret}/{tot_cx_ent}")
-                _summary_box(left + ((box_w + box_gap) * 3), y, "KG Carreg./Entreg.", f"{kg_carregado_ret:.2f}/{tot_kg_ent:.2f}")
+                _summary_box(left + ((box_w + box_gap) * 3), y, "KG Carreg./Entreg.", f"{kg_carregado_ret:.2f}/{kg_entregue_resumo_ret:.2f}")
                 y -= (box_h + 6 * mm)
 
                 _summary_box(left, y, "Media Carreg.", f"{media_carreg:.3f}")
@@ -16478,7 +16810,7 @@ class DespesasPage(PageBase):
                     reserva_mm = receb_reserva_assinaturas_mm if not receb_assinaturas_desenhadas else receb_reserva_total_mm
                     if (y - row_h_rec) < bottom + (reserva_mm * mm):
                         if not receb_assinaturas_desenhadas:
-                            _draw_receb_assinaturas()
+                            _draw_receb_assinaturas(anchor_footer=True)
                         new_page(f"FOLHA DE RECEBIMENTOS - PROGRAMACAO {prog} (CONT.)")
                         _draw_receb_header()
 
@@ -16507,7 +16839,7 @@ class DespesasPage(PageBase):
             y -= 8 * mm
 
             if not receb_assinaturas_desenhadas:
-                _draw_receb_assinaturas()
+                _draw_receb_assinaturas(anchor_footer=True)
 
             _draw_retorno_sheet()
 
@@ -16721,7 +17053,10 @@ class DespesasPage(PageBase):
 
             _draw_desp_header()
 
-            for desc, val, cat, obs, data_reg in despesas:
+            resumo_financeiro_reserva_mm = 48
+            despesas_cont_reserva_mm = 24
+
+            for desp_idx, (desc, val, cat, obs, data_reg) in enumerate(despesas):
                 desc_up = upper(str(desc or "").strip())
                 obs_txt = str(obs or "").strip()
                 if desc_up in {"DIARIAS MOTORISTA", "DIARIA MOTORISTA"}:
@@ -16738,8 +17073,13 @@ class DespesasPage(PageBase):
                 data_lines = self._wrap_pdf_lines(_fmt_pdf_datetime(data_reg), col_data - 4, font_name="Helvetica", font_size=8) or [""]
                 line_count = max(len(desc_lines), len(cat_lines), len(obs_lines), len(data_lines), 1)
                 row_h_curr = max(row_h, (line_count * row_line_h) + 4)
+                reserva_apos_linha_mm = (
+                    resumo_financeiro_reserva_mm
+                    if desp_idx == (len(despesas) - 1)
+                    else despesas_cont_reserva_mm
+                )
 
-                if y < bottom + row_h_curr + (24 * mm):
+                if y < bottom + row_h_curr + (reserva_apos_linha_mm * mm):
                     new_page(f"FOLHA DE DESPESAS - PROGRAMACAO {prog} (CONT.)")
                     c.setFont("Helvetica-Bold", 10)
                     c.drawString(left, y, "DESPESAS")
@@ -16765,7 +17105,7 @@ class DespesasPage(PageBase):
 
             y -= 6 * mm
 
-            if y < bottom + (90 * mm):
+            if y < bottom + (resumo_financeiro_reserva_mm * mm):
                 new_page(f"FOLHA DE DESPESAS - PROGRAMACAO {prog} (CONT.)")
 
             # Resumo financeiro
@@ -16911,38 +17251,39 @@ class DespesasPage(PageBase):
 
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
         if desktop_secret and is_desktop_api_sync_enabled():
+            payload_financeiro = {
+                "nf_numero": nf_numero,
+                "nf_kg": nf_kg,
+                "nf_caixas": nf_caixas,
+                "nf_kg_carregado": nf_kg_carregado,
+                "nf_kg_vendido": nf_kg_vendido,
+                "nf_saldo": nf_saldo,
+                "nf_preco": nf_preco,
+                "media": nf_media_carregada,
+                "nf_caixa_final": nf_caixa_final,
+                "km_inicial": km_inicial,
+                "km_final": km_final,
+                "litros": litros,
+                "km_rodado": km_rodado,
+                "media_km_l": media_km_l,
+                "custo_km": custo_km,
+                "ced_200_qtd": cedulas_data.get("ced_200_qtd", 0),
+                "ced_100_qtd": cedulas_data.get("ced_100_qtd", 0),
+                "ced_50_qtd": cedulas_data.get("ced_50_qtd", 0),
+                "ced_20_qtd": cedulas_data.get("ced_20_qtd", 0),
+                "ced_10_qtd": cedulas_data.get("ced_10_qtd", 0),
+                "ced_5_qtd": cedulas_data.get("ced_5_qtd", 0),
+                "ced_2_qtd": cedulas_data.get("ced_2_qtd", 0),
+                "valor_dinheiro": valor_dinheiro,
+                "adiantamento": adiantamento_val,
+                "rota_observacao": rota_observacao,
+            }
             try:
-                _call_api(
+                self._call_programacao_api_with_rehydrate(
                     "PUT",
                     f"desktop/rotas/{urllib.parse.quote(upper(prog))}/financeiro",
-                    payload={
-                        "nf_numero": nf_numero,
-                        "nf_kg": nf_kg,
-                        "nf_caixas": nf_caixas,
-                        "nf_kg_carregado": nf_kg_carregado,
-                        "nf_kg_vendido": nf_kg_vendido,
-                        "nf_saldo": nf_saldo,
-                        "nf_preco": nf_preco,
-                        "media": nf_media_carregada,
-                        "nf_caixa_final": nf_caixa_final,
-                        "km_inicial": km_inicial,
-                        "km_final": km_final,
-                        "litros": litros,
-                        "km_rodado": km_rodado,
-                        "media_km_l": media_km_l,
-                        "custo_km": custo_km,
-                        "ced_200_qtd": cedulas_data.get("ced_200_qtd", 0),
-                        "ced_100_qtd": cedulas_data.get("ced_100_qtd", 0),
-                        "ced_50_qtd": cedulas_data.get("ced_50_qtd", 0),
-                        "ced_20_qtd": cedulas_data.get("ced_20_qtd", 0),
-                        "ced_10_qtd": cedulas_data.get("ced_10_qtd", 0),
-                        "ced_5_qtd": cedulas_data.get("ced_5_qtd", 0),
-                        "ced_2_qtd": cedulas_data.get("ced_2_qtd", 0),
-                        "valor_dinheiro": valor_dinheiro,
-                        "adiantamento": adiantamento_val,
-                        "rota_observacao": rota_observacao,
-                    },
-                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                    upper(prog),
+                    payload=payload_financeiro,
                 )
                 self.logger.info(f"Dados salvos via API para programação {prog}")
                 messagebox.showinfo("SUCESSO", "Todos os dados foram salvos com sucesso!")
@@ -16950,11 +17291,13 @@ class DespesasPage(PageBase):
                 self._refresh_km_insights()
                 self._refresh_nf_trade_summary()
                 return
-            except Exception:
+            except Exception as exc:
                 logging.debug("Falha ao salvar dados financeiros via API.", exc_info=True)
+                detalhe_api = _friendly_sync_error(exc, "Sem detalhes adicionais da API.")
                 messagebox.showerror(
                     "ERRO",
                     "Não foi possível salvar os dados financeiros na API central.\n\n"
+                    f"Detalhe da API: {detalhe_api}\n\n"
                     "A gravação local foi bloqueada para evitar divergência entre servidor e desktop.",
                 )
                 return

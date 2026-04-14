@@ -1,3 +1,8 @@
+2026-04-14 20:51:30 - v4.3.1
+- Release automatizada (patch).
+- Versao anterior: v4.3.0.
+- Correcao do PDF da prestacao, barra de carregamento em Recebimentos, exibicao da rota no cabecalho e ajuste dos modais de despesas.
+
 2026-04-14 18:18:26 - v4.3.0
 - Release automatizada (minor).
 - Versao anterior: v4.2.2.
