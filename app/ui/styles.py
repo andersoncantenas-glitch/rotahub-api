@@ -67,6 +67,8 @@ def apply_style(root):
     # Labels
     style.configure("CardTitle.TLabel", background=CARD, foreground=TEXT, font=("Segoe UI", 15, "bold"))
     style.configure("CardLabel.TLabel", background=CARD, foreground=MUTED, font=("Segoe UI", 8, "bold"))
+    style.configure("CardStrong.TLabel", background=CARD, foreground=TEXT, font=("Segoe UI Semibold", 10))
+    style.configure("CardValue.TLabel", background=CARD, foreground=TEXT, font=("Segoe UI Semibold", 22))
     style.configure("SidebarLogo.TLabel", background=PRIMARY, foreground="white", font=("Segoe UI", 16, "bold"))
     style.configure("SidebarSmall.TLabel", background=PRIMARY, foreground="#DDE3FF", font=("Segoe UI", 9))
 
@@ -213,6 +215,11 @@ def apply_style(root):
     style.configure("CardInset.TFrame", background="#F5F8FE", relief="flat", borderwidth=0)
     style.configure("CardTitle.TLabel", background=CARD, foreground=TEXT, font=("Segoe UI Semibold", 16))
     style.configure("CardLabel.TLabel", background=CARD, foreground=MUTED, font=("Segoe UI Semibold", 9))
+    style.configure("InsetTitle.TLabel", background="#F5F8FE", foreground=TEXT, font=("Segoe UI Semibold", 10))
+    style.configure("InsetBody.TLabel", background="#F5F8FE", foreground=MUTED, font=("Segoe UI", 9))
+    style.configure("InsetStrong.TLabel", background="#F5F8FE", foreground=TEXT, font=("Segoe UI Semibold", 10))
+    style.configure("InsetValue.TLabel", background="#F5F8FE", foreground=TEXT, font=("Segoe UI Semibold", 21))
+    style.configure("InsetValueSmall.TLabel", background="#F5F8FE", foreground="#1D4ED8", font=("Segoe UI Semibold", 16))
     style.configure("SidebarLogo.TLabel", background=PRIMARY, foreground="white", font=("Segoe UI Semibold", 17))
     style.configure("Title.TLabel", background=BG, foreground=TEXT, font=("Segoe UI Semibold", 20))
     style.configure("Subtitle.TLabel", background=BG, foreground=MUTED, font=("Segoe UI", 10))

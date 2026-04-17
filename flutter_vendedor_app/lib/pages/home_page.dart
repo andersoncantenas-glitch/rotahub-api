@@ -115,6 +115,7 @@ class _HomePageState extends State<HomePage> {
 
       if (report.sent > 0) {
         await _avulsasKey.currentState?.reload();
+        if (!mounted) return;
       }
 
       if (!silent || report.sent > 0 || report.failed > 0) {

@@ -50,9 +50,13 @@ class _ProgramacaoDetalhePageState extends State<ProgramacaoDetalhePage> {
       setState(() {
         _rota = Map<String, dynamic>.from(data['rota'] ?? <String, dynamic>{});
         _clientes = ((data['clientes'] ?? <dynamic>[]) as List)
-            .map<Map<String, dynamic>>(
-              (item) => Map<String, dynamic>.from(item as Map),
-            )
+            .asMap()
+            .entries
+            .map<Map<String, dynamic>>((entry) {
+              final item = Map<String, dynamic>.from(entry.value as Map);
+              item['_ordem_original'] = entry.key;
+              return item;
+            })
             .toList();
         _loading = false;
       });
@@ -129,6 +133,14 @@ class _ProgramacaoDetalhePageState extends State<ProgramacaoDetalhePage> {
     return int.tryParse((value ?? '').toString().trim()) ?? 0;
   }
 
+  int? _toOptionalInt(dynamic value) {
+    if (value == null) return null;
+    if (value is int) return value;
+    final raw = value.toString().trim();
+    if (raw.isEmpty) return null;
+    return int.tryParse(raw);
+  }
+
   double _toDouble(dynamic value) {
     if (value is double) return value;
     if (value is int) return value.toDouble();
@@ -138,23 +150,80 @@ class _ProgramacaoDetalhePageState extends State<ProgramacaoDetalhePage> {
         0.0;
   }
 
+  double? _toOptionalDouble(dynamic value) {
+    if (value == null) return null;
+    if (value is double) return value;
+    if (value is int) return value.toDouble();
+    final raw = value.toString().trim().replaceAll(',', '.');
+    if (raw.isEmpty) return null;
+    return double.tryParse(raw);
+  }
+
   String _money(dynamic value) =>
       _toDouble(value).toStringAsFixed(2).replaceAll('.', ',');
 
+  int? _ordemSugerida(Map<String, dynamic> item) =>
+      _toOptionalInt(item['ordem_sugerida']);
+
+  String _etaTexto(Map<String, dynamic> item) =>
+      (item['eta'] ?? '').toString().trim();
+
+  double? _distanciaValor(Map<String, dynamic> item) =>
+      _toOptionalDouble(item['distancia']);
+
+  double? _confiancaLocalizacao(Map<String, dynamic> item) =>
+      _toOptionalDouble(item['confianca_localizacao']);
+
+  bool _temRoteirizacao(Map<String, dynamic> item) =>
+      _ordemSugerida(item) != null ||
+      _etaTexto(item).isNotEmpty ||
+      _distanciaValor(item) != null ||
+      _confiancaLocalizacao(item) != null;
+
+  int _countRoteirizados() =>
+      _clientes.where((item) => _temRoteirizacao(item)).length;
+
+  String _distanciaTexto(double? value) {
+    if (value == null) return '';
+    final casas = value >= 100 ? 0 : 1;
+    return value.toStringAsFixed(casas).replaceAll('.', ',');
+  }
+
+  String _confiancaTexto(double? value) {
+    if (value == null) return '';
+    final normalized = value <= 1 ? value * 100 : value;
+    final casas = normalized >= 100 ? 0 : 1;
+    return '${normalized.toStringAsFixed(casas).replaceAll('.', ',')}%';
+  }
+
   List<Map<String, dynamic>> get _clientesVisiveis {
     final term = _buscaCtrl.text.trim().toUpperCase();
-    return _clientes.where((item) {
+    final filtrados = _clientes.where((item) {
       final status = _pedidoStatus(item);
       final haystack = <String>[
         (item['cod_cliente'] ?? '').toString(),
         (item['nome_cliente'] ?? '').toString(),
         (item['vendedor'] ?? '').toString(),
         (item['pedido'] ?? '').toString(),
+        (item['ordem_sugerida'] ?? '').toString(),
+        (item['eta'] ?? '').toString(),
       ].join(' | ').toUpperCase();
       final matchStatus = _matchesPedidoFiltro(status);
       final matchBusca = term.isEmpty || haystack.contains(term);
       return matchStatus && matchBusca;
     }).toList();
+    filtrados.sort((a, b) {
+      final ordemA = _ordemSugerida(a);
+      final ordemB = _ordemSugerida(b);
+      if (ordemA != null || ordemB != null) {
+        if (ordemA == null) return 1;
+        if (ordemB == null) return -1;
+        final compareOrdem = ordemA.compareTo(ordemB);
+        if (compareOrdem != 0) return compareOrdem;
+      }
+      return _toInt(a['_ordem_original']).compareTo(_toInt(b['_ordem_original']));
+    });
+    return filtrados;
   }
 
   int _countPedidos(String status) =>
@@ -242,6 +311,12 @@ class _ProgramacaoDetalhePageState extends State<ProgramacaoDetalhePage> {
                                       'Cancelados: ${_countPedidos('CANCELADO') + _countPedidos('CANCELADA')}',
                                   color: VendorUiColors.danger,
                                 ),
+                                if (_countRoteirizados() > 0)
+                                  StatusBadge(
+                                    label:
+                                        'Com roteirizacao: ${_countRoteirizados()}',
+                                    color: Colors.teal.shade700,
+                                  ),
                               ],
                             ),
                             const SizedBox(height: 12),
@@ -380,6 +455,22 @@ class _ProgramacaoDetalhePageState extends State<ProgramacaoDetalhePage> {
                           ],
                         ),
                       ),
+                      if (_countRoteirizados() > 0) ...[
+                        const SizedBox(height: 8),
+                        AppPanel(
+                          padding: const EdgeInsets.all(12),
+                          backgroundColor: VendorUiColors.primary.withValues(
+                            alpha: 0.06,
+                          ),
+                          child: Text(
+                            'Pedidos com ordem sugerida sobem para o topo. ETA, distancia e confianca aparecem quando enviados pela API.',
+                            style: const TextStyle(
+                              color: VendorUiColors.heading,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      ],
                       const SizedBox(height: 8),
                       ..._clientesVisiveis.map((item) {
                         final statusPedido = _pedidoStatus(item);
@@ -391,6 +482,10 @@ class _ProgramacaoDetalhePageState extends State<ProgramacaoDetalhePage> {
                         final precoAtual = _toDouble(
                           item['preco_atual'] ?? item['preco'],
                         );
+                        final ordemSugerida = _ordemSugerida(item);
+                        final eta = _etaTexto(item);
+                        final distancia = _distanciaValor(item);
+                        final confianca = _confiancaLocalizacao(item);
                         return AppPanel(
                           margin: const EdgeInsets.only(bottom: 10),
                           backgroundColor: VendorUiColors.surfaceAlt,
@@ -406,7 +501,11 @@ class _ProgramacaoDetalhePageState extends State<ProgramacaoDetalhePage> {
                                           CrossAxisAlignment.start,
                                       children: [
                                         Text(
-                                          '${item['cod_cliente']} - ${item['nome_cliente']}',
+                                          [
+                                            if (ordemSugerida != null)
+                                              '#${ordemSugerida.toString().padLeft(2, '0')}',
+                                            '${item['cod_cliente']} - ${item['nome_cliente']}',
+                                          ].join('  '),
                                           style: const TextStyle(
                                             color: VendorUiColors.heading,
                                             fontWeight: FontWeight.w800,
@@ -441,6 +540,37 @@ class _ProgramacaoDetalhePageState extends State<ProgramacaoDetalhePage> {
                                   ),
                                 ],
                               ),
+                              if (_temRoteirizacao(item)) ...[
+                                const SizedBox(height: 8),
+                                Wrap(
+                                  spacing: 8,
+                                  runSpacing: 8,
+                                  children: [
+                                    if (ordemSugerida != null)
+                                      StatusBadge(
+                                        label: 'Ordem: $ordemSugerida',
+                                        color: VendorUiColors.primary,
+                                      ),
+                                    if (eta.isNotEmpty)
+                                      StatusBadge(
+                                        label: 'ETA: $eta',
+                                        color: Colors.blue.shade700,
+                                      ),
+                                    if (distancia != null)
+                                      StatusBadge(
+                                        label:
+                                            'Distancia: ${_distanciaTexto(distancia)}',
+                                        color: Colors.blueGrey.shade700,
+                                      ),
+                                    if (confianca != null)
+                                      StatusBadge(
+                                        label:
+                                            'Confianca: ${_confiancaTexto(confianca)}',
+                                        color: Colors.teal.shade700,
+                                      ),
+                                  ],
+                                ),
+                              ],
                               const SizedBox(height: 8),
                               Wrap(
                                 spacing: 8,

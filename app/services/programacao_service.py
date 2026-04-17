@@ -67,6 +67,12 @@ def fetch_programacao_itens(
                         "obs_recebimento": str(d.get("obs_recebimento") or "").strip(),
                         "alteracao_tipo": str(d.get("alteracao_tipo") or "").strip().upper(),
                         "alteracao_detalhe": str(d.get("alteracao_detalhe") or "").strip(),
+                        "ordem_sugerida": safe_int(d.get("ordem_sugerida"), 0) if d.get("ordem_sugerida") not in (None, "") else None,
+                        "eta": str(d.get("eta") or "").strip(),
+                        "distancia": safe_float(d.get("distancia"), 0.0) if d.get("distancia") not in (None, "") else None,
+                        "confianca_localizacao": safe_float(d.get("confianca_localizacao"), 0.0)
+                        if d.get("confianca_localizacao") not in (None, "")
+                        else None,
                     }
                 )
             if out_api:

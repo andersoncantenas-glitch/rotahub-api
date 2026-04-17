@@ -1,3 +1,8 @@
+2026-04-17 09:18:52 - v4.4.0
+- Release automatizada (minor).
+- Versao anterior: v4.3.1.
+- Metadados de roteirizacao sincronizados entre app vendedor, API e desktop, com ajustes de UI/texto e bloqueio de despesas para prestacoes fechadas.
+
 2026-04-14 20:51:30 - v4.3.1
 - Release automatizada (patch).
 - Versao anterior: v4.3.0.

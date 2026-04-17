@@ -1171,7 +1171,7 @@ class VendedorApiService {
       'usuario_criacao': _upperValue(usuarioCriacao),
       'usuario_ultima_edicao': _upperValue(usuarioCriacao),
       'itens': itens.map((item) {
-        return <String, dynamic>{
+        final itemPayload = <String, dynamic>{
           'cod_cliente': _upperValue(item['cod_cliente']),
           'nome_cliente': _textValue(item['nome_cliente']),
           'qnt_caixas': _intValue(item['caixas']),
@@ -1188,6 +1188,26 @@ class VendedorApiService {
             observacao.trim(),
           ].where((part) => part.isNotEmpty).join(' | '),
         };
+        final ordemSugeridaRaw = item['ordem_sugerida'];
+        if (ordemSugeridaRaw != null &&
+            ordemSugeridaRaw.toString().trim().isNotEmpty) {
+          itemPayload['ordem_sugerida'] = _intValue(ordemSugeridaRaw);
+        }
+        final etaRaw = _textValue(item['eta']);
+        if (etaRaw.isNotEmpty) {
+          itemPayload['eta'] = etaRaw;
+        }
+        final distanciaRaw = item['distancia'];
+        if (distanciaRaw != null &&
+            distanciaRaw.toString().trim().isNotEmpty) {
+          itemPayload['distancia'] = _doubleValue(distanciaRaw);
+        }
+        final confiancaRaw = item['confianca_localizacao'];
+        if (confiancaRaw != null &&
+            confiancaRaw.toString().trim().isNotEmpty) {
+          itemPayload['confianca_localizacao'] = _doubleValue(confiancaRaw);
+        }
+        return itemPayload;
       }).toList(),
     };
 

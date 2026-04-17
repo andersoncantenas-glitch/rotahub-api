@@ -97,23 +97,19 @@ class HomePage(PageBase):
         ttk.Label(
             card,
             text=(
-                "Central de controle da operacao diaria.\n"
-                "Acompanhe rotas em andamento e acesse as areas principais."
+                "Visao inicial da operacao do dia.\n"
+                "Entre direto no fluxo principal sem passar por telas de apoio."
             ),
             style="CardLabel.TLabel",
             justify="left"
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
-        quick = ttk.Frame(card, style="CardInset.TFrame")
+        quick = ttk.Frame(card, style="CardInset.TFrame", padding=(12, 10))
         quick.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
-        quick.grid_columnconfigure((0, 1, 2), weight=1)
-        ttk.Button(
-            quick,
-            text=self.app.get_routine_nav_label("Cadastros"),
-            style="Ghost.TButton",
-            command=lambda: self.app.show_page("Cadastros"),
-        ).grid(
-            row=0, column=0, sticky="ew"
+        for idx in range(3):
+            quick.grid_columnconfigure(idx, weight=1, uniform="home_quick")
+        ttk.Label(quick, text="Fluxo principal", style="InsetTitle.TLabel").grid(
+            row=0, column=0, columnspan=3, sticky="w", pady=(0, 8)
         )
         ttk.Button(
             quick,
@@ -121,7 +117,31 @@ class HomePage(PageBase):
             style="Primary.TButton",
             command=lambda: self.app.show_page("Programacao"),
         ).grid(
-            row=0, column=1, sticky="ew", padx=6
+            row=1, column=0, sticky="ew", padx=(0, 4), pady=(0, 6)
+        )
+        ttk.Button(
+            quick,
+            text=self.app.get_routine_nav_label("Recebimentos"),
+            style="Ghost.TButton",
+            command=lambda: self.app.show_page("Recebimentos"),
+        ).grid(
+            row=1, column=1, sticky="ew", padx=4, pady=(0, 6)
+        )
+        ttk.Button(
+            quick,
+            text=self.app.get_routine_nav_label("Despesas"),
+            style="Ghost.TButton",
+            command=lambda: self.app.show_page("Despesas"),
+        ).grid(
+            row=1, column=2, sticky="ew", padx=(4, 0), pady=(0, 6)
+        )
+        ttk.Button(
+            quick,
+            text=self.app.get_routine_nav_label("Relatorios"),
+            style="Ghost.TButton",
+            command=lambda: self.app.show_page("Relatorios"),
+        ).grid(
+            row=2, column=0, sticky="ew", padx=(0, 4)
         )
         ttk.Button(
             quick,
@@ -129,12 +149,24 @@ class HomePage(PageBase):
             style="Ghost.TButton",
             command=lambda: self.app.show_page("Rotas"),
         ).grid(
-            row=0, column=2, sticky="ew"
+            row=2, column=1, sticky="ew", padx=4
+        )
+        ttk.Button(
+            quick,
+            text=self.app.get_routine_nav_label("Cadastros"),
+            style="Ghost.TButton",
+            command=lambda: self.app.show_page("Cadastros"),
+        ).grid(
+            row=2, column=2, sticky="ew", padx=(4, 0)
         )
 
-        resumo = ttk.Frame(card, style="CardInset.TFrame")
+        resumo = ttk.Frame(card, style="CardInset.TFrame", padding=(12, 10))
         resumo.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
-        resumo.grid_columnconfigure((0, 1, 2), weight=1)
+        for idx in range(3):
+            resumo.grid_columnconfigure(idx, weight=1, uniform="home_summary")
+        ttk.Label(resumo, text="Indicadores rapidos", style="InsetTitle.TLabel").grid(
+            row=0, column=0, columnspan=3, sticky="w", pady=(0, 8)
+        )
         self.lbl_total_prog = self._build_summary_tile(resumo, 0, "Programações Ativas")
         self.lbl_total_vendas = self._build_summary_tile(resumo, 1, "Vendas Importadas")
         self.lbl_total_clientes_ativos = self._build_summary_tile(resumo, 2, "Clientes Ativos")
@@ -233,7 +265,7 @@ class HomePage(PageBase):
         panel.grid(row=0, column=1, rowspan=3, sticky="nsew")
         panel.grid_columnconfigure(0, weight=1)
 
-        ttk.Label(panel, text="Informações do Sistema", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(panel, text="Base e Sistema", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
 
         version_box = ttk.Frame(panel, style="CardInset.TFrame")
         version_box.grid(row=1, column=0, sticky="ew", pady=(6, 0))
@@ -260,7 +292,7 @@ class HomePage(PageBase):
         diag = ttk.Frame(panel, style="CardInset.TFrame", padding=(10, 8))
         diag.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         diag.grid_columnconfigure(0, weight=1)
-        ttk.Label(diag, text="Diagnóstico do Ambiente", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(diag, text="Diagnóstico do Ambiente", style="InsetTitle.TLabel").grid(row=0, column=0, sticky="w")
         self.lbl_runtime_env = self._build_info_row(diag, 1, "Ambiente")
         self.lbl_runtime_db = self._build_info_row(diag, 2, "Banco")
         self.lbl_runtime_persist = self._build_info_row(diag, 3, "Persistência")
@@ -279,7 +311,7 @@ class HomePage(PageBase):
 
         support = ttk.Frame(panel, style="CardInset.TFrame")
         support.grid(row=4, column=0, sticky="ew", pady=(10, 0))
-        ttk.Label(support, text="Suporte Técnico", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(support, text="Suporte Técnico", style="InsetTitle.TLabel").grid(row=0, column=0, sticky="w")
 
         wpp_txt = f"WhatsApp: {self.SUPPORT_WHATSAPP}" if self.SUPPORT_WHATSAPP else "WhatsApp: não definido"
         mail_txt = self.SUPPORT_EMAIL if self.SUPPORT_EMAIL else "E-mail: não definido"
@@ -288,7 +320,7 @@ class HomePage(PageBase):
 
         alerts = ttk.Frame(panel, style="CardInset.TFrame")
         alerts.grid(row=5, column=0, sticky="ew", pady=(10, 0))
-        ttk.Label(alerts, text="Alertas", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(alerts, text="Alertas", style="InsetTitle.TLabel").grid(row=0, column=0, sticky="w")
         self.lbl_alerts = ttk.Label(
             alerts,
             text="Sem alertas.",
@@ -940,8 +972,11 @@ class HomePage(PageBase):
     def _build_summary_tile(self, parent, col, title, value="0", value_font=("Segoe UI", 21, "bold"), top_pad=(0, 0)):
         card = ttk.Frame(parent, style="CardInset.TFrame", padding=(10, 8))
         card.grid(row=1, column=col, sticky="ew", padx=4, pady=top_pad)
-        ttk.Label(card, text=title, style="CardLabel.TLabel").pack(anchor="w")
-        lbl = ttk.Label(card, text=value, font=value_font, background="white", foreground="#111827")
+        ttk.Label(card, text=title, style="InsetTitle.TLabel").pack(anchor="w")
+        if value_font == ("Segoe UI", 21, "bold"):
+            lbl = ttk.Label(card, text=value, style="InsetValue.TLabel")
+        else:
+            lbl = ttk.Label(card, text=value, style="InsetStrong.TLabel", font=value_font)
         lbl.pack(anchor="w", pady=(6, 0))
         return lbl
 
@@ -954,7 +989,7 @@ class HomePage(PageBase):
         header.grid(row=0, column=0, sticky="ew")
         header.grid_columnconfigure(0, weight=1)
 
-        title_lbl = ttk.Label(header, text=f"{title}:", style="CardLabel.TLabel")
+        title_lbl = ttk.Label(header, text=f"{title}:", style="InsetTitle.TLabel")
         title_lbl.grid(row=0, column=0, sticky="w")
 
         btn = ttk.Button(
@@ -1049,8 +1084,8 @@ class HomePage(PageBase):
     def _build_pending_stat(self, parent, col, title):
         c = ttk.Frame(parent, style="CardInset.TFrame", padding=(10, 8))
         c.grid(row=1, column=col, sticky="ew", padx=4, pady=(8, 0))
-        ttk.Label(c, text=title, style="CardLabel.TLabel").pack(anchor="w")
-        lbl = ttk.Label(c, text="0", font=("Segoe UI", 16, "bold"), background="white", foreground="#1D4ED8")
+        ttk.Label(c, text=title, style="InsetTitle.TLabel").pack(anchor="w")
+        lbl = ttk.Label(c, text="0", style="InsetValueSmall.TLabel")
         lbl.pack(anchor="w", pady=(4, 0))
         return lbl
 
@@ -1813,6 +1848,30 @@ class HomePage(PageBase):
                 logging.debug("Falha ao coletar localização do cliente", exc_info=True)
             return loc
 
+        def _fmt_distancia_rota(v):
+            raw = str(v or "").strip()
+            if not raw:
+                return "-"
+            try:
+                val = float(raw.replace(",", "."))
+            except Exception:
+                return raw
+            casas = 0 if abs(val) >= 100 else 1
+            return f"{val:.{casas}f}".replace(".", ",")
+
+        def _fmt_confianca_localizacao(v):
+            raw = str(v or "").strip()
+            if not raw:
+                return "-"
+            try:
+                val = float(raw.replace(",", "."))
+            except Exception:
+                return raw
+            if val <= 1:
+                val *= 100.0
+            casas = 0 if val >= 100 else 1
+            return f"{val:.{casas}f}%".replace(".", ",")
+
         def _build_cliente_detalhe_text(item_data: dict):
             cod_cli = str(item_data.get("cod_cliente") or "")
             nome_cli = str(item_data.get("nome") or "")
@@ -1832,6 +1891,16 @@ class HomePage(PageBase):
             obs_receb = str(item_data.get("obs_recebimento") or item_data.get("recebido_obs") or "")
             alteracao_tipo = str(item_data.get("alteracao_tipo") or "")
             alteracao_detalhe = str(item_data.get("alteracao_detalhe") or "")
+            ordem_sugerida = safe_int(item_data.get("ordem_sugerida"), 0)
+            eta = str(item_data.get("eta") or "").strip()
+            distancia = item_data.get("distancia")
+            confianca_localizacao = item_data.get("confianca_localizacao")
+            tem_roteirizacao = bool(
+                ordem_sugerida > 0
+                or eta
+                or (distancia is not None and str(distancia).strip() != "")
+                or (confianca_localizacao is not None and str(confianca_localizacao).strip() != "")
+            )
 
             media_cli = (kg / cx_orig) if cx_orig > 0 else 0.0
             valor_orig = float(cx_orig) * float(preco_orig)
@@ -1865,6 +1934,7 @@ class HomePage(PageBase):
                     "Alteracao do pedido",
                     bool(alteracao_tipo or alteracao_detalhe or delta_cx != 0 or abs(delta_preco) > 0.0001),
                 ),
+                ("Sugestao de roteirizacao", tem_roteirizacao),
                 (
                     "Coordenadas do evento",
                     bool(str(local.get("latitude") or "").strip() and str(local.get("longitude") or "").strip()),
@@ -1914,7 +1984,15 @@ class HomePage(PageBase):
             linhas.append(f"OBS RECEBIMENTO: {obs_receb or '-'}")
             linhas.append(f"MORTALIDADE (AVES): {mortalidade}")
             linhas.append("-" * 110)
-            linhas.append("[LOCALIZAÇÃO CLIENTE]")
+            linhas.append("[ROTEIRIZACAO / IA]")
+            linhas.append(f"ORDEM SUGERIDA: {ordem_sugerida if ordem_sugerida > 0 else '-'}")
+            linhas.append(f"ETA: {eta or '-'}")
+            linhas.append(f"DISTANCIA: {_fmt_distancia_rota(distancia) or '-'}")
+            linhas.append(
+                f"CONFIANCA LOCALIZACAO: {_fmt_confianca_localizacao(confianca_localizacao) or '-'}"
+            )
+            linhas.append("-" * 110)
+            linhas.append("[LOCALIZACAO CLIENTE]")
             linhas.append(f"LATITUDE: {local.get('latitude') or '-'}")
             linhas.append(f"LONGITUDE: {local.get('longitude') or '-'}")
             linhas.append(f"ENDEREÇO: {local.get('endereco') or '-'}")
@@ -1985,6 +2063,10 @@ class HomePage(PageBase):
                         "alterado_em": vals[9] if len(vals) > 9 else "",
                         "recebido_valor": vals[10] if len(vals) > 10 else 0,
                         "mortalidade": vals[11] if len(vals) > 11 else 0,
+                        "ordem_sugerida": "",
+                        "eta": "",
+                        "distancia": "",
+                        "confianca_localizacao": "",
                     }
 
             texto = _build_cliente_detalhe_text(item_data)
@@ -2024,6 +2106,16 @@ class HomePage(PageBase):
             obs_receb = str(item_data.get("obs_recebimento") or item_data.get("recebido_obs") or "")
             alteracao_tipo = str(item_data.get("alteracao_tipo") or "")
             alteracao_detalhe = str(item_data.get("alteracao_detalhe") or "")
+            ordem_sugerida = safe_int(item_data.get("ordem_sugerida"), 0)
+            eta = str(item_data.get("eta") or "").strip()
+            distancia = item_data.get("distancia")
+            confianca_localizacao = item_data.get("confianca_localizacao")
+            tem_roteirizacao = bool(
+                ordem_sugerida > 0
+                or eta
+                or (distancia is not None and str(distancia).strip() != "")
+                or (confianca_localizacao is not None and str(confianca_localizacao).strip() != "")
+            )
             media_cli = (kg / cx_orig) if cx_orig > 0 else 0.0
             valor_orig = float(cx_orig) * float(preco_orig)
             valor_atual = float(cx_atual) * float(preco_atual)
@@ -2133,6 +2225,10 @@ class HomePage(PageBase):
                 f"Observação recebimento: {obs_receb or '-'}",
                 f"Transferências encontradas: {len(transferencias)}",
                 f"Ocorrências/logs: {len(logs_item)}",
+                f"Ordem sugerida: {ordem_sugerida if ordem_sugerida > 0 else '-'}",
+                f"ETA previsto: {eta or '-'}",
+                f"Distancia estimada: {_fmt_distancia_rota(distancia) or '-'}",
+                f"Confianca localizacao: {_fmt_confianca_localizacao(confianca_localizacao) or '-'}",
             ]
             for i, t in enumerate(l_rst):
                 ttk.Label(grp_rst, text=t).grid(row=i, column=0, sticky="w", pady=1)
@@ -2171,6 +2267,7 @@ class HomePage(PageBase):
                     "Alteracao do pedido capturada",
                     bool(alteracao_tipo or alteracao_detalhe or delta_cx != 0 or abs(delta_preco) > 0.0001),
                 ),
+                ("Sugestao de roteirizacao", tem_roteirizacao),
                 (
                     "Latitude / Longitude salvas",
                     bool(str(local.get("latitude") or "").strip() and str(local.get("longitude") or "").strip()),
@@ -2693,6 +2790,19 @@ class HomePage(PageBase):
                 except Exception:
                     logging.debug("Falha ao mesclar itens locais/API no preview", exc_info=True)
 
+            try:
+                itens_indexados = list(enumerate(itens or []))
+
+                def _ordem_preview_sort(pair):
+                    idx, raw = pair
+                    ordem = safe_int((raw or {}).get("ordem_sugerida"), 0) if isinstance(raw, dict) else 0
+                    tem_ordem = ordem > 0
+                    return (0 if tem_ordem else 1, ordem if tem_ordem else 10**9, idx)
+
+                itens = [raw for _, raw in sorted(itens_indexados, key=_ordem_preview_sort)]
+            except Exception:
+                logging.debug("Falha ao ordenar itens por ordem_sugerida no preview", exc_info=True)
+
             total_cx_programado = 0
             total_cx_entregue = 0
             total_kg = 0.0
@@ -2788,6 +2898,10 @@ class HomePage(PageBase):
                     "endereco_evento": it.get("endereco_evento", "") if isinstance(it, dict) else "",
                     "cidade_evento": it.get("cidade_evento", "") if isinstance(it, dict) else "",
                     "bairro_evento": it.get("bairro_evento", "") if isinstance(it, dict) else "",
+                    "ordem_sugerida": it.get("ordem_sugerida", "") if isinstance(it, dict) else "",
+                    "eta": it.get("eta", "") if isinstance(it, dict) else "",
+                    "distancia": it.get("distancia", "") if isinstance(it, dict) else "",
+                    "confianca_localizacao": it.get("confianca_localizacao", "") if isinstance(it, dict) else "",
                 }
 
             # 3) labels

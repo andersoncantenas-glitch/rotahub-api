@@ -230,6 +230,8 @@ def derive_setup_url(current_url: str, new_version: str) -> str:
     url = str(current_url or "").strip()
     if not url:
         return DEFAULT_SETUP_URL.format(version=new_version)
+    if "/updates/downloads/" in url.replace("\\", "/"):
+        return DEFAULT_SETUP_URL.format(version=new_version)
 
     updated = re.sub(r"/download/v\d+\.\d+\.\d+/", f"/download/v{new_version}/", url)
     updated = re.sub(r"RotaHubDesktop_Setup_\d+\.\d+\.\d+\.exe", f"RotaHubDesktop_Setup_{new_version}.exe", updated)

@@ -695,6 +695,10 @@ def _programacao_itens_select_expr(conn: sqlite3.Connection, alias: str = "pi") 
             col_or_null("status_pedido"),
             col_or_null("caixas_atual"),
             col_or_null("preco_atual"),
+            col_or_null("ordem_sugerida"),
+            col_or_null("eta"),
+            col_or_null("distancia"),
+            col_or_null("confianca_localizacao"),
         ]
     )
 
@@ -923,6 +927,10 @@ def ensure_tables():
             add_col("preco_atual", "preco_atual REAL")
             add_col("alterado_em", "alterado_em TEXT")
             add_col("alterado_por", "alterado_por TEXT")
+            add_col("ordem_sugerida", "ordem_sugerida INTEGER")
+            add_col("eta", "eta TEXT")
+            add_col("distancia", "distancia REAL")
+            add_col("confianca_localizacao", "confianca_localizacao REAL")
         except Exception:
             pass
 
@@ -955,6 +963,10 @@ def ensure_tables():
             add_ctrl_col("endereco_evento", "endereco_evento TEXT")
             add_ctrl_col("cidade_evento", "cidade_evento TEXT")
             add_ctrl_col("bairro_evento", "bairro_evento TEXT")
+            add_ctrl_col("ordem_sugerida", "ordem_sugerida INTEGER")
+            add_ctrl_col("eta", "eta TEXT")
+            add_ctrl_col("distancia", "distancia REAL")
+            add_ctrl_col("confianca_localizacao", "confianca_localizacao REAL")
             add_ctrl_col("updated_at", "updated_at TEXT")
         except Exception:
             pass
@@ -1922,6 +1934,10 @@ class ClienteControleIn(BaseModel):
     endereco_evento: Optional[str] = None
     cidade_evento: Optional[str] = None
     bairro_evento: Optional[str] = None
+    ordem_sugerida: Optional[int] = None
+    eta: Optional[str] = None
+    distancia: Optional[float] = None
+    confianca_localizacao: Optional[float] = None
     evento_em: Optional[str] = None
     idempotency_key: Optional[str] = None
 
@@ -1977,6 +1993,10 @@ class DesktopRotaItemIn(BaseModel):
     pedido: Optional[str] = None
     produto: Optional[str] = None
     obs: Optional[str] = None
+    ordem_sugerida: Optional[int] = None
+    eta: Optional[str] = None
+    distancia: Optional[float] = None
+    confianca_localizacao: Optional[float] = None
 
 
 class DesktopRotaUpsertIn(BaseModel):
@@ -3360,36 +3380,36 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
             nome_cli = str(it.nome_cliente or "").strip().upper()
             if not cod_cli or not nome_cli:
                 continue
-            item_vals = (
-                codigo,
-                cod_cli,
-                nome_cli,
-                int(it.qnt_caixas or 0),
-                float(it.kg or 0.0),
-                float(it.preco or 0.0),
-                str(it.endereco or "").strip().upper(),
-                str(it.vendedor or "").strip().upper(),
-                str(it.pedido or "").strip().upper(),
-                str(it.produto or "").strip().upper(),
-            )
+            item_data: Dict[str, Any] = {
+                "codigo_programacao": codigo,
+                "cod_cliente": cod_cli,
+                "nome_cliente": nome_cli,
+                "qnt_caixas": int(it.qnt_caixas or 0),
+                "kg": float(it.kg or 0.0),
+                "preco": float(it.preco or 0.0),
+                "endereco": str(it.endereco or "").strip().upper(),
+                "vendedor": str(it.vendedor or "").strip().upper(),
+                "pedido": str(it.pedido or "").strip().upper(),
+                "produto": str(it.produto or "").strip().upper(),
+            }
             if has_item_obs:
-                cur.execute(
-                    """
-                    INSERT INTO programacao_itens
-                        (codigo_programacao, cod_cliente, nome_cliente, qnt_caixas, kg, preco, endereco, vendedor, pedido, produto, observacao)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    item_vals + (str(it.obs or "").strip().upper(),),
-                )
-            else:
-                cur.execute(
-                    """
-                    INSERT INTO programacao_itens
-                        (codigo_programacao, cod_cliente, nome_cliente, qnt_caixas, kg, preco, endereco, vendedor, pedido, produto)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    item_vals,
-                )
+                item_data["observacao"] = str(it.obs or "").strip().upper()
+            if "ordem_sugerida" in cols_itens and it.ordem_sugerida is not None:
+                item_data["ordem_sugerida"] = int(it.ordem_sugerida)
+            eta_txt = str(it.eta or "").strip()
+            if "eta" in cols_itens and eta_txt:
+                item_data["eta"] = eta_txt
+            if "distancia" in cols_itens and it.distancia is not None:
+                item_data["distancia"] = float(it.distancia)
+            if "confianca_localizacao" in cols_itens and it.confianca_localizacao is not None:
+                item_data["confianca_localizacao"] = float(it.confianca_localizacao)
+
+            keys = list(item_data.keys())
+            vals = [item_data[k] for k in keys]
+            cur.execute(
+                f"INSERT INTO programacao_itens ({', '.join(keys)}) VALUES ({', '.join(['?'] * len(keys))})",
+                tuple(vals),
+            )
 
         if linked_venda_ids:
             placeholders = ",".join(["?"] * len(linked_venda_ids))
@@ -4950,6 +4970,14 @@ def rota_detalhe(codigo_programacao: str, m=Depends(get_current_motorista)):
                 d["endereco_evento"] = c.get("endereco_evento")
                 d["cidade_evento"] = c.get("cidade_evento")
                 d["bairro_evento"] = c.get("bairro_evento")
+                if c.get("ordem_sugerida") is not None:
+                    d["ordem_sugerida"] = c.get("ordem_sugerida")
+                if c.get("eta") not in (None, ""):
+                    d["eta"] = c.get("eta")
+                if c.get("distancia") is not None:
+                    d["distancia"] = c.get("distancia")
+                if c.get("confianca_localizacao") is not None:
+                    d["confianca_localizacao"] = c.get("confianca_localizacao")
             clientes.append(d)
 
         return {"rota": rota, "clientes": clientes}
@@ -5109,6 +5137,14 @@ def rota_detalhe_desktop(codigo_programacao: str, _ok: bool = Depends(_require_d
                 d["endereco_evento"] = c.get("endereco_evento")
                 d["cidade_evento"] = c.get("cidade_evento")
                 d["bairro_evento"] = c.get("bairro_evento")
+                if c.get("ordem_sugerida") is not None:
+                    d["ordem_sugerida"] = c.get("ordem_sugerida")
+                if c.get("eta") not in (None, ""):
+                    d["eta"] = c.get("eta")
+                if c.get("distancia") is not None:
+                    d["distancia"] = c.get("distancia")
+                if c.get("confianca_localizacao") is not None:
+                    d["confianca_localizacao"] = c.get("confianca_localizacao")
 
             # Fallback por logs do item (quando controle não tiver horário/local completos)
             lg = log_map.get((cod, ped))
@@ -5137,6 +5173,18 @@ def rota_detalhe_desktop(codigo_programacao: str, _ok: bool = Depends(_require_d
                 d["endereco_evento"] = payload_obj.get("endereco") or payload_obj.get("endereco_cliente") or ""
                 d["cidade_evento"] = payload_obj.get("cidade") or payload_obj.get("cidade_cliente") or ""
                 d["bairro_evento"] = payload_obj.get("bairro") or payload_obj.get("bairro_cliente") or ""
+                if d.get("ordem_sugerida") in (None, ""):
+                    d["ordem_sugerida"] = (
+                        payload_obj.get("ordem_sugerida")
+                        if payload_obj.get("ordem_sugerida") not in (None, "")
+                        else payload_obj.get("ordem")
+                    )
+                if d.get("eta") in (None, "") and payload_obj.get("eta") not in (None, ""):
+                    d["eta"] = payload_obj.get("eta")
+                if d.get("distancia") in (None, "") and payload_obj.get("distancia") not in (None, ""):
+                    d["distancia"] = payload_obj.get("distancia")
+                if d.get("confianca_localizacao") in (None, "") and payload_obj.get("confianca_localizacao") not in (None, ""):
+                    d["confianca_localizacao"] = payload_obj.get("confianca_localizacao")
 
             clientes.append(d)
 
@@ -7033,6 +7081,10 @@ def salvar_controle_cliente(
         endereco_evento = (payload.endereco_evento or None)
         cidade_evento = (payload.cidade_evento or None)
         bairro_evento = (payload.bairro_evento or None)
+        ordem_sugerida = payload.ordem_sugerida
+        eta = (payload.eta or None)
+        distancia = payload.distancia
+        confianca_localizacao = payload.confianca_localizacao
 
         # busca item base (para status/valores), priorizando o pedido informado
         cur.execute("PRAGMA table_info(programacao_itens)")
@@ -7177,6 +7229,30 @@ def salvar_controle_cliente(
                     )
 
         # atualiza controle por cliente (compatÃvel com bases sem UNIQUE)
+        if ordem_sugerida is not None:
+            try:
+                ordem_sugerida = int(ordem_sugerida)
+            except Exception:
+                raise HTTPException(status_code=400, detail="ordem_sugerida invalida.")
+            if ordem_sugerida < 0:
+                raise HTTPException(status_code=400, detail="ordem_sugerida nao pode ser negativa.")
+
+        if distancia is not None:
+            try:
+                distancia = float(distancia)
+            except Exception:
+                raise HTTPException(status_code=400, detail="distancia invalida.")
+            if distancia < 0:
+                raise HTTPException(status_code=400, detail="distancia nao pode ser negativa.")
+
+        if confianca_localizacao is not None:
+            try:
+                confianca_localizacao = float(confianca_localizacao)
+            except Exception:
+                raise HTTPException(status_code=400, detail="confianca_localizacao invalida.")
+            if confianca_localizacao < 0:
+                raise HTTPException(status_code=400, detail="confianca_localizacao nao pode ser negativa.")
+
         caixas_eff = caixas_atual if caixas_atual is not None else base_caixas
         if status in ("ENTREGUE", "CANCELADO"):
             caixas_eff = 0
@@ -7204,6 +7280,10 @@ def salvar_controle_cliente(
                    endereco_evento=COALESCE(NULLIF(?, ''), endereco_evento),
                    cidade_evento=COALESCE(NULLIF(?, ''), cidade_evento),
                    bairro_evento=COALESCE(NULLIF(?, ''), bairro_evento),
+                   ordem_sugerida=COALESCE(?, ordem_sugerida),
+                   eta=COALESCE(NULLIF(?, ''), eta),
+                   distancia=COALESCE(?, distancia),
+                   confianca_localizacao=COALESCE(?, confianca_localizacao),
                    updated_at=datetime('now')
              WHERE codigo_programacao=? AND cod_cliente=? AND COALESCE(pedido, '')=COALESCE(?, '')
             """,
@@ -7227,6 +7307,10 @@ def salvar_controle_cliente(
                 endereco_evento,
                 cidade_evento,
                 bairro_evento,
+                ordem_sugerida,
+                eta,
+                distancia,
+                confianca_localizacao,
                 codigo_programacao,
                 cod_cliente,
                 pedido,
@@ -7241,8 +7325,9 @@ def salvar_controle_cliente(
                      valor_recebido, forma_recebimento, obs_recebimento,
                      status_pedido, alteracao_tipo, alteracao_detalhe, pedido,
                      caixas_atual, preco_atual, alterado_em, alterado_por,
-                     lat_evento, lon_evento, endereco_evento, cidade_evento, bairro_evento, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                     lat_evento, lon_evento, endereco_evento, cidade_evento, bairro_evento,
+                     ordem_sugerida, eta, distancia, confianca_localizacao, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                 """,
                 (
                     codigo_programacao,
@@ -7266,6 +7351,10 @@ def salvar_controle_cliente(
                     endereco_evento,
                     cidade_evento,
                     bairro_evento,
+                    ordem_sugerida,
+                    eta,
+                    distancia,
+                    confianca_localizacao,
                 ),
             )
 
@@ -7294,6 +7383,18 @@ def salvar_controle_cliente(
         if "alterado_por" in cols:
             params.append(alterado_por)
             sets.append("alterado_por=?")
+        if "ordem_sugerida" in cols and ordem_sugerida is not None:
+            params.append(ordem_sugerida)
+            sets.append("ordem_sugerida=?")
+        if "eta" in cols and eta not in (None, ""):
+            params.append(eta)
+            sets.append("eta=?")
+        if "distancia" in cols and distancia is not None:
+            params.append(distancia)
+            sets.append("distancia=?")
+        if "confianca_localizacao" in cols and confianca_localizacao is not None:
+            params.append(confianca_localizacao)
+            sets.append("confianca_localizacao=?")
 
         if sets:
             if has_pedido_col:

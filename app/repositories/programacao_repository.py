@@ -51,17 +51,29 @@ def fetch_programacao_itens_local(
         has_preco_atual = db_has_column_impl(cur, "programacao_itens", "preco_atual")
         has_alt_em = db_has_column_impl(cur, "programacao_itens", "alterado_em")
         has_alt_por = db_has_column_impl(cur, "programacao_itens", "alterado_por")
+        has_ordem_sugerida = db_has_column_impl(cur, "programacao_itens", "ordem_sugerida")
+        has_eta = db_has_column_impl(cur, "programacao_itens", "eta")
+        has_distancia = db_has_column_impl(cur, "programacao_itens", "distancia")
+        has_confianca_localizacao = db_has_column_impl(cur, "programacao_itens", "confianca_localizacao")
 
         has_ctrl = db_has_column_impl(cur, "programacao_itens_controle", "codigo_programacao")
         has_ctrl_pedido = has_ctrl and db_has_column_impl(cur, "programacao_itens_controle", "pedido")
         has_ctrl_alt_tipo = has_ctrl and db_has_column_impl(cur, "programacao_itens_controle", "alteracao_tipo")
         has_ctrl_alt_detalhe = has_ctrl and db_has_column_impl(cur, "programacao_itens_controle", "alteracao_detalhe")
+        has_ctrl_ordem_sugerida = has_ctrl and db_has_column_impl(cur, "programacao_itens_controle", "ordem_sugerida")
+        has_ctrl_eta = has_ctrl and db_has_column_impl(cur, "programacao_itens_controle", "eta")
+        has_ctrl_distancia = has_ctrl and db_has_column_impl(cur, "programacao_itens_controle", "distancia")
+        has_ctrl_confianca_localizacao = has_ctrl and db_has_column_impl(cur, "programacao_itens_controle", "confianca_localizacao")
 
         status_expr = ("pi.status_pedido" if has_status else "''")
         caixas_atual_expr = ("pi.caixas_atual" if has_caixas_atual else "NULL")
         preco_atual_expr = ("pi.preco_atual" if has_preco_atual else "NULL")
         alterado_em_expr = ("pi.alterado_em" if has_alt_em else "NULL")
         alterado_por_expr = ("pi.alterado_por" if has_alt_por else "NULL")
+        ordem_sugerida_expr = ("pi.ordem_sugerida" if has_ordem_sugerida else "NULL")
+        eta_expr = ("pi.eta" if has_eta else "''")
+        distancia_expr = ("pi.distancia" if has_distancia else "NULL")
+        confianca_localizacao_expr = ("pi.confianca_localizacao" if has_confianca_localizacao else "NULL")
 
         if has_ctrl:
             status_expr = "COALESCE(NULLIF(TRIM(pc.status_pedido), ''), NULLIF(TRIM(" + status_expr + "), ''), 'PENDENTE')"
@@ -75,12 +87,36 @@ def fetch_programacao_itens_local(
             preco_atual_expr = "COALESCE(pc.preco_atual, " + preco_atual_expr + ", 0)"
             alterado_em_expr = "COALESCE(NULLIF(TRIM(pc.alterado_em), ''), NULLIF(TRIM(" + alterado_em_expr + "), ''), '')"
             alterado_por_expr = "COALESCE(NULLIF(TRIM(pc.alterado_por), ''), NULLIF(TRIM(" + alterado_por_expr + "), ''), '')"
+            ordem_sugerida_expr = (
+                "COALESCE(pc.ordem_sugerida, " + ordem_sugerida_expr + ")"
+                if has_ctrl_ordem_sugerida
+                else "COALESCE(" + ordem_sugerida_expr + ", NULL)"
+            )
+            eta_expr = (
+                "COALESCE(NULLIF(TRIM(pc.eta), ''), NULLIF(TRIM(" + eta_expr + "), ''), '')"
+                if has_ctrl_eta
+                else "COALESCE(NULLIF(TRIM(" + eta_expr + "), ''), '')"
+            )
+            distancia_expr = (
+                "COALESCE(pc.distancia, " + distancia_expr + ")"
+                if has_ctrl_distancia
+                else "COALESCE(" + distancia_expr + ", NULL)"
+            )
+            confianca_localizacao_expr = (
+                "COALESCE(pc.confianca_localizacao, " + confianca_localizacao_expr + ")"
+                if has_ctrl_confianca_localizacao
+                else "COALESCE(" + confianca_localizacao_expr + ", NULL)"
+            )
         else:
             status_expr = "COALESCE(NULLIF(TRIM(" + status_expr + "), ''), 'PENDENTE')"
             caixas_atual_expr = "COALESCE(" + caixas_atual_expr + ", COALESCE(pi.qnt_caixas, 0))"
             preco_atual_expr = "COALESCE(" + preco_atual_expr + ", 0)"
             alterado_em_expr = "COALESCE(NULLIF(TRIM(" + alterado_em_expr + "), ''), '')"
             alterado_por_expr = "COALESCE(NULLIF(TRIM(" + alterado_por_expr + "), ''), '')"
+            ordem_sugerida_expr = "COALESCE(" + ordem_sugerida_expr + ", NULL)"
+            eta_expr = "COALESCE(NULLIF(TRIM(" + eta_expr + "), ''), '')"
+            distancia_expr = "COALESCE(" + distancia_expr + ", NULL)"
+            confianca_localizacao_expr = "COALESCE(" + confianca_localizacao_expr + ", NULL)"
 
         select_cols = [
             "pi.cod_cliente",
@@ -102,6 +138,10 @@ def fetch_programacao_itens_local(
             preco_atual_expr + " as preco_atual",
             alterado_em_expr + " as alterado_em",
             alterado_por_expr + " as alterado_por",
+            ordem_sugerida_expr + " as ordem_sugerida",
+            eta_expr + " as eta",
+            distancia_expr + " as distancia",
+            confianca_localizacao_expr + " as confianca_localizacao",
         ]
 
         join_ctrl = ""
@@ -173,6 +213,10 @@ def fetch_programacao_itens_local(
                 "obs_recebimento": r[19] or "",
                 "alteracao_tipo": r[20] or "",
                 "alteracao_detalhe": r[21] or "",
+                "ordem_sugerida": safe_int(r[22], 0) if r[22] not in (None, "") else None,
+                "eta": r[23] or "",
+                "distancia": safe_float(r[24], 0.0) if r[24] not in (None, "") else None,
+                "confianca_localizacao": safe_float(r[25], 0.0) if r[25] not in (None, "") else None,
             }
         )
     return out

@@ -80,11 +80,30 @@ class RelatoriosPage(PageBase):
 
         card = ttk.Frame(self.body, style="Card.TFrame", padding=12)
         card.grid(row=0, column=0, sticky="ew")
-        card.grid_columnconfigure(12, weight=1)
+        card.grid_columnconfigure(0, weight=1)
 
-        ttk.Label(card, text="Tipo de Relatorio", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w")
-        self.cb_tipo_rel = ttk.Combobox(
+        ttk.Label(card, text="Relatorios operacionais", style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Label(
             card,
+            text="Filtre a programacao, gere o resumo textual e use exportacao, PDF e controle de status no mesmo modulo.",
+            style="CardLabel.TLabel",
+            justify="left",
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+
+        filters_wrap = ttk.Frame(card, style="CardInset.TFrame", padding=(12, 10))
+        filters_wrap.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        for idx in range(6):
+            filters_wrap.grid_columnconfigure(idx, weight=1 if idx < 4 else 0)
+
+        ttk.Label(filters_wrap, text="Filtros", style="InsetTitle.TLabel").grid(
+            row=0, column=0, columnspan=6, sticky="w"
+        )
+
+        ttk.Label(filters_wrap, text="Tipo de Relatorio", style="CardLabel.TLabel").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.cb_tipo_rel = ttk.Combobox(
+            filters_wrap,
             state="readonly",
             values=[
                 "Programacoes",
@@ -96,59 +115,67 @@ class RelatoriosPage(PageBase):
             ],
             width=28,
         )
-        self.cb_tipo_rel.grid(row=1, column=0, sticky="ew", padx=6)
+        self.cb_tipo_rel.grid(row=2, column=0, sticky="ew", padx=(0, 8))
         self.cb_tipo_rel.set("Programacoes")
 
-        ttk.Label(card, text="Codigo", style="CardLabel.TLabel").grid(row=0, column=1, sticky="w")
-        self.ent_filtro_codigo = ttk.Entry(card, style="Field.TEntry", width=16)
-        self.ent_filtro_codigo.grid(row=1, column=1, sticky="ew", padx=6)
+        ttk.Label(filters_wrap, text="Codigo", style="CardLabel.TLabel").grid(row=1, column=1, sticky="w", pady=(8, 0))
+        self.ent_filtro_codigo = ttk.Entry(filters_wrap, style="Field.TEntry", width=16)
+        self.ent_filtro_codigo.grid(row=2, column=1, sticky="ew", padx=8)
 
-        ttk.Label(card, text="Motorista", style="CardLabel.TLabel").grid(row=0, column=2, sticky="w")
-        self.ent_filtro_motorista = ttk.Entry(card, style="Field.TEntry", width=24)
-        self.ent_filtro_motorista.grid(row=1, column=2, sticky="ew", padx=6)
+        ttk.Label(filters_wrap, text="Motorista", style="CardLabel.TLabel").grid(row=1, column=2, sticky="w", pady=(8, 0))
+        self.ent_filtro_motorista = ttk.Entry(filters_wrap, style="Field.TEntry", width=24)
+        self.ent_filtro_motorista.grid(row=2, column=2, sticky="ew", padx=8)
 
-        ttk.Label(card, text="Data", style="CardLabel.TLabel").grid(row=0, column=3, sticky="w")
-        self.ent_filtro_data = ttk.Entry(card, style="Field.TEntry", width=12)
-        self.ent_filtro_data.grid(row=1, column=3, sticky="ew", padx=6)
+        ttk.Label(filters_wrap, text="Data", style="CardLabel.TLabel").grid(row=1, column=3, sticky="w", pady=(8, 0))
+        self.ent_filtro_data = ttk.Entry(filters_wrap, style="Field.TEntry", width=12)
+        self.ent_filtro_data.grid(row=2, column=3, sticky="ew", padx=8)
         self._bind_date_mask_relatorio(self.ent_filtro_data)
 
-        ttk.Button(card, text="\U0001F50D BUSCAR", style="Primary.TButton", command=self._buscar_programacoes_relatorio).grid(
-            row=1, column=4, padx=6
+        ttk.Button(filters_wrap, text="\U0001F50D BUSCAR", style="Primary.TButton", command=self._buscar_programacoes_relatorio).grid(
+            row=2, column=4, padx=(8, 4), sticky="ew"
         )
-        ttk.Button(card, text="\U0001F9F9 LIMPAR", style="Ghost.TButton", command=self._limpar_filtros_relatorio).grid(
-            row=1, column=5, padx=6
-        )
-
-        ttk.Label(card, text="Programacao", style="CardLabel.TLabel").grid(row=2, column=0, sticky="w")
-        self.cb_prog = ttk.Combobox(card, state="readonly")
-        self.cb_prog.grid(row=3, column=0, sticky="ew", padx=6)
-
-        ttk.Button(card, text="\U0001F4CA GERAR RESUMO", style="Primary.TButton", command=self.gerar_resumo).grid(
-            row=3, column=1, padx=6
-        )
-        ttk.Button(card, text="\U0001F4E4 EXPORTAR EXCEL", style="Warn.TButton", command=self.exportar_excel).grid(
-            row=3, column=2, padx=6
-        )
-        ttk.Button(card, text="\U0001F4D1 GERAR PDF", style="Primary.TButton", command=self.abrir_previsualizacao_relatorio).grid(
-            row=3, column=3, padx=6
-        )
-        ttk.Button(card, text="\U0001F504 ATUALIZAR", style="Ghost.TButton", command=self.refresh_comboboxes).grid(
-            row=3, column=4, padx=6
+        ttk.Button(filters_wrap, text="\U0001F9F9 LIMPAR", style="Ghost.TButton", command=self._limpar_filtros_relatorio).grid(
+            row=2, column=5, padx=(4, 0), sticky="ew"
         )
 
-        ttk.Button(card, text="\U0001F3C1 FINALIZAR ROTA", style="Danger.TButton", command=self.finalizar_rota).grid(
-            row=3, column=5, padx=6
+        actions_wrap = ttk.Frame(card, style="CardInset.TFrame", padding=(12, 10))
+        actions_wrap.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        for idx in range(4):
+            actions_wrap.grid_columnconfigure(idx, weight=1 if idx == 0 else 0)
+
+        ttk.Label(actions_wrap, text="Saida e controle", style="InsetTitle.TLabel").grid(
+            row=0, column=0, columnspan=4, sticky="w"
         )
-        ttk.Button(card, text="\u21A9 REABRIR ROTA", style="Warn.TButton", command=self.reabrir_rota).grid(
-            row=3, column=6, padx=6
+        ttk.Label(actions_wrap, text="Programacao", style="CardLabel.TLabel").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.cb_prog = ttk.Combobox(actions_wrap, state="readonly")
+        self.cb_prog.grid(row=2, column=0, sticky="ew", padx=(0, 8))
+
+        ttk.Button(actions_wrap, text="\U0001F4CA GERAR RESUMO", style="Primary.TButton", command=self.gerar_resumo).grid(
+            row=2, column=1, padx=4, sticky="ew"
+        )
+        ttk.Button(actions_wrap, text="\U0001F4E4 EXPORTAR EXCEL", style="Warn.TButton", command=self.exportar_excel).grid(
+            row=2, column=2, padx=4, sticky="ew"
+        )
+        ttk.Button(actions_wrap, text="\U0001F4D1 GERAR PDF", style="Primary.TButton", command=self.abrir_previsualizacao_relatorio).grid(
+            row=2, column=3, padx=(4, 0), sticky="ew"
+        )
+
+        ttk.Button(actions_wrap, text="\U0001F504 ATUALIZAR", style="Ghost.TButton", command=self.refresh_comboboxes).grid(
+            row=3, column=1, padx=4, pady=(8, 0), sticky="ew"
+        )
+        ttk.Button(actions_wrap, text="\U0001F3C1 FINALIZAR ROTA", style="Danger.TButton", command=self.finalizar_rota).grid(
+            row=3, column=2, padx=4, pady=(8, 0), sticky="ew"
+        )
+        ttk.Button(actions_wrap, text="\u21A9 REABRIR ROTA", style="Warn.TButton", command=self.reabrir_rota).grid(
+            row=3, column=3, padx=(4, 0), pady=(8, 0), sticky="ew"
         )
 
         self.var_show_receb_detalhe = tk.BooleanVar(value=True)
         self.var_show_desp_detalhe = tk.BooleanVar(value=True)
 
-        details_frame = ttk.Frame(card, style="Card.TFrame")
-        details_frame.grid(row=4, column=0, columnspan=8, sticky="w", pady=(8, 0))
-        ttk.Label(details_frame, text="Blocos do Resumo:", style="CardLabel.TLabel").pack(side="left", padx=(0, 8))
+        details_frame = ttk.Frame(actions_wrap, style="CardInset.TFrame", padding=(10, 8))
+        details_frame.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        ttk.Label(details_frame, text="Blocos do resumo:", style="InsetTitle.TLabel").pack(side="left", padx=(0, 8))
         ttk.Checkbutton(
             details_frame,
             text="Recebimentos detalhados",
@@ -165,26 +192,76 @@ class RelatoriosPage(PageBase):
         dash = ttk.Frame(self.body, style="Card.TFrame", padding=10)
         dash.grid(row=1, column=0, sticky="ew", pady=(10, 0))
         dash.grid_columnconfigure(0, weight=1)
-        dash.grid_columnconfigure(1, weight=1)
+        ttk.Label(dash, text="Resumo do recorte", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
 
-        self.lbl_kpi_1 = ttk.Label(dash, text="Registros: 0", style="CardLabel.TLabel")
-        self.lbl_kpi_1.grid(row=0, column=0, sticky="w")
-        self.lbl_kpi_2 = ttk.Label(dash, text="Total: R$ 0,00", style="CardLabel.TLabel")
-        self.lbl_kpi_2.grid(row=0, column=1, sticky="w")
-        self.lbl_kpi_3 = ttk.Label(dash, text="Media: 0,00", style="CardLabel.TLabel")
-        self.lbl_kpi_3.grid(row=1, column=0, sticky="w")
-        self.lbl_kpi_4 = ttk.Label(dash, text="Destaque: -", style="CardLabel.TLabel")
-        self.lbl_kpi_4.grid(row=1, column=1, sticky="w")
+        kpi_row = ttk.Frame(dash, style="Card.TFrame")
+        kpi_row.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        for idx in range(4):
+            kpi_row.grid_columnconfigure(idx, weight=1, uniform="rel_kpi")
 
-        self.cv_chart = tk.Canvas(dash, height=140, bg="white", highlightthickness=1, highlightbackground="#E5E7EB")
-        self.cv_chart.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        kpi_1 = ttk.Frame(kpi_row, style="CardInset.TFrame", padding=(10, 8))
+        kpi_1.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        ttk.Label(kpi_1, text="Registros", style="InsetTitle.TLabel").pack(anchor="w")
+        self.lbl_kpi_1 = ttk.Label(kpi_1, text="Registros: 0", style="InsetStrong.TLabel", justify="left")
+        self.lbl_kpi_1.pack(anchor="w", pady=(6, 0))
+
+        kpi_2 = ttk.Frame(kpi_row, style="CardInset.TFrame", padding=(10, 8))
+        kpi_2.grid(row=0, column=1, sticky="ew", padx=4)
+        ttk.Label(kpi_2, text="Total", style="InsetTitle.TLabel").pack(anchor="w")
+        self.lbl_kpi_2 = ttk.Label(kpi_2, text="Total: R$ 0,00", style="InsetStrong.TLabel", justify="left")
+        self.lbl_kpi_2.pack(anchor="w", pady=(6, 0))
+
+        kpi_3 = ttk.Frame(kpi_row, style="CardInset.TFrame", padding=(10, 8))
+        kpi_3.grid(row=0, column=2, sticky="ew", padx=4)
+        ttk.Label(kpi_3, text="Media", style="InsetTitle.TLabel").pack(anchor="w")
+        self.lbl_kpi_3 = ttk.Label(kpi_3, text="Media: 0,00", style="InsetStrong.TLabel", justify="left")
+        self.lbl_kpi_3.pack(anchor="w", pady=(6, 0))
+
+        kpi_4 = ttk.Frame(kpi_row, style="CardInset.TFrame", padding=(10, 8))
+        kpi_4.grid(row=0, column=3, sticky="ew", padx=(4, 0))
+        ttk.Label(kpi_4, text="Destaque", style="InsetTitle.TLabel").pack(anchor="w")
+        self.lbl_kpi_4 = ttk.Label(kpi_4, text="Destaque: -", style="InsetStrong.TLabel", justify="left")
+        self.lbl_kpi_4.pack(anchor="w", pady=(6, 0))
+
+        chart_frame = ttk.Frame(dash, style="CardInset.TFrame", padding=(10, 8))
+        chart_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        chart_frame.grid_columnconfigure(0, weight=1)
+        ttk.Label(chart_frame, text="Distribuicao visual", style="InsetTitle.TLabel").grid(row=0, column=0, sticky="w")
+        self.cv_chart = tk.Canvas(chart_frame, height=140, bg="white", highlightthickness=1, highlightbackground="#E5E7EB")
+        self.cv_chart.grid(row=1, column=0, sticky="ew", pady=(8, 0))
         self._chart_bars = []
         self._chart_tip_items = ()
         self.cv_chart.bind("<Motion>", self._on_chart_motion)
         self.cv_chart.bind("<Leave>", lambda _e: self._hide_chart_tooltip())
 
-        self.txt = tk.Text(self.body, height=18)
-        self.txt.grid(row=2, column=0, sticky="nsew", pady=(10, 0))
+        output_card = ttk.Frame(self.body, style="Card.TFrame", padding=10)
+        output_card.grid(row=2, column=0, sticky="nsew", pady=(10, 0))
+        output_card.grid_columnconfigure(0, weight=1)
+        output_card.grid_rowconfigure(1, weight=1)
+        ttk.Label(output_card, text="Saida do relatorio", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+
+        output_wrap = ttk.Frame(output_card, style="CardInset.TFrame", padding=(10, 10))
+        output_wrap.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+        output_wrap.grid_columnconfigure(0, weight=1)
+        output_wrap.grid_rowconfigure(0, weight=1)
+
+        self.txt = tk.Text(
+            output_wrap,
+            height=18,
+            wrap="none",
+            font=("Consolas", 10),
+            background="white",
+            relief="flat",
+            bd=0,
+            padx=8,
+            pady=8,
+        )
+        self.txt.grid(row=0, column=0, sticky="nsew")
+        txt_vsb = ttk.Scrollbar(output_wrap, orient="vertical", command=self.txt.yview)
+        txt_vsb.grid(row=0, column=1, sticky="ns")
+        txt_hsb = ttk.Scrollbar(output_wrap, orient="horizontal", command=self.txt.xview)
+        txt_hsb.grid(row=1, column=0, sticky="ew")
+        self.txt.configure(yscrollcommand=txt_vsb.set, xscrollcommand=txt_hsb.set)
 
         self.cb_tipo_rel.bind("<<ComboboxSelected>>", lambda _e: self._buscar_programacoes_relatorio())
         self.cb_prog.bind("<<ComboboxSelected>>", lambda _e: self._refresh_resumo_if_ready())

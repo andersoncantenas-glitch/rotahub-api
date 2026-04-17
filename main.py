@@ -124,7 +124,7 @@ from app.utils.formatters import (
     safe_int,
     safe_money,
 )
-from app.utils.text_fix import _mojibake_score, fix_mojibake_text
+from app.utils.text_fix import fix_mojibake_text, normalize_ui_collection, normalize_ui_text
 from app.utils.validators import (
     normalize_phone,
 )
@@ -474,38 +474,55 @@ def apply_window_icon(win):
             logging.debug("Falha ignorada")
 
 
-def _wrap_widget_init(widget_cls):
+def _normalize_ui_kwargs(kwargs, aggressive: bool = True):
+    if not isinstance(kwargs, dict):
+        return kwargs
+    if "text" in kwargs:
+        kwargs["text"] = normalize_ui_text(kwargs.get("text"), aggressive=aggressive)
+    if "label" in kwargs:
+        kwargs["label"] = normalize_ui_text(kwargs.get("label"), aggressive=aggressive)
+    if "message" in kwargs:
+        kwargs["message"] = normalize_ui_text(kwargs.get("message"), aggressive=True)
+    if "title" in kwargs:
+        kwargs["title"] = normalize_ui_text(kwargs.get("title"), aggressive=True)
+    if "values" in kwargs and isinstance(kwargs.get("values"), (list, tuple)):
+        kwargs["values"] = normalize_ui_collection(kwargs.get("values"), aggressive=False)
+    return kwargs
+
+
+def _wrap_widget_init(widget_cls, aggressive: bool = True):
+    if getattr(widget_cls, "_rotahub_text_wrapped_init", False):
+        return
     original = widget_cls.__init__
 
     def wrapped(self, *args, **kwargs):
-        if "text" in kwargs:
-            kwargs["text"] = fix_mojibake_text(kwargs.get("text"))
+        kwargs = _normalize_ui_kwargs(kwargs, aggressive=aggressive)
         return original(self, *args, **kwargs)
 
     widget_cls.__init__ = wrapped
+    widget_cls._rotahub_text_wrapped_init = True
 
 
 def _install_text_repair_hooks():
     # Labels e botoes (ttk/tk)
-    for cls in (ttk.Label, ttk.Button, ttk.Checkbutton, ttk.LabelFrame, ttk.Combobox, tk.Label, tk.Button):
+    for cls in (
+        ttk.Label,
+        ttk.Button,
+        ttk.Checkbutton,
+        ttk.LabelFrame,
+        ttk.Combobox,
+        ttk.Radiobutton,
+        tk.Label,
+        tk.Button,
+        tk.Checkbutton,
+        tk.LabelFrame,
+        tk.Radiobutton,
+        tk.Menubutton,
+    ):
         try:
             _wrap_widget_init(cls)
         except Exception:
             logging.debug("Falha ao instalar hook de texto em widget")
-
-    # valores de combobox
-    try:
-        _combo_init = ttk.Combobox.__init__
-
-        def wrapped_combo_init(self, *args, **kwargs):
-            vals = kwargs.get("values")
-            if isinstance(vals, (list, tuple)):
-                kwargs["values"] = [fix_mojibake_text(v) for v in vals]
-            return _combo_init(self, *args, **kwargs)
-
-        ttk.Combobox.__init__ = wrapped_combo_init
-    except Exception:
-        logging.debug("Falha ao instalar hook de combobox")
 
     # Notebook tabs (texto das abas)
     try:
@@ -514,18 +531,15 @@ def _install_text_repair_hooks():
         _nb_tab = ttk.Notebook.tab
 
         def wrapped_nb_add(self, child, **kw):
-            if "text" in kw:
-                kw["text"] = fix_mojibake_text(kw.get("text"))
+            kw = _normalize_ui_kwargs(kw, aggressive=True)
             return _nb_add(self, child, **kw)
 
         def wrapped_nb_insert(self, pos, child, **kw):
-            if "text" in kw:
-                kw["text"] = fix_mojibake_text(kw.get("text"))
+            kw = _normalize_ui_kwargs(kw, aggressive=True)
             return _nb_insert(self, pos, child, **kw)
 
         def wrapped_nb_tab(self, tab_id, option=None, **kw):
-            if "text" in kw:
-                kw["text"] = fix_mojibake_text(kw.get("text"))
+            kw = _normalize_ui_kwargs(kw, aggressive=True)
             return _nb_tab(self, tab_id, option, **kw)
 
         ttk.Notebook.add = wrapped_nb_add
@@ -540,7 +554,7 @@ def _install_text_repair_hooks():
 
         def wrapped_wm_title(self, string=None):
             if string is not None:
-                string = fix_mojibake_text(str(string))
+                string = normalize_ui_text(str(string), aggressive=True)
             return _wm_title(self, string)
 
         tk.Wm.title = wrapped_wm_title
@@ -550,15 +564,24 @@ def _install_text_repair_hooks():
     # Treeview headings
     try:
         _tree_heading = ttk.Treeview.heading
+        _tree_insert = ttk.Treeview.insert
 
         def wrapped_heading(self, column, option=None, **kw):
-            if "text" in kw:
-                kw["text"] = fix_mojibake_text(kw.get("text"))
+            kw = _normalize_ui_kwargs(kw, aggressive=True)
             return _tree_heading(self, column, option, **kw)
 
+        def wrapped_insert(self, parent, index, iid=None, **kw):
+            kw = _normalize_ui_kwargs(kw, aggressive=False)
+            if "text" in kw:
+                kw["text"] = normalize_ui_text(kw.get("text"), aggressive=False)
+            if "values" in kw and isinstance(kw.get("values"), (list, tuple)):
+                kw["values"] = normalize_ui_collection(kw.get("values"), aggressive=False)
+            return _tree_insert(self, parent, index, iid=iid, **kw)
+
         ttk.Treeview.heading = wrapped_heading
+        ttk.Treeview.insert = wrapped_insert
     except Exception:
-        logging.debug("Falha ao instalar hook de heading")
+        logging.debug("Falha ao instalar hook de Treeview")
 
     # Atualizacoes dinamicas de texto apos criacao de widget (config/configure)
     try:
@@ -566,17 +589,15 @@ def _install_text_repair_hooks():
         _widget_config = tk.Widget.config
 
         def wrapped_widget_configure(self, cnf=None, **kw):
-            if "text" in kw:
-                kw["text"] = fix_mojibake_text(kw.get("text"))
-            if "values" in kw and isinstance(kw.get("values"), (list, tuple)):
-                kw["values"] = [fix_mojibake_text(v) for v in kw["values"]]
+            if isinstance(cnf, dict):
+                cnf = _normalize_ui_kwargs(dict(cnf), aggressive=True)
+            kw = _normalize_ui_kwargs(kw, aggressive=True)
             return _widget_configure(self, cnf, **kw)
 
         def wrapped_widget_config(self, cnf=None, **kw):
-            if "text" in kw:
-                kw["text"] = fix_mojibake_text(kw.get("text"))
-            if "values" in kw and isinstance(kw.get("values"), (list, tuple)):
-                kw["values"] = [fix_mojibake_text(v) for v in kw["values"]]
+            if isinstance(cnf, dict):
+                cnf = _normalize_ui_kwargs(dict(cnf), aggressive=True)
+            kw = _normalize_ui_kwargs(kw, aggressive=True)
             return _widget_config(self, cnf, **kw)
 
         tk.Widget.configure = wrapped_widget_configure
@@ -584,15 +605,72 @@ def _install_text_repair_hooks():
     except Exception:
         logging.debug("Falha ao instalar hook global de configure/config")
 
-    # Treeview insert
+    # Canvas e Text
+    try:
+        _canvas_create_text = tk.Canvas.create_text
+        _text_insert = tk.Text.insert
+
+        def wrapped_canvas_create_text(self, *args, **kwargs):
+            if "text" in kwargs:
+                kwargs["text"] = normalize_ui_text(kwargs.get("text"), aggressive=False)
+            return _canvas_create_text(self, *args, **kwargs)
+
+        def wrapped_text_insert(self, index, chars, *args):
+            if isinstance(chars, str):
+                chars = normalize_ui_text(chars, aggressive=False)
+            return _text_insert(self, index, chars, *args)
+
+        tk.Canvas.create_text = wrapped_canvas_create_text
+        tk.Text.insert = wrapped_text_insert
+    except Exception:
+        logging.debug("Falha ao instalar hook de Canvas/Text")
+
+    # Menus
+    try:
+        _menu_add_command = tk.Menu.add_command
+        _menu_add_checkbutton = tk.Menu.add_checkbutton
+        _menu_add_radiobutton = tk.Menu.add_radiobutton
+        _menu_add_cascade = tk.Menu.add_cascade
+        _menu_entryconfigure = tk.Menu.entryconfigure
+
+        def wrapped_menu_add_command(self, *args, **kwargs):
+            kwargs = _normalize_ui_kwargs(kwargs, aggressive=True)
+            return _menu_add_command(self, *args, **kwargs)
+
+        def wrapped_menu_add_checkbutton(self, *args, **kwargs):
+            kwargs = _normalize_ui_kwargs(kwargs, aggressive=True)
+            return _menu_add_checkbutton(self, *args, **kwargs)
+
+        def wrapped_menu_add_radiobutton(self, *args, **kwargs):
+            kwargs = _normalize_ui_kwargs(kwargs, aggressive=True)
+            return _menu_add_radiobutton(self, *args, **kwargs)
+
+        def wrapped_menu_add_cascade(self, *args, **kwargs):
+            kwargs = _normalize_ui_kwargs(kwargs, aggressive=True)
+            return _menu_add_cascade(self, *args, **kwargs)
+
+        def wrapped_menu_entryconfigure(self, index, cnf=None, **kwargs):
+            if isinstance(cnf, dict):
+                cnf = _normalize_ui_kwargs(dict(cnf), aggressive=True)
+            kwargs = _normalize_ui_kwargs(kwargs, aggressive=True)
+            return _menu_entryconfigure(self, index, cnf, **kwargs)
+
+        tk.Menu.add_command = wrapped_menu_add_command
+        tk.Menu.add_checkbutton = wrapped_menu_add_checkbutton
+        tk.Menu.add_radiobutton = wrapped_menu_add_radiobutton
+        tk.Menu.add_cascade = wrapped_menu_add_cascade
+        tk.Menu.entryconfigure = wrapped_menu_entryconfigure
+    except Exception:
+        logging.debug("Falha ao instalar hook de Menu")
 
     # messagebox
     def _wrap_messagebox(func):
         def wrapped(title=None, message=None, *args, **kwargs):
             if title is not None:
-                title = fix_mojibake_text(str(title))
+                title = normalize_ui_text(str(title), aggressive=True)
             if message is not None:
-                message = fix_mojibake_text(str(message))
+                message = normalize_ui_text(str(message), aggressive=True)
+            kwargs = _normalize_ui_kwargs(kwargs, aggressive=True)
             return func(title, message, *args, **kwargs)
 
         return wrapped
@@ -613,6 +691,71 @@ def _install_text_repair_hooks():
                 setattr(messagebox, fn_name, _wrap_messagebox(fn))
             except Exception:
                 logging.debug("Falha ao instalar hook em messagebox")
+
+    # simpledialog
+    try:
+        for fn_name in ("askstring", "askinteger", "askfloat"):
+            fn = getattr(simpledialog, fn_name, None)
+            if not callable(fn):
+                continue
+
+            def _wrap_simpledialog(func):
+                def wrapped(title, prompt, *args, **kwargs):
+                    title_n = normalize_ui_text(str(title), aggressive=True) if title is not None else title
+                    prompt_n = normalize_ui_text(str(prompt), aggressive=True) if prompt is not None else prompt
+                    kwargs_n = _normalize_ui_kwargs(dict(kwargs), aggressive=True)
+                    return func(title_n, prompt_n, *args, **kwargs_n)
+
+                return wrapped
+
+            setattr(simpledialog, fn_name, _wrap_simpledialog(fn))
+    except Exception:
+        logging.debug("Falha ao instalar hook em simpledialog")
+
+    # filedialog
+    try:
+        for fn_name in (
+            "askopenfilename",
+            "askopenfilenames",
+            "asksaveasfilename",
+            "askdirectory",
+        ):
+            fn = getattr(filedialog, fn_name, None)
+            if not callable(fn):
+                continue
+
+            def _wrap_filedialog(func):
+                def wrapped(*args, **kwargs):
+                    kwargs_n = _normalize_ui_kwargs(dict(kwargs), aggressive=True)
+                    return func(*args, **kwargs_n)
+
+                return wrapped
+
+            setattr(filedialog, fn_name, _wrap_filedialog(fn))
+    except Exception:
+        logging.debug("Falha ao instalar hook em filedialog")
+
+    # ReportLab (PDFs)
+    if canvas is not None and hasattr(canvas, "Canvas"):
+        try:
+            _pdf_draw_string = canvas.Canvas.drawString
+            _pdf_draw_right = canvas.Canvas.drawRightString
+            _pdf_draw_centred = canvas.Canvas.drawCentredString
+
+            def wrapped_pdf_draw_string(self, x, y, text, *args, **kwargs):
+                return _pdf_draw_string(self, x, y, normalize_ui_text(text, aggressive=False), *args, **kwargs)
+
+            def wrapped_pdf_draw_right(self, x, y, text, *args, **kwargs):
+                return _pdf_draw_right(self, x, y, normalize_ui_text(text, aggressive=False), *args, **kwargs)
+
+            def wrapped_pdf_draw_centred(self, x, y, text, *args, **kwargs):
+                return _pdf_draw_centred(self, x, y, normalize_ui_text(text, aggressive=False), *args, **kwargs)
+
+            canvas.Canvas.drawString = wrapped_pdf_draw_string
+            canvas.Canvas.drawRightString = wrapped_pdf_draw_right
+            canvas.Canvas.drawCentredString = wrapped_pdf_draw_centred
+        except Exception:
+            logging.debug("Falha ao instalar hook de texto em ReportLab")
 
 
 _install_text_repair_hooks()
@@ -1320,6 +1463,10 @@ def db_init():
         safe_add_column(cur, "programacao_itens", "preco_atual", "REAL")
         safe_add_column(cur, "programacao_itens", "alterado_em", "TEXT")
         safe_add_column(cur, "programacao_itens", "alterado_por", "TEXT")
+        safe_add_column(cur, "programacao_itens", "ordem_sugerida", "INTEGER")
+        safe_add_column(cur, "programacao_itens", "eta", "TEXT")
+        safe_add_column(cur, "programacao_itens", "distancia", "REAL")
+        safe_add_column(cur, "programacao_itens", "confianca_localizacao", "REAL")
 
         # CONTROLE/LOG (sincronização app)
         cur.execute("""
@@ -1327,6 +1474,7 @@ def db_init():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 codigo_programacao TEXT,
                 cod_cliente TEXT,
+                pedido TEXT,
                 status_pedido TEXT,
                 caixas_atual INTEGER,
                 preco_atual REAL,
@@ -1341,15 +1489,24 @@ def db_init():
                 lon_evento REAL,
                 endereco_evento TEXT,
                 cidade_evento TEXT,
-                bairro_evento TEXT
+                bairro_evento TEXT,
+                ordem_sugerida INTEGER,
+                eta TEXT,
+                distancia REAL,
+                confianca_localizacao REAL
             )
         """)
+        safe_add_column(cur, "programacao_itens_controle", "pedido", "TEXT")
         safe_add_column(cur, "programacao_itens_controle", "peso_previsto", "REAL DEFAULT 0")
         safe_add_column(cur, "programacao_itens_controle", "lat_evento", "REAL")
         safe_add_column(cur, "programacao_itens_controle", "lon_evento", "REAL")
         safe_add_column(cur, "programacao_itens_controle", "endereco_evento", "TEXT")
         safe_add_column(cur, "programacao_itens_controle", "cidade_evento", "TEXT")
         safe_add_column(cur, "programacao_itens_controle", "bairro_evento", "TEXT")
+        safe_add_column(cur, "programacao_itens_controle", "ordem_sugerida", "INTEGER")
+        safe_add_column(cur, "programacao_itens_controle", "eta", "TEXT")
+        safe_add_column(cur, "programacao_itens_controle", "distancia", "REAL")
+        safe_add_column(cur, "programacao_itens_controle", "confianca_localizacao", "REAL")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS programacao_itens_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3677,6 +3834,11 @@ class ImportarVendasPage(PageBase):
             cur = conn.cursor()
             existentes = set()
             try:
+                cur.execute("PRAGMA table_info(programacao_itens)")
+                cols_itens = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+            except Exception:
+                cols_itens = set()
+            try:
                 cur.execute(
                     """
                     SELECT UPPER(COALESCE(cod_cliente,'')), UPPER(COALESCE(pedido,'')), UPPER(COALESCE(produto,''))
@@ -3700,25 +3862,32 @@ class ImportarVendasPage(PageBase):
                 )
                 if key in existentes:
                     continue
+                item_data = {
+                    "codigo_programacao": codigo,
+                    "cod_cliente": key[0],
+                    "nome_cliente": upper(str(item.get("nome_cliente") or "").strip()),
+                    "qnt_caixas": safe_int(item.get("qnt_caixas"), 0),
+                    "kg": safe_float(item.get("kg"), 0.0),
+                    "preco": safe_float(item.get("preco"), 0.0),
+                    "endereco": upper(str(item.get("endereco") or "").strip()),
+                    "vendedor": upper(str(item.get("vendedor") or "").strip()),
+                    "pedido": key[1],
+                    "produto": key[2],
+                    "observacao": upper(str(item.get("obs") or item.get("observacao") or "").strip()),
+                }
+                if "ordem_sugerida" in cols_itens and item.get("ordem_sugerida") not in (None, ""):
+                    item_data["ordem_sugerida"] = safe_int(item.get("ordem_sugerida"), 0)
+                if "eta" in cols_itens and item.get("eta") not in (None, ""):
+                    item_data["eta"] = str(item.get("eta") or "").strip()
+                if "distancia" in cols_itens and item.get("distancia") not in (None, ""):
+                    item_data["distancia"] = safe_float(item.get("distancia"), 0.0)
+                if "confianca_localizacao" in cols_itens and item.get("confianca_localizacao") not in (None, ""):
+                    item_data["confianca_localizacao"] = safe_float(item.get("confianca_localizacao"), 0.0)
+                keys = list(item_data.keys())
+                vals = [item_data[k] for k in keys]
                 cur.execute(
-                    """
-                    INSERT INTO programacao_itens
-                        (codigo_programacao, cod_cliente, nome_cliente, qnt_caixas, kg, preco, endereco, vendedor, pedido, produto, observacao)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        codigo,
-                        key[0],
-                        upper(str(item.get("nome_cliente") or "").strip()),
-                        safe_int(item.get("qnt_caixas"), 0),
-                        safe_float(item.get("kg"), 0.0),
-                        safe_float(item.get("preco"), 0.0),
-                        upper(str(item.get("endereco") or "").strip()),
-                        upper(str(item.get("vendedor") or "").strip()),
-                        key[1],
-                        key[2],
-                        upper(str(item.get("obs") or item.get("observacao") or "").strip()),
-                    ),
+                    f"INSERT INTO programacao_itens ({', '.join(keys)}) VALUES ({', '.join(['?'] * len(keys))})",
+                    tuple(vals),
                 )
                 existentes.add(key)
 
@@ -4714,22 +4883,25 @@ class ProgramacaoPage(PageBase):
         ttk.Label(rank_wrap, text="Recomendacoes da equipe", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w")
         self.btn_toggle_rankings = ttk.Button(
             rank_wrap,
-            text="Ocultar",
+            text="Mostrar",
             style="Toggle.TButton",
             command=self._toggle_programacao_rankings,
         )
         self.btn_toggle_rankings.grid(row=0, column=1, sticky="e")
+        ttk.Label(
+            rank_wrap,
+            text="Apoio visual para montar a equipe, sem tirar o foco da carga.",
+            style="CardLabel.TLabel",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         self.rankings_content = ttk.Frame(rank_wrap, style="CardInset.TFrame", padding=(12, 8))
-        self.rankings_content.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        self.rankings_content.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         self.rankings_content.grid_columnconfigure(0, weight=1)
 
         self.lbl_motorista_rank = ttk.Label(
             self.rankings_content,
             text="Ranking de motoristas: carregando...",
-            background="#F5F8FE",
-            foreground="#6B7280",
-            font=("Segoe UI", 8, "bold"),
+            style="InsetBody.TLabel",
             justify="left",
             anchor="w",
         )
@@ -4738,14 +4910,13 @@ class ProgramacaoPage(PageBase):
         self.lbl_ajudantes_rank = ttk.Label(
             self.rankings_content,
             text="Ranking de ajudantes: carregando...",
-            background="#F5F8FE",
-            foreground="#6B7280",
-            font=("Segoe UI", 8, "bold"),
+            style="InsetBody.TLabel",
             justify="left",
             anchor="w",
         )
         self.lbl_ajudantes_rank.grid(row=1, column=0, sticky="ew", pady=(6, 0))
-        self._rankings_collapsed = False
+        self._rankings_collapsed = True
+        self.rankings_content.grid_remove()
         self._ajudantes_rows = []
         self._ajudantes_selected_keys = []
         self._ajudantes_mode = "ajudantes"
@@ -9793,7 +9964,6 @@ class RecebimentosPage(PageBase):
         frm = ttk.Frame(self.card2, style="Card.TFrame")
         frm.grid(row=3, column=0, sticky="ew", pady=(12, 0))
         frm.grid_columnconfigure(4, weight=1)
-
         ttk.Label(frm, text="Cód Cliente", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w")
         self.ent_cod = ttk.Entry(frm, style="Field.TEntry", width=12)
         self.ent_cod.grid(row=1, column=0, sticky="w", padx=6)
@@ -9845,26 +10015,31 @@ class RecebimentosPage(PageBase):
 
         self._lbl_collapsed = ttk.Label(
             self._wrap_collapsed,
-            text="PRESTAÇÃO FECHADA / SALVA.\nCabeçalhos e tabela foram ocultados.",
-            background="white",
-            foreground="#111827",
-            font=("Segoe UI", 10, "bold"),
+            text="Prestacao fechada ou salva.",
+            style="CardTitle.TLabel",
             justify="left"
         )
         self._lbl_collapsed.grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            self._wrap_collapsed,
+            text="Os detalhes foram recolhidos para evitar edicoes acidentais. Use os atalhos abaixo para consultar, imprimir ou iniciar outra programacao.",
+            style="CardLabel.TLabel",
+            justify="left",
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
 
-        btns = ttk.Frame(self._wrap_collapsed, style="Card.TFrame")
-        btns.grid(row=1, column=0, sticky="ew", pady=(6, 0))
-        btns.grid_columnconfigure(10, weight=1)
+        btns = ttk.Frame(self._wrap_collapsed, style="CardInset.TFrame", padding=(12, 10))
+        btns.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        for idx in range(3):
+            btns.grid_columnconfigure(idx, weight=1, uniform="receb_collapsed")
 
         ttk.Button(btns, text="\U0001F5A8 IMPRIMIR PDF", style="Warn.TButton", command=self.imprimir_pdf)\
-            .grid(row=0, column=0, padx=6, sticky="w")
+            .grid(row=0, column=0, padx=(0, 4), sticky="ew")
 
         ttk.Button(btns, text="\U0001F441 MOSTRAR DADOS (CONSULTA)", style="Ghost.TButton", command=self._expand_view)\
-            .grid(row=0, column=1, padx=6, sticky="w")
+            .grid(row=0, column=1, padx=4, sticky="ew")
 
         ttk.Button(btns, text="LIMPAR / NOVA PROGRAMAÇÃO", style="Primary.TButton", command=self._reset_view)\
-            .grid(row=0, column=2, padx=6, sticky="w")
+            .grid(row=0, column=2, padx=(4, 0), sticky="ew")
 
         self.refresh_comboboxes()
         self.carregar_tabela_vazia()
@@ -9990,8 +10165,42 @@ class RecebimentosPage(PageBase):
         if key.startswith("SERRA"):
             return "SERRA"
         if key.startswith("SERT"):
-            return "SERTÃO"
+            return "SERTAO"
         return upper(txt)
+
+    def _load_programacao_local_rota(self, prog: str) -> str:
+        prog = upper(str(prog or "").strip())
+        if not prog:
+            return ""
+        try:
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute("PRAGMA table_info(programacoes)")
+                cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+                rota_exprs = []
+                if "local_rota" in cols_prog:
+                    rota_exprs.append("NULLIF(TRIM(COALESCE(local_rota,'')), '')")
+                if "tipo_rota" in cols_prog:
+                    rota_exprs.append("NULLIF(TRIM(COALESCE(tipo_rota,'')), '')")
+                if "local" in cols_prog:
+                    rota_exprs.append("NULLIF(TRIM(COALESCE(local,'')), '')")
+                if not rota_exprs:
+                    return ""
+                cur.execute(
+                    f"""
+                    SELECT COALESCE({', '.join(rota_exprs)}, '')
+                    FROM programacoes
+                    WHERE codigo_programacao=?
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (prog,),
+                )
+                row = cur.fetchone()
+                return str((row[0] if row else "") or "").strip()
+        except Exception:
+            logging.debug("Falha ao consultar local_rota local da programacao.", exc_info=True)
+            return ""
 
     def _set_despesas_loading(self, visible: bool, text: str = "", value: float = 0.0):
         wrap = getattr(self, "despesas_loading_wrap", None)
@@ -10895,11 +11104,11 @@ class RecebimentosPage(PageBase):
             return False
         prog = self._current_prog
         try:
-            self._set_despesas_loading(True, "Preparando dados da rota...", 12)
+            self._set_despesas_loading(True, "Preparando rota...", 12)
 
             # Tenta persistir o cabeçalho sem bloquear a navegação.
             try:
-                self._set_despesas_loading(True, "Salvando cabeçalho da rota...", 34)
+                self._set_despesas_loading(True, "Salvando cabeçalho...", 34)
                 self.salvar_dados_rota(silent=True)
             except Exception:
                 logging.debug("Falha ignorada")
@@ -10913,10 +11122,10 @@ class RecebimentosPage(PageBase):
 
             page = self.app.pages.get("Despesas") if hasattr(self.app, "pages") else None
             if page and hasattr(page, "set_programacao"):
-                self._set_despesas_loading(True, f"Preparando tela de despesas...", 78)
-                self._set_despesas_loading(True, f"Carregando despesas da rota {prog}...", 94)
+                self._set_despesas_loading(True, "Preparando despesas...", 78)
+                self._set_despesas_loading(True, f"Carregando rota {prog}...", 94)
                 page.set_programacao(prog)
-            self._set_despesas_loading(True, "Abrindo tela de despesas...", 100)
+            self._set_despesas_loading(True, "Abrindo despesas...", 100)
             self.app.show_page("Despesas")
             if synced:
                 self.set_status(f"STATUS: Indo para DESPESAS - programação {prog} (dados sincronizados da API).")
@@ -11052,13 +11261,18 @@ class RecebimentosPage(PageBase):
                 return
             motorista, veiculo, equipe, nf, data_saida, hora_saida, data_chegada, hora_chegada, rota, diaria_motorista = row
 
+        rota_exibicao = self._format_rota_exibicao(rota)
+        if not rota_exibicao:
+            rota = self._load_programacao_local_rota(prog)
+            rota_exibicao = self._format_rota_exibicao(rota)
+
         motorista_nome = self._resolve_motorista_nome(motorista)
         equipe_nomes = self._resolve_equipe_integrantes(equipe)
         self._equipe_raw = upper(equipe or "")
         self.lbl_motorista_info.config(text=f"Motorista: {motorista_nome}")
         self.lbl_veiculo_info.config(text=f"Veiculo: {upper(veiculo)}")
         self.lbl_equipe_info.config(text=f"Equipe: {equipe_nomes}")
-        self._rota_atual = self._format_rota_exibicao(rota)
+        self._rota_atual = rota_exibicao
         self.lbl_rota_info.config(text=f"Rota: {self._rota_atual or '-'}")
         self._safe_set_entry(self.ent_diaria_motorista, f"{safe_float(diaria_motorista, 0.0):.2f}".replace(".", ","), readonly_back=False)
 
@@ -12787,7 +13001,6 @@ class DespesasPage(PageBase):
         entrada_frame = ttk.LabelFrame(details_wrap, text=" ENTRADAS ", padding=5)
         entrada_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 4), pady=(0, 3))
         entrada_frame.grid_columnconfigure(1, weight=1)
-
         ttk.Label(entrada_frame, text="Recebimentos Total:", font=("Segoe UI", 8)).grid(row=0, column=0, sticky="w", pady=1)
         self.lbl_receb_total = ttk.Label(entrada_frame, text="R$ 0,00", font=("Segoe UI", 9, "bold"))
         self.lbl_receb_total.grid(row=0, column=1, sticky="e", pady=1)
@@ -12806,7 +13019,6 @@ class DespesasPage(PageBase):
         saida_frame = ttk.LabelFrame(details_wrap, text=" SAIDAS ", padding=5)
         saida_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 4), pady=(3, 0))
         saida_frame.grid_columnconfigure(1, weight=1)
-
         ttk.Label(saida_frame, text="Despesas Total:", font=("Segoe UI", 8)).grid(row=0, column=0, sticky="w", pady=1)
         self.lbl_desp_total = ttk.Label(saida_frame, text="R$ 0,00", font=("Segoe UI", 9, "bold"))
         self.lbl_desp_total.grid(row=0, column=1, sticky="e", pady=1)
@@ -12822,7 +13034,6 @@ class DespesasPage(PageBase):
         resultado_frame = ttk.LabelFrame(details_wrap, text=" RESULTADOS ", padding=5)
         resultado_frame.grid(row=0, column=1, rowspan=2, sticky="nsew")
         resultado_frame.grid_columnconfigure(1, weight=1)
-
         ttk.Label(resultado_frame, text="Valor p/ Caixa:", font=("Segoe UI", 8)).grid(row=0, column=0, sticky="w", pady=1)
         self.lbl_valor_final_caixa = ttk.Label(resultado_frame, text="R$ 0,00", font=("Segoe UI", 9, "bold"))
         self.lbl_valor_final_caixa.grid(row=0, column=1, sticky="e", pady=1)
@@ -13018,6 +13229,39 @@ class DespesasPage(PageBase):
             rota = resp.get("rota") if isinstance(resp, dict) else None
             if not isinstance(rota, dict):
                 return None
+            rota_local = str(rota.get("local_rota") or rota.get("tipo_rota") or rota.get("local") or "").strip()
+            if not rota_local:
+                try:
+                    with get_db() as conn:
+                        cur = conn.cursor()
+                        cur.execute("PRAGMA table_info(programacoes)")
+                        cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+                        rota_exprs = []
+                        if "local_rota" in cols_prog:
+                            rota_exprs.append("NULLIF(TRIM(COALESCE(local_rota,'')), '')")
+                        if "tipo_rota" in cols_prog:
+                            rota_exprs.append("NULLIF(TRIM(COALESCE(tipo_rota,'')), '')")
+                        if "local" in cols_prog:
+                            rota_exprs.append("NULLIF(TRIM(COALESCE(local,'')), '')")
+                        if rota_exprs:
+                            cur.execute(
+                                f"""
+                                SELECT COALESCE({', '.join(rota_exprs)}, '')
+                                FROM programacoes
+                                WHERE codigo_programacao=?
+                                ORDER BY id DESC
+                                LIMIT 1
+                                """,
+                                (prog,),
+                            )
+                            row = cur.fetchone()
+                            rota_local = str((row[0] if row else "") or "").strip()
+                except Exception:
+                    logging.debug("Falha ao consultar local_rota local para o bundle de prestacao.", exc_info=True)
+            if rota_local:
+                rota["local_rota"] = rota_local
+                rota["tipo_rota"] = rota_local
+                rota["local"] = rota_local
             return resp
         except Exception:
             logging.debug("Falha ao montar bundle de prestacao via API.", exc_info=True)
@@ -13470,6 +13714,20 @@ class DespesasPage(PageBase):
         prog = upper(str(prog or "").strip())
         if not prog:
             return
+        if self._get_prestacao_status(prog) == "FECHADA":
+            self._current_programacao = None
+            try:
+                self.cb_prog.set("")
+            except Exception:
+                logging.debug("Falha ignorada")
+            self._load_by_programacao()
+            messagebox.showwarning(
+                "BLOQUEADO",
+                f"Esta programação ({prog}) já está com a prestação FECHADA.\n\n"
+                "Ela não pode mais ser carregada na rotina de despesas."
+            )
+            self.set_status("STATUS: Programação finalizada removida da rotina de despesas.")
+            return
         try:
             if hasattr(self, "refresh_comboboxes"):
                 self.refresh_comboboxes()
@@ -13513,6 +13771,20 @@ class DespesasPage(PageBase):
             return
 
         prog = selecionado.split(" ")[0]
+        status = self._get_prestacao_status(prog)
+        if status == "FECHADA":
+            messagebox.showwarning(
+                "BLOQUEADO",
+                f"Esta programação ({prog}) já está com a prestação FECHADA.\n\n"
+                "Ela não pode mais ser carregada na rotina de despesas."
+            )
+            self._current_programacao = None
+            try:
+                self.cb_prog.set("")
+            except Exception:
+                logging.debug("Falha ignorada")
+            self.set_status("STATUS: Programação finalizada removida da rotina de despesas.")
+            return self._load_by_programacao()
         self._current_programacao = prog
         if hasattr(self, "lbl_rota_chip"):
             self.lbl_rota_chip.config(text=prog)
@@ -15009,6 +15281,10 @@ class DespesasPage(PageBase):
                 "endereco_evento": cliente.get("endereco_evento"),
                 "cidade_evento": cliente.get("cidade_evento"),
                 "bairro_evento": cliente.get("bairro_evento"),
+                "ordem_sugerida": cliente.get("ordem_sugerida"),
+                "eta": cliente.get("eta"),
+                "distancia": cliente.get("distancia"),
+                "confianca_localizacao": cliente.get("confianca_localizacao"),
             }
 
             # UPSERT robusto no controle (compatÃÂvel com bancos antigos e novos)
@@ -15060,6 +15336,18 @@ class DespesasPage(PageBase):
                 if "kg" in cols_itens and ctrl_map.get("peso_previsto") not in (None, ""):
                     sets.append("kg=?")
                     vals.append(ctrl_map.get("peso_previsto"))
+                if "ordem_sugerida" in cols_itens and ctrl_map.get("ordem_sugerida") not in (None, ""):
+                    sets.append("ordem_sugerida=?")
+                    vals.append(ctrl_map.get("ordem_sugerida"))
+                if "eta" in cols_itens and ctrl_map.get("eta") not in (None, ""):
+                    sets.append("eta=?")
+                    vals.append(ctrl_map.get("eta"))
+                if "distancia" in cols_itens and ctrl_map.get("distancia") not in (None, ""):
+                    sets.append("distancia=?")
+                    vals.append(ctrl_map.get("distancia"))
+                if "confianca_localizacao" in cols_itens and ctrl_map.get("confianca_localizacao") not in (None, ""):
+                    sets.append("confianca_localizacao=?")
+                    vals.append(ctrl_map.get("confianca_localizacao"))
                 if sets:
                     where = "codigo_programacao=? AND UPPER(TRIM(cod_cliente))=UPPER(TRIM(?))"
                     wvals = [prog, cod_cliente]
@@ -15159,13 +15447,17 @@ class DespesasPage(PageBase):
                         continue
                     codigo = upper((r or {}).get("codigo_programacao") or "")
                     status_ref = upper((r or {}).get("status_operacional") or (r or {}).get("status") or "")
+                    prest_ref = upper(str((r or {}).get("prestacao_status") or "PENDENTE").strip() or "PENDENTE")
                     data = str((r or {}).get("data_criacao") or "")[:10] or "Sem data"
-                    if codigo and status_ref not in {"CANCELADA", "CANCELADO"}:
+                    if codigo and status_ref not in {"CANCELADA", "CANCELADO"} and prest_ref != "FECHADA":
                         programas.append(f"{codigo} ({data})")
                 self.cb_prog["values"] = programas
                 atual = str(self.cb_prog.get() or "").strip()
                 if atual and atual not in set(programas):
                     self.cb_prog.set("")
+                cods_disponiveis = {upper(str(v or "").split(" ")[0].strip()) for v in programas}
+                if upper(str(getattr(self, "_current_programacao", "") or "").strip()) not in cods_disponiveis:
+                    self._current_programacao = None
                 return
             except Exception:
                 logging.debug("Falha ao carregar combobox Despesas via API", exc_info=True)
@@ -15194,7 +15486,7 @@ class DespesasPage(PageBase):
 
                 prest_where = ""
                 if has_prest:
-                    prest_where = f" AND {prest_expr} IN ('PENDENTE','FECHADA')"
+                    prest_where = f" AND {prest_expr}='PENDENTE'"
                 data_expr = "COALESCE(data_criacao,'')" if "data_criacao" in cols else ("COALESCE(data,'')" if "data" in cols else ("COALESCE(data_saida,'')" if "data_saida" in cols else "''"))
 
                 cur.execute(
@@ -15216,6 +15508,12 @@ class DespesasPage(PageBase):
                 programas.append(f"{codigo} ({data})")
 
             self.cb_prog["values"] = programas
+            atual = str(self.cb_prog.get() or "").strip()
+            if atual and atual not in set(programas):
+                self.cb_prog.set("")
+            cods_disponiveis = {upper(str(v or "").split(" ")[0].strip()) for v in programas}
+            if upper(str(getattr(self, "_current_programacao", "") or "").strip()) not in cods_disponiveis:
+                self._current_programacao = None
 
     def on_show(self):
         self.refresh_comboboxes()
