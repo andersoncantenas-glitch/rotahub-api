@@ -617,13 +617,26 @@ def _caixas_saldo_subquery(conn: sqlite3.Connection, prog_alias: str = "p") -> s
     base_expr = "COALESCE(pi.qnt_caixas, 0)" if has_pi_qnt_caixas else "0"
 
     if has_pc_caixas_atual and has_pi_caixas_atual and has_pi_qnt_caixas:
-        caixas_raw = "COALESCE(pc.caixas_atual, pi.caixas_atual, pi.qnt_caixas, 0)"
+        caixas_raw = (
+            "CASE "
+            "WHEN pc.caixas_atual IS NOT NULL AND pc.caixas_atual > 0 THEN pc.caixas_atual "
+            "WHEN pi.caixas_atual IS NOT NULL AND pi.caixas_atual > 0 THEN pi.caixas_atual "
+            "ELSE COALESCE(pi.qnt_caixas, 0) END"
+        )
     elif has_pc_caixas_atual and has_pi_qnt_caixas:
-        caixas_raw = "COALESCE(pc.caixas_atual, pi.qnt_caixas, 0)"
+        caixas_raw = (
+            "CASE "
+            "WHEN pc.caixas_atual IS NOT NULL AND pc.caixas_atual > 0 THEN pc.caixas_atual "
+            "ELSE COALESCE(pi.qnt_caixas, 0) END"
+        )
     elif has_pi_caixas_atual and has_pi_qnt_caixas:
-        caixas_raw = "COALESCE(pi.caixas_atual, pi.qnt_caixas, 0)"
+        caixas_raw = (
+            "CASE "
+            "WHEN pi.caixas_atual IS NOT NULL AND pi.caixas_atual > 0 THEN pi.caixas_atual "
+            "ELSE COALESCE(pi.qnt_caixas, 0) END"
+        )
     elif has_pc_caixas_atual:
-        caixas_raw = "COALESCE(pc.caixas_atual, 0)"
+        caixas_raw = "CASE WHEN pc.caixas_atual IS NOT NULL AND pc.caixas_atual > 0 THEN pc.caixas_atual ELSE 0 END"
     else:
         caixas_raw = base_expr
 
@@ -656,6 +669,99 @@ def _rotas_not_finalizadas_clause(conn: sqlite3.Connection, alias: str = "p") ->
     if col_exists(conn, "programacoes", "km_final"):
         parts.append(f"COALESCE({alias}.km_final,0)=0")
     return " AND ".join(parts)
+
+
+def _total_caixas_ativas_programacao(cur: sqlite3.Cursor, codigo_programacao: str) -> int:
+    def _to_int_db(v: Any) -> int:
+        try:
+            if v is None:
+                return 0
+            if isinstance(v, (int, float)):
+                return int(float(v))
+            s = str(v).strip()
+            if not s:
+                return 0
+            s = s.replace(" ", "")
+            if "," in s:
+                s = s.replace(".", "").replace(",", ".")
+            return int(float(s))
+        except Exception:
+            return 0
+
+    cur.execute("PRAGMA table_info(programacao_itens)")
+    cols_pi = {row[1] for row in cur.fetchall() or []}
+    cur.execute("PRAGMA table_info(programacao_itens_controle)")
+    cols_pc = {row[1] for row in cur.fetchall() or []}
+
+    has_pi_pedido = "pedido" in cols_pi
+    has_pc_pedido = "pedido" in cols_pc
+    has_pi_status = "status_pedido" in cols_pi
+    has_pc_status = "status_pedido" in cols_pc
+    has_pi_caixas_atual = "caixas_atual" in cols_pi
+    has_pc_caixas_atual = "caixas_atual" in cols_pc
+    has_pi_qnt_caixas = "qnt_caixas" in cols_pi
+
+    join_on = "pc.codigo_programacao = pi.codigo_programacao AND UPPER(TRIM(pc.cod_cliente)) = UPPER(TRIM(pi.cod_cliente))"
+    if has_pi_pedido and has_pc_pedido:
+        join_on += " AND COALESCE(TRIM(pc.pedido),'') = COALESCE(TRIM(pi.pedido),'')"
+
+    st_pi_expr = "COALESCE(NULLIF(TRIM(pi.status_pedido),''), 'PENDENTE')" if has_pi_status else "'PENDENTE'"
+    st_pc_expr = "NULLIF(TRIM(pc.status_pedido),'')" if has_pc_status else "NULL"
+    pedido_expr = "COALESCE(pi.pedido, '')" if has_pi_pedido else "''"
+    nome_expr = "COALESCE(pi.nome_cliente, '')" if "nome_cliente" in cols_pi else "''"
+    base_expr = "COALESCE(pi.qnt_caixas, 0)" if has_pi_qnt_caixas else "0"
+
+    if has_pc_caixas_atual and has_pi_caixas_atual and has_pi_qnt_caixas:
+        caixas_expr = (
+            "CASE "
+            "WHEN pc.caixas_atual IS NOT NULL AND pc.caixas_atual > 0 THEN pc.caixas_atual "
+            "WHEN pi.caixas_atual IS NOT NULL AND pi.caixas_atual > 0 THEN pi.caixas_atual "
+            "ELSE COALESCE(pi.qnt_caixas, 0) END"
+        )
+    elif has_pc_caixas_atual and has_pi_qnt_caixas:
+        caixas_expr = (
+            "CASE "
+            "WHEN pc.caixas_atual IS NOT NULL AND pc.caixas_atual > 0 THEN pc.caixas_atual "
+            "ELSE COALESCE(pi.qnt_caixas, 0) END"
+        )
+    elif has_pi_caixas_atual and has_pi_qnt_caixas:
+        caixas_expr = (
+            "CASE "
+            "WHEN pi.caixas_atual IS NOT NULL AND pi.caixas_atual > 0 THEN pi.caixas_atual "
+            "ELSE COALESCE(pi.qnt_caixas, 0) END"
+        )
+    elif has_pc_caixas_atual:
+        caixas_expr = "CASE WHEN pc.caixas_atual IS NOT NULL AND pc.caixas_atual > 0 THEN pc.caixas_atual ELSE 0 END"
+    else:
+        caixas_expr = base_expr
+
+    cur.execute(
+        f"""
+        SELECT
+            COALESCE(pi.cod_cliente, '') AS cod_cliente,
+            {nome_expr} AS nome_cliente,
+            {pedido_expr} AS pedido,
+            {base_expr} AS base_cx,
+            {caixas_expr} AS atual_cx,
+            COALESCE({st_pc_expr}, {st_pi_expr}, 'PENDENTE') AS status_eff
+        FROM programacao_itens pi
+        LEFT JOIN programacao_itens_controle pc
+          ON {join_on}
+        WHERE pi.codigo_programacao=?
+        """,
+        (codigo_programacao,),
+    )
+
+    total_em_aberto = 0
+    for it in (cur.fetchall() or []):
+        status_eff = str(it["status_eff"] or "PENDENTE").strip().upper()
+        atual = _to_int_db(it["atual_cx"])
+        if atual < 0:
+            atual = 0
+        if status_eff in ("ENTREGUE", "CANCELADO"):
+            continue
+        total_em_aberto += atual
+    return total_em_aberto
 
 
 def _equipe_cols_expr(conn: sqlite3.Connection, alias: str = "e") -> str:
@@ -7893,9 +7999,6 @@ def finalizar_rota(codigo_programacao: str, payload: FinalizarRotaIn, m=Depends(
         has_pc_pedido = "pedido" in cols_pc
         has_pi_status = "status_pedido" in cols_pi
         has_pc_status = "status_pedido" in cols_pc
-        has_pi_caixas_atual = "caixas_atual" in cols_pi
-        has_pc_caixas_atual = "caixas_atual" in cols_pc
-        has_pi_qnt_caixas = "qnt_caixas" in cols_pi
 
         join_on = "pc.codigo_programacao = pi.codigo_programacao AND UPPER(TRIM(pc.cod_cliente)) = UPPER(TRIM(pi.cod_cliente))"
         if has_pi_pedido and has_pc_pedido:
@@ -7904,28 +8007,12 @@ def finalizar_rota(codigo_programacao: str, payload: FinalizarRotaIn, m=Depends(
         st_pi_expr = "COALESCE(NULLIF(TRIM(pi.status_pedido),''), 'PENDENTE')" if has_pi_status else "'PENDENTE'"
         st_pc_expr = "NULLIF(TRIM(pc.status_pedido),'')" if has_pc_status else "NULL"
         pedido_expr = "COALESCE(pi.pedido, '')" if has_pi_pedido else "''"
-        nome_expr = "COALESCE(pi.nome_cliente, '')" if "nome_cliente" in cols_pi else "''"
-        base_expr = "COALESCE(pi.qnt_caixas, 0)" if has_pi_qnt_caixas else "0"
-
-        if has_pc_caixas_atual and has_pi_caixas_atual and has_pi_qnt_caixas:
-            caixas_expr = "COALESCE(pc.caixas_atual, pi.caixas_atual, pi.qnt_caixas, 0)"
-        elif has_pc_caixas_atual and has_pi_qnt_caixas:
-            caixas_expr = "COALESCE(pc.caixas_atual, pi.qnt_caixas, 0)"
-        elif has_pi_caixas_atual and has_pi_qnt_caixas:
-            caixas_expr = "COALESCE(pi.caixas_atual, pi.qnt_caixas, 0)"
-        elif has_pc_caixas_atual:
-            caixas_expr = "COALESCE(pc.caixas_atual, 0)"
-        else:
-            caixas_expr = base_expr
 
         cur.execute(
             f"""
             SELECT
                 COALESCE(pi.cod_cliente, '') AS cod_cliente,
-                {nome_expr} AS nome_cliente,
                 {pedido_expr} AS pedido,
-                {base_expr} AS base_cx,
-                {caixas_expr} AS atual_cx,
                 COALESCE({st_pc_expr}, {st_pi_expr}, 'PENDENTE') AS status_eff
             FROM programacao_itens pi
             LEFT JOIN programacao_itens_controle pc
@@ -7934,29 +8021,9 @@ def finalizar_rota(codigo_programacao: str, payload: FinalizarRotaIn, m=Depends(
             """,
             (codigo_programacao,),
         )
-        itens = cur.fetchall() or []
-        if not itens:
-            raise HTTPException(status_code=409, detail="Nao e possivel finalizar: rota sem itens para reconciliacao.")
-
-        total_em_aberto = 0
-        itens_em_aberto = []
         pendentes = []
-        for it in itens:
-            base = _to_int_db(it["base_cx"])
-            atual = _to_int_db(it["atual_cx"])
-            if base < 0:
-                base = 0
-            if atual < 0:
-                atual = 0
-
+        for it in (cur.fetchall() or []):
             status_eff = str(it["status_eff"] or "PENDENTE").strip().upper()
-            atual_considerado = 0 if status_eff in ("ENTREGUE", "CANCELADO") else atual
-            total_em_aberto += atual_considerado
-            if atual_considerado > 0:
-                itens_em_aberto.append(
-                    f"{it['cod_cliente']} / {it['pedido'] or '-'} -> {atual_considerado} cx [{status_eff}]"
-                )
-
             if status_eff == "" or status_eff == "PENDENTE":
                 pendentes.append(f"{it['cod_cliente']} / {it['pedido'] or '-'} [{status_eff}]")
 
@@ -7966,16 +8033,14 @@ def finalizar_rota(codigo_programacao: str, payload: FinalizarRotaIn, m=Depends(
                 detail=f"Nao e possivel finalizar: {len(pendentes)} pedido(s) pendente(s).",
             )
 
+        total_em_aberto = _total_caixas_ativas_programacao(cur, codigo_programacao)
         if total_em_aberto != 0:
-            saldo = total_em_aberto
-            amostra = "; ".join(itens_em_aberto[:8])
             raise HTTPException(
                 status_code=409,
                 detail=(
                     "Reconciliacao nao fechou. "
-                    f"Carregadas={caixas_carregadas}, saldo em aberto={saldo}. "
-                    "Revise cancelamentos/redirecionamentos/entregas. "
-                    f"Pedidos com saldo: {amostra}"
+                    f"Carregadas={caixas_carregadas}, saldo em aberto={total_em_aberto}. "
+                    "Revise cancelamentos/redirecionamentos/entregas."
                 ),
             )
         cur.execute(
@@ -8178,10 +8243,19 @@ def salvar_carregamento(
         sql = f"UPDATE programacoes SET {', '.join(sets)} WHERE id=?"
         params.append(pr["id"])
         cur.execute(sql, tuple(params))
+        caixas_ativas = _total_caixas_ativas_programacao(cur, codigo_programacao)
+        deficit_caixas = max(0, int(caixas_ativas) - int(caixas))
         _idempotency_mark(cur, codigo_motorista, codigo_programacao, "carregamento", payload.idempotency_key)
         conn.commit()
 
-    return {"ok": True, "status": status_result}
+    return {
+        "ok": True,
+        "status": status_result,
+        "reconciliar": deficit_caixas > 0,
+        "caixas_carregadas": int(caixas),
+        "caixas_ativas": int(caixas_ativas),
+        "deficit_caixas": int(deficit_caixas),
+    }
 
 
 def _now_iso() -> str:
