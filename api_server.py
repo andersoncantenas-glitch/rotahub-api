@@ -146,14 +146,14 @@ def verify_password_pbkdf2(password: str, stored: str) -> bool:
 
 
 def _motorista_login_candidates(codigo: str) -> List[str]:
-    raw = upper(str(codigo or "").strip())
+    raw = str(codigo or "").strip().upper()
     if not raw:
         return []
 
     out: List[str] = []
 
     def _push(value: str) -> None:
-        v = upper(str(value or "").strip())
+        v = str(value or "").strip().upper()
         if v and v not in out:
             out.append(v)
 
@@ -196,7 +196,7 @@ def authenticate_motorista(cur: sqlite3.Cursor, codigo: str, senha: str) -> tupl
             break
 
     if not row:
-        nome_candidate = upper(str(codigo or "").strip())
+        nome_candidate = str(codigo or "").strip().upper()
         if nome_candidate:
             cur.execute(
                 f"""
