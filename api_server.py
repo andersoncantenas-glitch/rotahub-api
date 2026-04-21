@@ -144,24 +144,70 @@ def verify_password_pbkdf2(password: str, stored: str) -> bool:
     except Exception:
         return False
 
+
+def _motorista_login_candidates(codigo: str) -> List[str]:
+    raw = upper(str(codigo or "").strip())
+    if not raw:
+        return []
+
+    out: List[str] = []
+
+    def _push(value: str) -> None:
+        v = upper(str(value or "").strip())
+        if v and v not in out:
+            out.append(v)
+
+    _push(raw)
+    _push(raw.replace(" ", ""))
+
+    digits = re.sub(r"\D+", "", raw)
+    if digits:
+        try:
+            num = int(digits)
+        except Exception:
+            num = 0
+        if num > 0:
+            _push(f"MT{num:03d}")
+            _push(f"MT{num:02d}")
+            _push(f"MOT-{num:02d}")
+            _push(f"MOT-{num:03d}")
+            _push(f"MOT{num:02d}")
+            _push(f"MOT{num:03d}")
+
+    return out
+
+
 def authenticate_motorista(cur: sqlite3.Cursor, codigo: str, senha: str) -> tuple[Optional[sqlite3.Row], Optional[str]]:
     has_acesso = col_exists(cur.connection, "motoristas", "acesso_liberado")
-    if has_acesso:
+    select_cols = "id, nome, codigo, senha, COALESCE(acesso_liberado, 0) AS acesso_liberado" if has_acesso else "id, nome, codigo, senha"
+    row = None
+    for candidate in _motorista_login_candidates(codigo):
         cur.execute(
-            """
-            SELECT id, nome, codigo, senha, COALESCE(acesso_liberado, 0) AS acesso_liberado
+            f"""
+            SELECT {select_cols}
             FROM motoristas
             WHERE UPPER(TRIM(codigo))=?
             LIMIT 1
             """,
-            (codigo,),
+            (candidate,),
         )
-    else:
-        cur.execute(
-            "SELECT id, nome, codigo, senha FROM motoristas WHERE UPPER(TRIM(codigo))=? LIMIT 1",
-            (codigo,),
-        )
-    row = cur.fetchone()
+        row = cur.fetchone()
+        if row:
+            break
+
+    if not row:
+        nome_candidate = upper(str(codigo or "").strip())
+        if nome_candidate:
+            cur.execute(
+                f"""
+                SELECT {select_cols}
+                FROM motoristas
+                WHERE UPPER(TRIM(nome))=?
+                LIMIT 1
+                """,
+                (nome_candidate,),
+            )
+            row = cur.fetchone()
     if not row:
         return None, "not_found"
 

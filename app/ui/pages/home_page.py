@@ -14,6 +14,7 @@ from tkinter import messagebox, simpledialog, ttk
 
 from app.db.connection import get_db
 from app.services.api_client import _build_api_url, _call_api
+from app.services.motorista_service import bootstrap_sync_motoristas_api
 from app.context import AppContext
 from app.ui.components.tree_helpers import enable_treeview_sorting, tree_insert_aligned
 from app.ui.components.page_base import PageBase
@@ -67,6 +68,8 @@ class HomePage(PageBase):
         self._remote_setup_url = self.SETUP_DOWNLOAD_URL
         self._remote_changelog_url = self.CHANGELOG_URL
         self._alerts_text = ""
+        self._motorista_bootstrap_sync_running = False
+        self._motorista_bootstrap_sync_done = False
         self._runtime_diag_rows = {}
         self.body.grid_rowconfigure(0, weight=1)
 
@@ -951,6 +954,7 @@ class HomePage(PageBase):
             )
         elif online:
             self.lbl_api_status.config(text=f"API: ONLINE ({api_host})", bg="#DCFCE7", fg="#166534")
+            self._maybe_bootstrap_motoristas_sync()
         else:
             self.lbl_api_status.config(text=f"API: OFFLINE ({api_host})", bg="#FEE2E2", fg="#991B1B")
 
@@ -960,6 +964,50 @@ class HomePage(PageBase):
             except Exception:
                 logging.debug("Falha ignorada")
         self._api_job = self.after(15000, self._update_api_status)
+
+    def _maybe_bootstrap_motoristas_sync(self):
+        if self._motorista_bootstrap_sync_done or self._motorista_bootstrap_sync_running:
+            return
+        if not self.can_read_from_api() or not self.is_desktop_api_sync_enabled():
+            return
+        if not str(os.environ.get("ROTA_SECRET", "") or "").strip():
+            return
+
+        self._motorista_bootstrap_sync_running = True
+        run_async_ui(
+            self,
+            lambda: bootstrap_sync_motoristas_api(
+                can_read_from_api=self.can_read_from_api,
+                is_desktop_api_sync_enabled=self.is_desktop_api_sync_enabled,
+            ),
+            self._on_bootstrap_motoristas_sync_success,
+            self._on_bootstrap_motoristas_sync_error,
+        )
+
+    def _on_bootstrap_motoristas_sync_success(self, result):
+        self._motorista_bootstrap_sync_running = False
+        if not isinstance(result, dict):
+            return
+        if not bool(result.get("ok", False)):
+            logging.warning("Bootstrap de motoristas retornou falha: %s", result.get("error"))
+            return
+
+        self._motorista_bootstrap_sync_done = True
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        synced = int(data.get("synced") or 0)
+        failed = int(data.get("failed") or 0)
+        skipped = int(data.get("skipped") or 0)
+        if synced > 0:
+            self.set_status(
+                f"STATUS: {synced} motorista(s) sincronizado(s) com a API. "
+                f"Pulados: {skipped}. Falhas: {failed}."
+            )
+        elif failed == 0:
+            logging.info("Bootstrap de motoristas sem pendencias para sincronizar.")
+
+    def _on_bootstrap_motoristas_sync_error(self, exc):
+        self._motorista_bootstrap_sync_running = False
+        logging.warning("Falha no bootstrap de motoristas da Home", exc_info=(type(exc), exc, exc.__traceback__))
 
     def _build_stat(self, parent, col, title, value):
         c = ttk.Frame(parent, style="Card.TFrame", padding=16)

@@ -3,6 +3,7 @@ import logging
 import os
 import re
 
+from app.db.connection import get_db
 from app.repositories.motorista_repository import (
     fetch_motorista_access_snapshot_by_codigo,
     fetch_motorista_codigos_local,
@@ -187,3 +188,122 @@ def sync_motorista_upsert_api(
             error=_error_message(exc, "Falha ao sincronizar motorista na API."),
             source="api",
         )
+
+
+def bootstrap_sync_motoristas_api(*, can_read_from_api, is_desktop_api_sync_enabled):
+    if not is_desktop_api_sync_enabled():
+        return _service_result(ok=True, data={"synced": 0, "skipped": 0, "failed": 0}, source="local")
+
+    desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+    if not desktop_secret or not can_read_from_api():
+        return _service_result(ok=True, data={"synced": 0, "skipped": 0, "failed": 0}, source="local")
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(motoristas)")
+        cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+        if not cols:
+            return _service_result(ok=True, data={"synced": 0, "skipped": 0, "failed": 0}, source="local")
+
+        acesso_expr = "COALESCE(acesso_liberado,1) AS acesso_liberado" if "acesso_liberado" in cols else "1 AS acesso_liberado"
+        cur.execute(
+            f"""
+            SELECT
+                COALESCE(codigo,'') AS codigo,
+                COALESCE(nome,'') AS nome,
+                COALESCE(telefone,'') AS telefone,
+                COALESCE(cpf,'') AS cpf,
+                COALESCE(status,'ATIVO') AS status,
+                COALESCE(senha,'') AS senha,
+                {acesso_expr}
+            FROM motoristas
+            WHERE TRIM(COALESCE(codigo,'')) <> ''
+            ORDER BY id
+            """
+        )
+        rows = cur.fetchall() or []
+
+    if not rows:
+        return _service_result(ok=True, data={"synced": 0, "skipped": 0, "failed": 0}, source="local")
+
+    try:
+        remote_rows = _call_api(
+            "GET",
+            "desktop/cadastros/motoristas",
+            extra_headers={"X-Desktop-Secret": desktop_secret},
+        )
+    except Exception as exc:
+        return _service_result(
+            ok=False,
+            data=None,
+            error=_error_message(exc, "Falha ao consultar motoristas na API."),
+            source="api",
+        )
+
+    remote_by_code = {}
+    if isinstance(remote_rows, list):
+        for item in remote_rows:
+            if not isinstance(item, dict):
+                continue
+            cod = str(item.get("codigo") or "").strip().upper()
+            if cod:
+                remote_by_code[cod] = item
+
+    synced = 0
+    skipped = 0
+    failed = 0
+
+    for row in rows:
+        codigo = str(row["codigo"] or "").strip().upper()
+        nome = str(row["nome"] or "").strip().upper()
+        if not codigo or not nome:
+            skipped += 1
+            continue
+
+        status = str(row["status"] or "ATIVO").strip().upper() or "ATIVO"
+        telefone = str(row["telefone"] or "").strip()
+        cpf = str(row["cpf"] or "").strip()
+        senha = str(row["senha"] or "").strip()
+        acesso_liberado = bool(int(row["acesso_liberado"] or 0))
+
+        remote = remote_by_code.get(codigo) or {}
+        same_basic_state = (
+            str(remote.get("nome") or "").strip().upper() == nome
+            and str(remote.get("status") or "ATIVO").strip().upper() == status
+            and str(remote.get("telefone") or "").strip() == telefone
+            and str(remote.get("cpf") or "").strip() == cpf
+            and bool(int(remote.get("acesso_liberado") or 0)) == acesso_liberado
+        )
+        if same_basic_state and not senha:
+            skipped += 1
+            continue
+
+        payload = {
+            "codigo": codigo,
+            "nome": nome,
+            "telefone": telefone,
+            "cpf": cpf,
+            "status": status,
+            "senha": senha or None,
+            "acesso_liberado": acesso_liberado,
+            "acesso_liberado_por": "BOOTSTRAP_DESKTOP",
+            "acesso_obs": "Sincronizado automaticamente na abertura do desktop",
+        }
+        try:
+            _call_api(
+                "POST",
+                "desktop/cadastros/motoristas/upsert",
+                payload=payload,
+                extra_headers={"X-Desktop-Secret": desktop_secret},
+            )
+            synced += 1
+        except Exception:
+            failed += 1
+            logging.exception("Falha ao sincronizar motorista %s na API", codigo)
+
+    return _service_result(
+        ok=(failed == 0),
+        data={"synced": synced, "skipped": skipped, "failed": failed},
+        source="api",
+        error=None if failed == 0 else "Falha parcial ao sincronizar motoristas na API.",
+    )
