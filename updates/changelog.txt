@@ -1,3 +1,8 @@
+2026-04-21 10:31:53 - v4.4.1
+- Release automatizada (patch).
+- Versao anterior: v4.4.0.
+- Ajustes na pre-visualizacao dos romaneios, configuracao de impressora e melhorias no retorno operacional do desktop.
+
 2026-04-17 09:18:52 - v4.4.0
 - Release automatizada (minor).
 - Versao anterior: v4.3.1.

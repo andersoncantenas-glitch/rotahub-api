@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 # ==========================
 # ===== INCIO DA PARTE 1 =====
 # ==========================
@@ -2871,12 +2871,21 @@ def fetch_programacao_meta_relatorio(codigo_programacao: str) -> dict:
                     {_expr('hora_chegada')} as hora_chegada,
                     {_expr_num('nf_kg')} as nf_kg,
                     {_expr_num('nf_caixas', 'caixas_carregadas')} as nf_caixas,
+                    {_expr_num('caixas_carregadas')} as caixas_carregadas,
+                    {_expr_num('qnt_cx_carregada')} as qnt_cx_carregada,
+                    {_expr_num('kg_carregado')} as kg_carregado,
                     {_expr_num('nf_kg_carregado', 'kg_carregado')} as nf_kg_carregado,
                     {_expr_num('nf_kg_vendido')} as nf_kg_vendido,
                     {_expr_num('nf_saldo')} as nf_saldo,
                     {_expr_num('nf_preco')} as nf_preco,
                     {_expr_num('media')} as media,
+                    {_expr_num('media_1')} as media_1,
+                    {_expr_num('media_2')} as media_2,
+                    {_expr_num('media_3')} as media_3,
+                    {_expr_num('qnt_aves_por_cx', 'aves_por_caixa', 'qnt_aves_por_caixa')} as qnt_aves_por_cx,
                     {_expr_num('aves_caixa_final', 'qnt_aves_caixa_final')} as aves_caixa_final,
+                    {_expr('inicio_carregamento')} as inicio_carregamento,
+                    {_expr('fim_carregamento')} as fim_carregamento,
                     {_expr_num('mortalidade_transbordo_aves')} as mortalidade_transbordo_aves,
                     {_expr_num('mortalidade_transbordo_kg')} as mortalidade_transbordo_kg,
                     {_expr('obs_transbordo')} as obs_transbordo
@@ -2909,12 +2918,21 @@ def fetch_programacao_meta_relatorio(codigo_programacao: str) -> dict:
                 "hora_chegada",
                 "nf_kg",
                 "nf_caixas",
+                "caixas_carregadas",
+                "qnt_cx_carregada",
+                "kg_carregado",
                 "nf_kg_carregado",
                 "nf_kg_vendido",
                 "nf_saldo",
                 "nf_preco",
                 "media",
+                "media_1",
+                "media_2",
+                "media_3",
+                "qnt_aves_por_cx",
                 "aves_caixa_final",
+                "inicio_carregamento",
+                "fim_carregamento",
                 "mortalidade_transbordo_aves",
                 "mortalidade_transbordo_kg",
                 "obs_transbordo",
@@ -2951,10 +2969,704 @@ def _parse_alteracao_campos(item: dict) -> tuple[str, str, str]:
     return para_quem or "-", motivo or "-", autorizado or "-"
 
 
+def _retorno_first_text(data: dict, *names: str) -> str:
+    for name in names:
+        if name not in data:
+            continue
+        txt = str(data.get(name) or "").strip()
+        if txt:
+            return txt
+    return ""
+
+
+def _retorno_first_float(data: dict, *names: str, default: float = 0.0) -> float:
+    for name in names:
+        if name not in data:
+            continue
+        value = safe_float(data.get(name), 0.0)
+        if value > 0:
+            return value
+    return safe_float(default, 0.0)
+
+
+def _retorno_first_int(data: dict, *names: str, default: int = 0) -> int:
+    for name in names:
+        if name not in data:
+            continue
+        value = safe_int(data.get(name), 0)
+        if value > 0:
+            return value
+    return safe_int(default, 0)
+
+
+def _retorno_fmt_decimal(value: float, casas: int = 2) -> str:
+    casas = max(safe_int(casas, 2), 0)
+    return f"{safe_float(value, 0.0):.{casas}f}".replace(".", ",")
+
+
+def _retorno_normalizar_preco(preco: float) -> float:
+    preco = safe_float(preco, 0.0)
+    if preco > 50:
+        return preco / 100.0
+    return preco
+
+
+def _retorno_normalizar_media_kg_ave(media: float, aves_por_caixa: int) -> float:
+    media = safe_float(media, 0.0)
+    aves_cx = max(safe_int(aves_por_caixa, 0), 1)
+    if media <= 0:
+        return 0.0
+    if media > 60:
+        return media / 1000.0
+    if 10 < media <= 60:
+        return media / float(aves_cx)
+    return media
+
+
+def _retorno_total_aves_carregadas(caixas_carregadas: int, aves_por_caixa: int, caixa_final: int) -> int:
+    caixas = max(safe_int(caixas_carregadas, 0), 0)
+    aves_cx = max(safe_int(aves_por_caixa, 0), 0)
+    final = max(safe_int(caixa_final, 0), 0)
+    if caixas <= 0 or aves_cx <= 0:
+        return 0
+    if 0 < final < aves_cx:
+        return (max(caixas - 1, 0) * aves_cx) + final
+    return caixas * aves_cx
+
+
+def _retorno_fmt_medias_lancadas(medias_raw: list[float]) -> str:
+    if not medias_raw:
+        return "-"
+    return " | ".join(_retorno_fmt_decimal(v, 3) for v in medias_raw if safe_float(v, 0.0) > 0)
+
+
+def _retorno_fmt_evento_datahora(raw: str) -> str:
+    txt = str(raw or "").strip()
+    if not txt:
+        return "-"
+    txt = txt.replace("T", " ").replace("Z", "").split(".")[0].strip()
+    parts = txt.split()
+    if not parts:
+        return "-"
+    data_fmt = format_date_br_short(parts[0]) or parts[0]
+    hora_fmt = parts[1][:5] if len(parts) > 1 else ""
+    return f"{data_fmt} {hora_fmt}".strip()
+
+
+def _fetch_transferencias_relatorio(codigo_programacao: str) -> list[dict]:
+    codigo_programacao = upper(str(codigo_programacao or "").strip())
+    if not codigo_programacao:
+        return []
+
+    rows_out = []
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='transferencias' LIMIT 1"
+            )
+            if not cur.fetchone():
+                return []
+
+            cur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='transferencias_conversoes' LIMIT 1"
+            )
+            has_conv = cur.fetchone() is not None
+
+            cur.execute(
+                """
+                SELECT *
+                FROM transferencias
+                WHERE UPPER(COALESCE(codigo_origem, ''))=UPPER(?)
+                   OR UPPER(COALESCE(codigo_destino, ''))=UPPER(?)
+                ORDER BY COALESCE(criado_em, atualizado_em, ''), id
+                """,
+                (codigo_programacao, codigo_programacao),
+            )
+            rows = cur.fetchall() or []
+            for row in rows:
+                origem = str(row["codigo_origem"] or "").strip().upper()
+                destino = str(row["codigo_destino"] or "").strip().upper()
+                tipo = "ENVIO" if origem == codigo_programacao else "RECEB."
+                rota_ref = destino if tipo == "ENVIO" else origem
+                qtd_total = max(safe_int(row["qtd_caixas"], 0), 0)
+                qtd_convertida = max(safe_int(row["qtd_convertida"], 0), 0)
+                saldo = max(qtd_total - qtd_convertida, 0)
+                pedido = str(row["pedido"] or "").strip().upper()
+                cod_cliente = str(row["cod_cliente"] or "").strip().upper()
+                status = upper(str(row["status"] or "").strip())
+                obs = str(row["obs"] or "").strip()
+                criado_em = str(row["criado_em"] or "").strip()
+                atualizado_em = str(row["atualizado_em"] or "").strip()
+
+                conversoes = []
+                if has_conv:
+                    cur.execute(
+                        """
+                        SELECT pedido_destino, cod_cliente_destino, qtd, nome_cliente_destino
+                        FROM transferencias_conversoes
+                        WHERE transferencia_id=?
+                        ORDER BY id ASC
+                        """,
+                        (row["id"],),
+                    )
+                    for conv in (cur.fetchall() or []):
+                        pedido_dest = str(conv["pedido_destino"] or "").strip().upper()
+                        cod_dest = str(conv["cod_cliente_destino"] or "").strip().upper()
+                        qtd_dest = max(safe_int(conv["qtd"], 0), 0)
+                        nome_dest = str(conv["nome_cliente_destino"] or "").strip().upper()
+                        label_dest = f"{pedido_dest}/{cod_dest}".strip("/")
+                        if nome_dest:
+                            label_dest = f"{label_dest} {nome_dest}".strip()
+                        conversoes.append(f"{qtd_dest}cx -> {label_dest}".strip())
+
+                detalhe_parts = []
+                if obs:
+                    detalhe_parts.append(obs)
+                if conversoes:
+                    detalhe_parts.append("Conv: " + "; ".join(conversoes[:3]))
+                    if len(conversoes) > 3:
+                        detalhe_parts.append(f"+{len(conversoes) - 3} conv.")
+                detalhe = " | ".join([p for p in detalhe_parts if p]).strip() or "-"
+
+                rows_out.append(
+                    {
+                        "tipo": tipo,
+                        "status": status or "-",
+                        "rota_ref": rota_ref or "-",
+                        "pedido_ref": f"{pedido}/{cod_cliente}".strip("/"),
+                        "qtd": qtd_total,
+                        "convertida": qtd_convertida,
+                        "saldo": saldo,
+                        "detalhe": detalhe,
+                        "evento_em": atualizado_em or criado_em or "-",
+                    }
+                )
+    except Exception:
+        logging.debug("Falha ao buscar transferencias do retorno operacional.", exc_info=True)
+        return []
+
+    return rows_out
+
+
+def _fetch_logs_retorno_operacional(codigo_programacao: str, limit: int = 80) -> list[dict]:
+    codigo_programacao = upper(str(codigo_programacao or "").strip())
+    if not codigo_programacao:
+        return []
+
+    out = []
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='programacao_itens_log' LIMIT 1"
+            )
+            if not cur.fetchone():
+                return []
+
+            cur.execute("PRAGMA table_info(programacao_itens_log)")
+            cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+
+            def _expr(*names, default="''"):
+                for name in names:
+                    if name.lower() in cols:
+                        return f"COALESCE({name}, '')"
+                return default
+
+            cur.execute(
+                f"""
+                SELECT
+                    {_expr('cod_cliente')} AS cod_cliente,
+                    {_expr('pedido')} AS pedido,
+                    {_expr('evento')} AS evento,
+                    {_expr('payload_json')} AS payload_json,
+                    {_expr('created_at', 'registrado_em')} AS evento_em
+                FROM programacao_itens_log
+                WHERE UPPER(COALESCE(codigo_programacao,''))=UPPER(?)
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (codigo_programacao, max(safe_int(limit, 80), 1)),
+            )
+            rows = cur.fetchall() or []
+    except Exception:
+        logging.debug("Falha ao buscar logs do retorno operacional.", exc_info=True)
+        return []
+
+    for row in rows:
+        payload_obj = {}
+        payload_raw = str(row["payload_json"] or "").strip()
+        if payload_raw:
+            try:
+                parsed = json.loads(payload_raw)
+                if isinstance(parsed, dict):
+                    payload_obj = parsed
+            except Exception:
+                payload_obj = {}
+
+        cod_cliente = upper(str(payload_obj.get("cod_cliente") or row["cod_cliente"] or "").strip())
+        pedido = upper(str(payload_obj.get("pedido") or row["pedido"] or "").strip())
+        nome_cliente = upper(str(payload_obj.get("nome_cliente") or payload_obj.get("cliente") or "").strip())
+        status_pedido = upper(str(payload_obj.get("status_pedido") or row["evento"] or "-").strip()) or "-"
+        caixas_evt = max(
+            safe_int(
+                payload_obj.get("caixas_atual")
+                if payload_obj.get("caixas_atual") not in (None, "")
+                else payload_obj.get("qnt_caixas"),
+                0,
+            ),
+            0,
+        )
+        peso_evt = safe_float(payload_obj.get("peso_previsto") or payload_obj.get("kg") or 0.0, 0.0)
+        mort_evt = max(safe_int(payload_obj.get("mortalidade_aves"), 0), 0)
+        alteracao_tipo = upper(str(payload_obj.get("alteracao_tipo") or "").strip())
+        alteracao_detalhe = str(payload_obj.get("alteracao_detalhe") or "").strip()
+        forma_recebimento = upper(
+            str(
+                payload_obj.get("forma_recebimento")
+                or payload_obj.get("forma_pagamento")
+                or payload_obj.get("recebido_forma")
+                or ""
+            ).strip()
+        )
+        valor_recebido = safe_float(
+            payload_obj.get("valor_recebido")
+            or payload_obj.get("recebido_valor")
+            or payload_obj.get("valor"),
+            0.0,
+        )
+        obs_recebimento = str(
+            payload_obj.get("obs_recebimento")
+            or payload_obj.get("observacao")
+            or payload_obj.get("recebido_obs")
+            or ""
+        ).strip()
+
+        detalhe_parts = []
+        if alteracao_tipo:
+            detalhe_parts.append(alteracao_tipo)
+        if alteracao_detalhe:
+            detalhe_parts.append(alteracao_detalhe)
+        if forma_recebimento:
+            rec_txt = f"REC {forma_recebimento}"
+            if valor_recebido > 0:
+                rec_txt += f" {_retorno_fmt_decimal(valor_recebido, 2)}"
+            detalhe_parts.append(rec_txt)
+        elif valor_recebido > 0:
+            detalhe_parts.append(f"RECEB {_retorno_fmt_decimal(valor_recebido, 2)}")
+        if obs_recebimento:
+            detalhe_parts.append(obs_recebimento)
+
+        cliente_ref = f"{cod_cliente}/{pedido}".strip("/")
+        if nome_cliente:
+            cliente_ref = f"{cliente_ref} {nome_cliente}".strip()
+
+        out.append(
+            {
+                "quando": _retorno_fmt_evento_datahora(row["evento_em"]),
+                "cliente": (cliente_ref or "-")[:28],
+                "st": status_pedido[:10],
+                "cx": str(caixas_evt),
+                "kg": _retorno_fmt_decimal(peso_evt, 2),
+                "mort": str(mort_evt),
+                "detalhe": (" | ".join([p for p in detalhe_parts if p]).strip() or "-")[:38],
+            }
+        )
+
+    return out
+
+
+def _build_retorno_operacional_context(prog: str) -> dict:
+    prog = upper(str(prog or "").strip())
+    meta = fetch_programacao_meta_relatorio(prog)
+    itens_res = fetch_programacao_itens_contract(prog)
+    itens = itens_res.get("data") if isinstance(itens_res, dict) and bool(itens_res.get("ok", False)) else []
+
+    if not meta and not itens:
+        return {"ok": False, "prog": prog, "meta": {}, "itens": []}
+
+    motorista = _retorno_first_text(meta, "motorista")
+    veiculo = _retorno_first_text(meta, "veiculo")
+    equipe_txt = resolve_equipe_nomes(_retorno_first_text(meta, "equipe"))
+    status = upper(_retorno_first_text(meta, "status_operacional", "status"))
+    prest = upper(_retorno_first_text(meta, "prestacao_status"))
+    nf = _retorno_first_text(meta, "num_nf", "nf_numero")
+    local_rota = _retorno_first_text(meta, "local_rota", "tipo_rota")
+    local_carreg = _retorno_first_text(
+        meta,
+        "local_carregamento",
+        "granja_carregada",
+        "local_carregado",
+        "carregou_em",
+    )
+    inicio_carregamento = _retorno_first_text(meta, "inicio_carregamento")
+    fim_carregamento = _retorno_first_text(meta, "fim_carregamento")
+    data_saida, hora_saida = normalize_date_time_components(meta.get("data_saida"), meta.get("hora_saida"))
+    data_chegada, hora_chegada = normalize_date_time_components(meta.get("data_chegada"), meta.get("hora_chegada"))
+    data_criacao = format_date_br_short(str(meta.get("data_criacao") or ""))
+
+    nf_kg = _retorno_first_float(meta, "nf_kg", "kg_nf", default=0.0)
+    caixas_carregadas = _retorno_first_int(
+        meta,
+        "caixas_carregadas",
+        "qnt_cx_carregada",
+        "nf_caixas",
+        default=0,
+    )
+    kg_carregado = _retorno_first_float(meta, "kg_carregado", "nf_kg_carregado", default=0.0)
+    aves_por_caixa = _retorno_first_int(
+        meta,
+        "qnt_aves_por_cx",
+        "aves_por_caixa",
+        "qnt_aves_por_caixa",
+        default=0,
+    )
+    if aves_por_caixa <= 0:
+        aves_por_caixa = 6
+    caixa_final = _retorno_first_int(meta, "aves_caixa_final", "qnt_aves_caixa_final", default=0)
+
+    medias_raw = []
+    for key in ("media_1", "media_2", "media_3"):
+        val = safe_float(meta.get(key), 0.0)
+        if val > 0:
+            medias_raw.append(val)
+    if not medias_raw:
+        media_fallback_raw = safe_float(meta.get("media"), 0.0)
+        if media_fallback_raw > 0:
+            medias_raw.append(media_fallback_raw)
+    medias_norm = [_retorno_normalizar_media_kg_ave(v, aves_por_caixa) for v in medias_raw if v > 0]
+    medias_txt = _retorno_fmt_medias_lancadas(medias_raw)
+
+    total_aves_carregadas = _retorno_total_aves_carregadas(caixas_carregadas, aves_por_caixa, caixa_final)
+    media_carregada = 0.0
+    if kg_carregado > 0 and total_aves_carregadas > 0:
+        media_carregada = kg_carregado / float(total_aves_carregadas)
+    elif medias_norm:
+        media_carregada = sum(medias_norm) / float(len(medias_norm))
+    else:
+        media_carregada = _retorno_normalizar_media_kg_ave(safe_float(meta.get("media"), 0.0), aves_por_caixa)
+
+    status_entregue = {"ENTREGUE", "FINALIZADO", "FINALIZADA", "CONCLUIDO", "CONCLUÍDO"}
+    status_cancelado = {"CANCELADO", "CANCELADA"}
+
+    tot_clientes = len(itens)
+    tot_entregues = 0
+    tot_cancelados = 0
+    tot_alterados = 0
+    tot_cx_prog = 0
+    tot_cx_ent = 0
+    tot_kg_prog = 0.0
+    tot_kg_ent = 0.0
+    tot_mort_aves = safe_int(meta.get("mortalidade_transbordo_aves"), 0)
+    tot_mort_kg = safe_float(meta.get("mortalidade_transbordo_kg"), 0.0)
+    tot_valor = 0.0
+    divergencias = 0
+    linhas = []
+    ocorrencias = []
+
+    for item in itens:
+        status_item = upper(str(item.get("status_pedido") or "PENDENTE").strip()) or "PENDENTE"
+        cx_prog = max(safe_int(item.get("qnt_caixas"), 0), 0)
+        cx_alt = max(safe_int(item.get("caixas_atual"), 0), 0)
+        preco_orig = _retorno_normalizar_preco(safe_float(item.get("preco"), 0.0))
+        preco_final = _retorno_normalizar_preco(safe_float(item.get("preco_atual"), 0.0) or preco_orig)
+        kg_orig = safe_float(item.get("kg"), 0.0)
+        mort_aves = max(safe_int(item.get("mortalidade_aves"), 0), 0)
+        alterado = bool(
+            str(item.get("alterado_em") or "").strip()
+            or str(item.get("alterado_por") or "").strip()
+            or str(item.get("alteracao_tipo") or "").strip()
+            or str(item.get("alteracao_detalhe") or "").strip()
+            or status_item == "ALTERADO"
+            or (cx_alt > 0 and cx_alt != cx_prog)
+            or abs(preco_final - preco_orig) > 0.0001
+        )
+
+        if status_item in status_cancelado:
+            cx_ent = 0
+        elif status_item in status_entregue:
+            cx_ent = cx_alt if cx_alt > 0 else cx_prog
+        else:
+            cx_ent = cx_alt if cx_alt > 0 else 0
+
+        kg_operacional = 0.0
+        if cx_ent > 0 and media_carregada > 0 and aves_por_caixa > 0:
+            kg_operacional = float(cx_ent) * float(aves_por_caixa) * float(media_carregada)
+
+        kg_base_informado = safe_float(item.get("peso_previsto"), 0.0)
+        if kg_base_informado <= 0:
+            kg_base_informado = kg_orig
+
+        if status_item in status_cancelado:
+            kg_ent = 0.0
+        elif kg_operacional > 0:
+            kg_ent = kg_operacional
+        else:
+            kg_ent = kg_base_informado
+
+        kg_ent = safe_float(f"{kg_ent:.2f}", 0.0)
+        total_aves_cliente = max(cx_ent * max(aves_por_caixa, 1), 0)
+        aves_entregues_cliente = max(total_aves_cliente - mort_aves, 0)
+        media_cliente_entregue = (
+            (kg_ent / float(aves_entregues_cliente))
+            if aves_entregues_cliente > 0 and kg_ent > 0
+            else media_carregada
+        )
+        mort_kg = mort_aves * media_carregada if media_carregada > 0 else 0.0
+        valor_total = max((kg_ent * preco_final), 0.0) if status_item not in status_cancelado else 0.0
+        delta_kg = kg_ent - kg_orig if kg_orig > 0 else 0.0
+        entregue_operacional = status_item in status_entregue or (status_item == "ALTERADO" and cx_ent > 0)
+
+        tot_cx_prog += cx_prog
+        tot_cx_ent += cx_ent
+        tot_kg_prog += max(kg_orig, 0.0)
+        tot_kg_ent += kg_ent
+        tot_mort_aves += mort_aves
+        tot_mort_kg += mort_kg
+        tot_valor += valor_total
+        if entregue_operacional:
+            tot_entregues += 1
+        if status_item in status_cancelado:
+            tot_cancelados += 1
+        if alterado:
+            tot_alterados += 1
+        if abs(delta_kg) >= 0.01:
+            divergencias += 1
+
+        linhas.append(
+            {
+                "cod": str(item.get("cod_cliente") or "")[:6],
+                "cliente": upper(str(item.get("nome_cliente") or "-"))[:28],
+                "st": status_item[:10],
+                "cx": f"{cx_prog}/{cx_ent}",
+                "med": _retorno_fmt_decimal(media_cliente_entregue, 3),
+                "kg": _retorno_fmt_decimal(kg_ent, 2),
+                "preco": _retorno_fmt_decimal(preco_final, 2),
+                "valor": _retorno_fmt_decimal(valor_total, 2),
+                "mort": f"{safe_int(mort_aves, 0)}/{_retorno_fmt_decimal(mort_kg, 2)}",
+                "div": (f"{delta_kg:+.2f}".replace(".", ",") if abs(delta_kg) >= 0.01 else "-"),
+            }
+        )
+
+        if status_item in status_cancelado or alterado:
+            para_quem, motivo, autorizado = _parse_alteracao_campos(item)
+            ocorrencias.append(
+                {
+                    "cliente": upper(str(item.get("nome_cliente") or "-"))[:24],
+                    "st": status_item[:10],
+                    "cancel": "SIM" if status_item in status_cancelado else "NAO",
+                    "alter": "SIM" if alterado else "NAO",
+                    "para": para_quem[:16],
+                    "motivo": motivo[:38],
+                    "aut": autorizado[:16],
+                }
+            )
+
+    if caixas_carregadas <= 0:
+        caixas_carregadas = tot_cx_ent if tot_cx_ent > 0 else tot_cx_prog
+    total_aves_carregadas = _retorno_total_aves_carregadas(caixas_carregadas, aves_por_caixa, caixa_final)
+
+    if kg_carregado <= 0 and total_aves_carregadas > 0 and media_carregada > 0:
+        kg_carregado = float(total_aves_carregadas) * float(media_carregada)
+    if kg_carregado <= 0:
+        kg_carregado = tot_kg_ent if tot_kg_ent > 0 else (tot_kg_prog if tot_kg_prog > 0 else nf_kg)
+    if media_carregada <= 0 and total_aves_carregadas > 0 and kg_carregado > 0:
+        media_carregada = kg_carregado / float(total_aves_carregadas)
+
+    saldo_nf = safe_float(meta.get("nf_saldo"), 0.0)
+    if nf_kg > 0 and kg_carregado > 0 and abs(saldo_nf) < 0.01:
+        saldo_nf = nf_kg - kg_carregado
+
+    kg_entregue_resumo = (
+        kg_carregado
+        if kg_carregado > 0 and caixas_carregadas > 0 and caixas_carregadas == tot_cx_ent
+        else tot_kg_ent
+    )
+    eventos = []
+    carga_quando = str(fim_carregamento or inicio_carregamento or "").strip()
+    if not carga_quando:
+        carga_quando = f"{data_saida} {hora_saida}".strip()
+    if caixas_carregadas > 0 or kg_carregado > 0 or medias_txt != "-":
+        eventos.append(
+            {
+                "quando": _retorno_fmt_evento_datahora(carga_quando),
+                "cliente": "CARREGAMENTO",
+                "st": "CARGA",
+                "cx": str(caixas_carregadas),
+                "kg": _retorno_fmt_decimal(kg_carregado, 2),
+                "mort": "0",
+                "detalhe": (
+                    f"MED {medias_txt} | AVES/CX {aves_por_caixa} | CX FINAL {caixa_final}"
+                )[:38],
+            }
+        )
+    eventos.extend(_fetch_logs_retorno_operacional(prog))
+
+    return {
+        "ok": True,
+        "prog": prog,
+        "meta": meta,
+        "itens": itens,
+        "motorista": motorista,
+        "veiculo": veiculo,
+        "equipe_txt": equipe_txt,
+        "status": status,
+        "prest": prest,
+        "nf": nf,
+        "nf_kg": safe_float(f"{nf_kg:.2f}", 0.0),
+        "saldo_nf": safe_float(f"{saldo_nf:.2f}", 0.0),
+        "local_rota": local_rota,
+        "local_carreg": local_carreg,
+        "inicio_carregamento": inicio_carregamento,
+        "fim_carregamento": fim_carregamento,
+        "data_saida": data_saida,
+        "hora_saida": hora_saida,
+        "data_chegada": data_chegada,
+        "hora_chegada": hora_chegada,
+        "data_criacao": data_criacao,
+        "aves_por_caixa": aves_por_caixa,
+        "caixa_final": caixa_final,
+        "caixas_carregadas": caixas_carregadas,
+        "kg_carregado": safe_float(f"{kg_carregado:.2f}", 0.0),
+        "total_aves_carregadas": total_aves_carregadas,
+        "media_carregada": safe_float(f"{media_carregada:.3f}", 0.0),
+        "medias_lancadas": medias_raw,
+        "medias_lancadas_txt": medias_txt,
+        "tot_clientes": tot_clientes,
+        "tot_entregues": tot_entregues,
+        "tot_cancelados": tot_cancelados,
+        "tot_alterados": tot_alterados,
+        "tot_cx_prog": tot_cx_prog,
+        "tot_cx_ent": tot_cx_ent,
+        "tot_kg_prog": safe_float(f"{tot_kg_prog:.2f}", 0.0),
+        "tot_kg_ent": safe_float(f"{tot_kg_ent:.2f}", 0.0),
+        "kg_entregue_resumo": safe_float(f"{kg_entregue_resumo:.2f}", 0.0),
+        "tot_mort_aves": tot_mort_aves,
+        "tot_mort_kg": safe_float(f"{tot_mort_kg:.2f}", 0.0),
+        "tot_valor": safe_float(f"{tot_valor:.2f}", 0.0),
+        "divergencias": divergencias,
+        "linhas": linhas,
+        "ocorrencias": ocorrencias,
+        "transferencias": _fetch_transferencias_relatorio(prog),
+        "eventos": eventos,
+    }
+
+
 def build_folha_retorno_operacional(prog: str) -> str:
     prog = upper(str(prog or "").strip())
     if not prog:
         return "FOLHA DE RETORNO OPERACIONAL\n\nProgramacao nao informada."
+
+    ctx = _build_retorno_operacional_context(prog)
+    if not bool(ctx.get("ok")):
+        return (
+            f"FOLHA DE RETORNO OPERACIONAL - {prog}\n"
+            + "=" * 118
+            + "\n\nProgramacao nao encontrada."
+        )
+
+    lines = []
+    lines.append("=" * 118)
+    lines.append(f"{'FOLHA DE RETORNO OPERACIONAL':^118}")
+    lines.append("=" * 118)
+    lines.append(
+        f"CODIGO: {prog}   DATA: {ctx['data_criacao'] or '-'}   STATUS: {ctx['status'] or '-'}   PRESTACAO: {ctx['prest'] or '-'}"
+    )
+    lines.append(
+        f"MOTORISTA: {upper(ctx['motorista'] or '-')}   VEICULO: {upper(ctx['veiculo'] or '-')}   EQUIPE: {ctx['equipe_txt'] or '-'}"
+    )
+    lines.append(
+        f"NF: {ctx['nf'] or '-'}   LOCAL ROTA: {upper(ctx['local_rota'] or '-')}   CARREGOU EM: {upper(ctx['local_carreg'] or '-')}"
+    )
+    saida_txt = f"{ctx['data_saida']} {ctx['hora_saida']}".strip() or "-"
+    chegada_txt = f"{ctx['data_chegada']} {ctx['hora_chegada']}".strip() or "-"
+    lines.append(f"SAIDA: {saida_txt}   CHEGADA: {chegada_txt}")
+    lines.append("-" * 118)
+    lines.append(
+        f"CLIENTES: {ctx['tot_clientes']}   ENTREGUES: {ctx['tot_entregues']}   CANCELADOS: {ctx['tot_cancelados']}   ALTERADOS: {ctx['tot_alterados']}"
+    )
+    lines.append(
+        f"KG NF: {_retorno_fmt_decimal(ctx['nf_kg'], 2)}   KG CARREGADO: {_retorno_fmt_decimal(ctx['kg_carregado'], 2)}   SALDO NF: {_retorno_fmt_decimal(ctx['saldo_nf'], 2)}"
+    )
+    lines.append(
+        f"CX CARREGADAS: {ctx['caixas_carregadas']}   CX ENTREGUES: {ctx['tot_cx_ent']}   MEDIA OPERACIONAL: {_retorno_fmt_decimal(ctx['media_carregada'], 3)}"
+    )
+    lines.append(
+        f"MEDIAS LANCADAS: {ctx['medias_lancadas_txt']}   AVES/CX: {ctx['aves_por_caixa']}   CX FINAL: {ctx['caixa_final']}"
+    )
+    if ctx.get("inicio_carregamento") or ctx.get("fim_carregamento"):
+        lines.append(
+            f"CARREGAMENTO: INICIO {ctx.get('inicio_carregamento') or '-'}   FIM {ctx.get('fim_carregamento') or '-'}"
+        )
+    lines.append(
+        f"KG ENTREGUE: {_retorno_fmt_decimal(ctx['kg_entregue_resumo'], 2)}   MORTALIDADE TOTAL: {ctx['tot_mort_aves']} AVES / {_retorno_fmt_decimal(ctx['tot_mort_kg'], 2)} KG"
+    )
+    lines.append(
+        f"VALOR TOTAL ENTREGUE: {fmt_money(ctx['tot_valor'])}   DIVERGENCIAS DE PESO: {ctx['divergencias']} CLIENTE(S)"
+    )
+    lines.append("-" * 118)
+    lines.append(
+        f"{'COD':<6} {'CLIENTE':<28} {'STATUS':<9} {'CX P/E':>7} {'MEDIA':>7} {'KG':>10} {'PRECO':>10} {'VALOR':>12} {'MORT A/KG':>14} {'DIV KG':>9}"
+    )
+    lines.append("-" * 118)
+    if not ctx["linhas"]:
+        lines.append("Sem itens de entrega para esta programacao.")
+    else:
+        for row in ctx["linhas"]:
+            lines.append(
+                f"{row['cod']:<6} {row['cliente']:<28} {row['st']:<9} {row['cx']:>7} {row['med']:>7} "
+                f"{row['kg']:>10} {row['preco']:>10} {row['valor']:>12} {row['mort']:>14} {row['div']:>9}"
+            )
+    lines.append("-" * 118)
+    lines.append("[OCORRENCIAS / AJUSTES]")
+    lines.append(
+        f"{'CLIENTE':<24} {'STATUS':<10} {'CANC':<4} {'ALT':<4} {'PARA QUEM':<16} {'POR QUE':<38} {'AUTORIZOU':<16}"
+    )
+    lines.append("-" * 118)
+    if not ctx["ocorrencias"]:
+        lines.append("Sem cancelamentos ou alteracoes registradas.")
+    else:
+        for row in ctx["ocorrencias"][:40]:
+            lines.append(
+                f"{row['cliente']:<24} {row['st']:<10} {row['cancel']:<4} {row['alter']:<4} "
+                f"{row['para']:<16} {row['motivo']:<38} {row['aut']:<16}"
+            )
+        if len(ctx["ocorrencias"]) > 40:
+            lines.append(f"... e mais {len(ctx['ocorrencias']) - 40} ocorrencia(s).")
+    lines.append("-" * 118)
+    lines.append("[TRANSFERENCIAS / CONVERSOES]")
+    lines.append(
+        f"{'TIPO':<8} {'STATUS':<10} {'ROTA':<12} {'PEDIDO':<22} {'QTD/CNV/SLD':<12} {'DETALHE':<48}"
+    )
+    lines.append("-" * 118)
+    if not ctx["transferencias"]:
+        lines.append("Sem transferencias registradas.")
+    else:
+        for row in ctx["transferencias"][:40]:
+            qinfo = f"{row['qtd']}/{row['convertida']}/{row['saldo']}"
+            detalhe = str(row["detalhe"] or "-")[:48]
+            lines.append(
+                f"{str(row['tipo'] or '-')[:8]:<8} {str(row['status'] or '-')[:10]:<10} {str(row['rota_ref'] or '-')[:12]:<12} "
+                f"{str(row['pedido_ref'] or '-')[:22]:<22} {qinfo[:12]:<12} {detalhe:<48}"
+            )
+        if len(ctx["transferencias"]) > 40:
+            lines.append(f"... e mais {len(ctx['transferencias']) - 40} transferencia(s).")
+    lines.append("-" * 118)
+    lines.append("[TRILHA OPERACIONAL APP]")
+    lines.append(
+        f"{'QUANDO':<14} {'CLIENTE/PEDIDO':<28} {'STATUS':<10} {'CX':>6} {'KG':>9} {'MORT':>7} {'DETALHE':<38}"
+    )
+    lines.append("-" * 118)
+    if not ctx["eventos"]:
+        lines.append("Sem eventos detalhados do app registrados.")
+    else:
+        for row in ctx["eventos"][:50]:
+            lines.append(
+                f"{row['quando']:<14} {row['cliente']:<28} {row['st']:<10} {row['cx']:>6} {row['kg']:>9} {row['mort']:>7} {row['detalhe']:<38}"
+            )
+        if len(ctx["eventos"]) > 50:
+            lines.append(f"... e mais {len(ctx['eventos']) - 50} evento(s).")
+    return "\n".join(lines)
 
     meta = fetch_programacao_meta_relatorio(prog)
     itens_res = fetch_programacao_itens_contract(prog)
@@ -4967,12 +5679,19 @@ class ProgramacaoPage(PageBase):
         acoes_linha_2 = ttk.Frame(top2, style="Card.TFrame")
         acoes_linha_2.grid(row=1, column=0, sticky="ew", pady=(8, 0))
         acoes_linha_2.grid_columnconfigure(0, weight=1)
+        acoes_linha_2.grid_columnconfigure(1, weight=1)
         ttk.Button(
             acoes_linha_2,
             text="IMPRIMIR ROMANEIOS",
             style="Ghost.TButton",
             command=self.imprimir_romaneios_programacao
         ).grid(row=0, column=0, padx=4, sticky="ew")
+        ttk.Button(
+            acoes_linha_2,
+            text="CONFIG. IMPRESSORA",
+            style="Ghost.TButton",
+            command=lambda: self._abrir_configuracao_impressora_romaneio(parent=self.app),
+        ).grid(row=0, column=1, padx=4, sticky="ew")
 
         ttk.Label(
             top2,
@@ -8074,6 +8793,8 @@ class ProgramacaoPage(PageBase):
         sheet_mode: str = "",
         zoom_percent=None,
         extra_hint: str = "",
+        preferred_printer_name: str = "",
+        setup_callback=None,
     ):
         printers = self._list_windows_printers()
         if not printers:
@@ -8132,12 +8853,15 @@ class ProgramacaoPage(PageBase):
         labels = []
         label_to_printer = {}
         default_index = 0
+        preferred_upper = upper(str(preferred_printer_name or "").strip())
         for idx, item in enumerate(printers):
             suffix = " (PADRAO)" if item.get("default") else ""
             label = f"{item.get('name') or '-'}{suffix}"
             labels.append(label)
             label_to_printer[label] = item
             if item.get("default"):
+                default_index = idx
+            if preferred_upper and upper(item.get("name") or "") == preferred_upper:
                 default_index = idx
         cb["values"] = labels
         cb.current(default_index)
@@ -8164,6 +8888,15 @@ class ProgramacaoPage(PageBase):
             result["printer"] = None
             win.destroy()
 
+        def _configure():
+            if not callable(setup_callback):
+                return
+            try:
+                setup_callback(label_to_printer.get(cb.get()) or {})
+            except Exception:
+                logging.debug("Falha ao abrir configuracao da impressora.", exc_info=True)
+            _refresh_detail()
+
         cb.bind("<<ComboboxSelected>>", _refresh_detail)
         win.bind("<Return>", lambda _e: _confirm())
         win.bind("<Escape>", lambda _e: _cancel())
@@ -8174,6 +8907,8 @@ class ProgramacaoPage(PageBase):
         btns.grid(row=combo_row + 3, column=0, sticky="e", pady=(16, 0))
         ttk.Button(btns, text="CANCELAR", style="Ghost.TButton", command=_cancel).pack(side="right")
         ttk.Button(btns, text="IMPRIMIR", style="Primary.TButton", command=_confirm).pack(side="right", padx=(0, 8))
+        if callable(setup_callback):
+            ttk.Button(btns, text="CONFIGURAR", style="Ghost.TButton", command=_configure).pack(side="right", padx=(0, 8))
 
         try:
             win.update_idletasks()
@@ -8264,6 +8999,481 @@ class ProgramacaoPage(PageBase):
         safe_code = re.sub(r"[^A-Z0-9_-]+", "_", upper(str(codigo or "").strip()) or "DOC")
         file_name = f"{prefix}_{safe_code}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.pdf"
         return os.path.join(tempfile.gettempdir(), file_name)
+
+    def _romaneio_print_config_path(self) -> str:
+        cfg_dir = os.path.join(USER_DATA_DIR, "print_profiles")
+        os.makedirs(cfg_dir, exist_ok=True)
+        return os.path.join(cfg_dir, "romaneio_printers.json")
+
+    def _romaneio_printer_key(self, printer=None) -> str:
+        name = ""
+        if isinstance(printer, dict):
+            name = str(printer.get("name") or "").strip()
+        else:
+            name = str(printer or "").strip()
+        return upper(name) or "__DEFAULT__"
+
+    def _romaneio_preset_catalog(self) -> dict:
+        return {
+            "epson_lx_350": {
+                "label": "Epson LX-350 / LX-300+ - continuo 2 vias",
+                "paper_width_mm": 240.0,
+                "via_height_mm": 139.7,
+                "vias_por_pagina": 2,
+                "margin_left_mm": 2.4,
+                "margin_right_mm": 2.4,
+                "margin_top_mm": 2.4,
+                "margin_bottom_mm": 2.4,
+                "offset_x_mm": 0.0,
+                "offset_y_mm": 0.0,
+                "layout_scale_pct": 100,
+            },
+            "epson_fx_890": {
+                "label": "Epson FX / LQ 80 colunas - continuo 2 vias",
+                "paper_width_mm": 241.0,
+                "via_height_mm": 139.7,
+                "vias_por_pagina": 2,
+                "margin_left_mm": 2.0,
+                "margin_right_mm": 2.0,
+                "margin_top_mm": 2.0,
+                "margin_bottom_mm": 2.0,
+                "offset_x_mm": 0.0,
+                "offset_y_mm": 0.0,
+                "layout_scale_pct": 100,
+            },
+            "generic_80col": {
+                "label": "Generica 80 colunas - continuo",
+                "paper_width_mm": 240.0,
+                "via_height_mm": 139.7,
+                "vias_por_pagina": 2,
+                "margin_left_mm": 2.5,
+                "margin_right_mm": 2.5,
+                "margin_top_mm": 2.5,
+                "margin_bottom_mm": 2.5,
+                "offset_x_mm": 0.0,
+                "offset_y_mm": 0.0,
+                "layout_scale_pct": 100,
+            },
+            "romaneio_via_unica": {
+                "label": "Via unica / formulario simples",
+                "paper_width_mm": 240.0,
+                "via_height_mm": 139.7,
+                "vias_por_pagina": 1,
+                "margin_left_mm": 2.4,
+                "margin_right_mm": 2.4,
+                "margin_top_mm": 2.4,
+                "margin_bottom_mm": 2.4,
+                "offset_x_mm": 0.0,
+                "offset_y_mm": 0.0,
+                "layout_scale_pct": 100,
+            },
+            "a4_paisagem_teste": {
+                "label": "A4 paisagem - teste em laser",
+                "paper_width_mm": 297.0,
+                "via_height_mm": 105.0,
+                "vias_por_pagina": 2,
+                "margin_left_mm": 6.0,
+                "margin_right_mm": 6.0,
+                "margin_top_mm": 6.0,
+                "margin_bottom_mm": 6.0,
+                "offset_x_mm": 0.0,
+                "offset_y_mm": 0.0,
+                "layout_scale_pct": 100,
+            },
+        }
+
+    def _guess_romaneio_preset(self, printer=None) -> str:
+        printer = printer or {}
+        haystack = upper(
+            f"{str((printer or {}).get('name') or '')} "
+            f"{str((printer or {}).get('driver') or '')} "
+            f"{str((printer or {}).get('port') or '')}"
+        )
+        if any(token in haystack for token in ("LX-350", "LX 350", "LX350", "LX-300", "LX 300", "LX300")):
+            return "epson_lx_350"
+        if any(token in haystack for token in ("FX-890", "FX 890", "FX890", "LQ-590", "LQ 590", "LQ590", "MATRICIAL")):
+            return "epson_fx_890"
+        return "generic_80col"
+
+    def _default_romaneio_print_profile(self, printer=None) -> dict:
+        catalog = self._romaneio_preset_catalog()
+        preset_key = self._guess_romaneio_preset(printer)
+        base = dict(catalog.get(preset_key) or catalog["generic_80col"])
+        base.update(
+            {
+                "preset_key": preset_key,
+                "printer_name": str((printer or {}).get("name") or "").strip(),
+                "driver_name": str((printer or {}).get("driver") or "").strip(),
+                "port_name": str((printer or {}).get("port") or "").strip(),
+            }
+        )
+        return base
+
+    def _normalize_romaneio_print_profile(self, profile=None, printer=None) -> dict:
+        catalog = self._romaneio_preset_catalog()
+        base = self._default_romaneio_print_profile(printer)
+        raw = dict(profile or {}) if isinstance(profile, dict) else {}
+        merged = dict(base)
+        merged.update(raw)
+
+        preset_key = str(merged.get("preset_key") or "").strip()
+        if preset_key not in catalog:
+            preset_key = self._guess_romaneio_preset(printer)
+        merged["preset_key"] = preset_key
+
+        def _f(name, default, minv, maxv):
+            return max(min(safe_float(merged.get(name), default), maxv), minv)
+
+        def _i(name, default, minv, maxv):
+            return max(min(safe_int(merged.get(name), default), maxv), minv)
+
+        merged["paper_width_mm"] = _f("paper_width_mm", base.get("paper_width_mm", 240.0), 140.0, 330.0)
+        merged["via_height_mm"] = _f("via_height_mm", base.get("via_height_mm", 139.7), 70.0, 210.0)
+        merged["vias_por_pagina"] = _i("vias_por_pagina", base.get("vias_por_pagina", 2), 1, 2)
+        merged["margin_left_mm"] = _f("margin_left_mm", base.get("margin_left_mm", 2.4), 0.0, 30.0)
+        merged["margin_right_mm"] = _f("margin_right_mm", base.get("margin_right_mm", 2.4), 0.0, 30.0)
+        merged["margin_top_mm"] = _f("margin_top_mm", base.get("margin_top_mm", 2.4), 0.0, 30.0)
+        merged["margin_bottom_mm"] = _f("margin_bottom_mm", base.get("margin_bottom_mm", 2.4), 0.0, 30.0)
+        merged["offset_x_mm"] = _f("offset_x_mm", base.get("offset_x_mm", 0.0), -30.0, 30.0)
+        merged["offset_y_mm"] = _f("offset_y_mm", base.get("offset_y_mm", 0.0), -30.0, 30.0)
+        merged["layout_scale_pct"] = _i("layout_scale_pct", base.get("layout_scale_pct", 100), 70, 130)
+        merged["printer_name"] = str((printer or {}).get("name") or merged.get("printer_name") or "").strip()
+        merged["driver_name"] = str((printer or {}).get("driver") or merged.get("driver_name") or "").strip()
+        merged["port_name"] = str((printer or {}).get("port") or merged.get("port_name") or "").strip()
+        merged["preset_label"] = str((catalog.get(preset_key) or {}).get("label") or preset_key)
+        return merged
+
+    def _load_romaneio_print_state(self) -> dict:
+        cache = getattr(self, "_romaneio_print_state_cache", None)
+        if isinstance(cache, dict):
+            return json.loads(json.dumps(cache))
+
+        state = {"schema_version": 1, "last_printer_name": "", "profiles_by_printer": {}}
+        path = self._romaneio_print_config_path()
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    raw = json.load(handle) or {}
+                if isinstance(raw, dict):
+                    state.update(raw)
+            except Exception:
+                logging.debug("Falha ao carregar configuracoes de romaneio.", exc_info=True)
+
+        if not isinstance(state.get("profiles_by_printer"), dict):
+            state["profiles_by_printer"] = {}
+        self._romaneio_print_state_cache = json.loads(json.dumps(state))
+        return json.loads(json.dumps(state))
+
+    def _save_romaneio_print_state(self, state: dict) -> None:
+        clean = {
+            "schema_version": 1,
+            "last_printer_name": str((state or {}).get("last_printer_name") or "").strip(),
+            "profiles_by_printer": dict((state or {}).get("profiles_by_printer") or {}),
+        }
+        path = self._romaneio_print_config_path()
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(clean, handle, ensure_ascii=False, indent=2)
+        self._romaneio_print_state_cache = json.loads(json.dumps(clean))
+
+    def _resolve_romaneio_active_printer(self):
+        printers = self._list_windows_printers()
+        state = self._load_romaneio_print_state()
+        last_name = upper(str(state.get("last_printer_name") or "").strip())
+        for item in printers:
+            if upper(item.get("name") or "") == last_name:
+                return dict(item)
+        default = self._get_default_windows_printer()
+        if default:
+            return dict(default)
+        if printers:
+            return dict(printers[0])
+        return {"name": "", "driver": "", "port": "", "default": False}
+
+    def _get_romaneio_print_profile(self, printer=None) -> dict:
+        state = self._load_romaneio_print_state()
+        key = self._romaneio_printer_key(printer)
+        profiles = dict(state.get("profiles_by_printer") or {})
+        raw = profiles.get(key) or {}
+        return self._normalize_romaneio_print_profile(raw, printer)
+
+    def _save_romaneio_print_profile(self, printer, profile: dict) -> dict:
+        printer = dict(printer or {})
+        normalized = self._normalize_romaneio_print_profile(profile, printer)
+        state = self._load_romaneio_print_state()
+        profiles = dict(state.get("profiles_by_printer") or {})
+        profiles[self._romaneio_printer_key(printer)] = normalized
+        state["profiles_by_printer"] = profiles
+        if normalized.get("printer_name"):
+            state["last_printer_name"] = normalized.get("printer_name")
+        self._save_romaneio_print_state(state)
+        return normalized
+
+    def _romaneio_profile_summary(self, profile: dict) -> str:
+        profile = self._normalize_romaneio_print_profile(profile)
+        total_h = safe_float(profile.get("via_height_mm"), 139.7) * safe_int(profile.get("vias_por_pagina"), 2)
+        return (
+            f"{safe_float(profile.get('paper_width_mm'), 0.0):.1f} x {total_h:.1f} mm"
+            f" | Via {safe_float(profile.get('via_height_mm'), 0.0):.1f} mm"
+            f" | Vias/Pag {safe_int(profile.get('vias_por_pagina'), 0)}"
+            f" | Escala {safe_int(profile.get('layout_scale_pct'), 100)}%"
+        )
+
+    def _open_windows_printer_preferences(self, printer_name: str):
+        if os.name != "nt":
+            raise RuntimeError("Preferencias de impressora disponiveis apenas no Windows.")
+        name = str(printer_name or "").strip()
+        if not name:
+            raise RuntimeError("Selecione uma impressora instalada para abrir as preferencias.")
+        subprocess.Popen(
+            ["rundll32.exe", "printui.dll,PrintUIEntry", "/e", "/n", name],
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+
+    def _open_windows_printer_properties(self, printer_name: str):
+        if os.name != "nt":
+            raise RuntimeError("Propriedades da impressora disponiveis apenas no Windows.")
+        name = str(printer_name or "").strip()
+        if not name:
+            raise RuntimeError("Selecione uma impressora instalada para abrir as propriedades.")
+        subprocess.Popen(
+            ["rundll32.exe", "printui.dll,PrintUIEntry", "/p", "/n", name],
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+
+    def _abrir_configuracao_impressora_romaneio(self, parent=None, printer=None, profile=None, on_apply=None):
+        printers = [{"name": "", "driver": "", "port": "", "default": False}] + self._list_windows_printers(force=True)
+        active_printer = dict(printer or self._resolve_romaneio_active_printer() or {})
+        current_profile = self._normalize_romaneio_print_profile(
+            profile or self._get_romaneio_print_profile(active_printer),
+            active_printer,
+        )
+        presets = self._romaneio_preset_catalog()
+
+        label_map = {}
+        for item in printers:
+            label = str(item.get("name") or "").strip() or "PADRAO / GENERICA"
+            if item.get("default") and item.get("name"):
+                label += " (PADRAO)"
+            label_map[label] = dict(item)
+
+        win = tk.Toplevel(parent or self.app)
+        win.title("Configuracao de Impressora - Romaneios")
+        win.geometry("940x620")
+        win.minsize(860, 560)
+        win.transient(parent or self.app)
+        win.grab_set()
+
+        outer = ttk.Frame(win, style="Content.TFrame", padding=14)
+        outer.pack(fill="both", expand=True)
+        card = ttk.Frame(outer, style="Card.TFrame", padding=14)
+        card.pack(fill="both", expand=True)
+        card.grid_columnconfigure(1, weight=1)
+        card.grid_columnconfigure(3, weight=1)
+
+        ttk.Label(card, text="Configuracao de Impressora dos Romaneios", style="CardTitle.TLabel").grid(
+            row=0, column=0, columnspan=4, sticky="w"
+        )
+        ttk.Label(
+            card,
+            text=(
+                "Ajuste o formulario continuo, salve por impressora e use as preferencias do driver do Windows "
+                "quando precisar calibrar tracao, formulario personalizado ou margens fisicas."
+            ),
+            style="CardLabel.TLabel",
+            wraplength=760,
+            justify="left",
+        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(8, 14))
+
+        ttk.Label(card, text="Impressora", style="CardLabel.TLabel").grid(row=2, column=0, sticky="w")
+        printer_var = tk.StringVar()
+        cb_printer = ttk.Combobox(card, state="readonly", width=54, textvariable=printer_var)
+        cb_printer["values"] = list(label_map.keys())
+        cb_printer.grid(row=2, column=1, columnspan=3, sticky="ew", pady=(4, 12))
+
+        ttk.Label(card, text="Preset / Modelo", style="CardLabel.TLabel").grid(row=3, column=0, sticky="w")
+        preset_var = tk.StringVar()
+        preset_labels = {v["label"]: k for k, v in presets.items()}
+        cb_preset = ttk.Combobox(card, state="readonly", width=42, textvariable=preset_var)
+        cb_preset["values"] = list(preset_labels.keys())
+        cb_preset.grid(row=3, column=1, sticky="ew", pady=(4, 10), padx=(0, 8))
+
+        detail_var = tk.StringVar(value="")
+        ttk.Label(card, textvariable=detail_var, style="CardLabel.TLabel", wraplength=760, justify="left").grid(
+            row=3, column=2, columnspan=2, sticky="w", pady=(4, 10)
+        )
+
+        fields = {
+            "paper_width_mm": tk.StringVar(),
+            "via_height_mm": tk.StringVar(),
+            "vias_por_pagina": tk.StringVar(),
+            "margin_left_mm": tk.StringVar(),
+            "margin_right_mm": tk.StringVar(),
+            "margin_top_mm": tk.StringVar(),
+            "margin_bottom_mm": tk.StringVar(),
+            "offset_x_mm": tk.StringVar(),
+            "offset_y_mm": tk.StringVar(),
+            "layout_scale_pct": tk.StringVar(),
+        }
+
+        def _mk_spin(row, col, label, key, from_, to_, inc, width=10):
+            ttk.Label(card, text=label, style="CardLabel.TLabel").grid(row=row, column=col, sticky="w")
+            sp = ttk.Spinbox(
+                card,
+                from_=from_,
+                to=to_,
+                increment=inc,
+                width=width,
+                textvariable=fields[key],
+            )
+            sp.grid(row=row, column=col + 1, sticky="ew", pady=(4, 10), padx=(0, 12))
+            return sp
+
+        _mk_spin(4, 0, "Largura folha (mm)", "paper_width_mm", 140, 330, 0.5)
+        _mk_spin(4, 2, "Altura da via (mm)", "via_height_mm", 70, 210, 0.5)
+        _mk_spin(5, 0, "Vias por pagina", "vias_por_pagina", 1, 2, 1)
+        _mk_spin(5, 2, "Escala layout (%)", "layout_scale_pct", 70, 130, 1)
+        _mk_spin(6, 0, "Margem esquerda", "margin_left_mm", 0, 30, 0.5)
+        _mk_spin(6, 2, "Margem direita", "margin_right_mm", 0, 30, 0.5)
+        _mk_spin(7, 0, "Margem superior", "margin_top_mm", 0, 30, 0.5)
+        _mk_spin(7, 2, "Margem inferior", "margin_bottom_mm", 0, 30, 0.5)
+        _mk_spin(8, 0, "Deslocamento X", "offset_x_mm", -30, 30, 0.5)
+        _mk_spin(8, 2, "Deslocamento Y", "offset_y_mm", -30, 30, 0.5)
+
+        summary_var = tk.StringVar(value="")
+        ttk.Label(card, text="Resumo da calibracao", style="CardLabel.TLabel").grid(row=9, column=0, sticky="w")
+        ttk.Label(card, textvariable=summary_var, style="CardLabel.TLabel", wraplength=760, justify="left").grid(
+            row=9, column=1, columnspan=3, sticky="w", pady=(4, 12)
+        )
+
+        btn_bar = ttk.Frame(card, style="Card.TFrame")
+        btn_bar.grid(row=10, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+
+        selected_printer = {"item": active_printer}
+
+        def _selected_printer():
+            return dict(selected_printer.get("item") or {})
+
+        def _apply_profile_to_vars(prof: dict):
+            prof = self._normalize_romaneio_print_profile(prof, _selected_printer())
+            preset_label = str((presets.get(prof.get("preset_key")) or {}).get("label") or "")
+            if preset_label:
+                preset_var.set(preset_label)
+            for key, var in fields.items():
+                value = prof.get(key, "")
+                if key in {"vias_por_pagina", "layout_scale_pct"}:
+                    var.set(str(safe_int(value, 0)))
+                else:
+                    var.set(f"{safe_float(value, 0.0):.1f}")
+            summary_var.set(self._romaneio_profile_summary(prof))
+
+        def _collect_profile() -> dict:
+            raw = {
+                "preset_key": preset_labels.get(preset_var.get()) or self._guess_romaneio_preset(_selected_printer()),
+                "paper_width_mm": fields["paper_width_mm"].get(),
+                "via_height_mm": fields["via_height_mm"].get(),
+                "vias_por_pagina": fields["vias_por_pagina"].get(),
+                "margin_left_mm": fields["margin_left_mm"].get(),
+                "margin_right_mm": fields["margin_right_mm"].get(),
+                "margin_top_mm": fields["margin_top_mm"].get(),
+                "margin_bottom_mm": fields["margin_bottom_mm"].get(),
+                "offset_x_mm": fields["offset_x_mm"].get(),
+                "offset_y_mm": fields["offset_y_mm"].get(),
+                "layout_scale_pct": fields["layout_scale_pct"].get(),
+            }
+            return self._normalize_romaneio_print_profile(raw, _selected_printer())
+
+        def _refresh_detail():
+            pr = _selected_printer()
+            guessed = self._guess_romaneio_preset(pr)
+            detail_var.set(
+                f"Driver: {pr.get('driver') or '-'} | Porta: {pr.get('port') or '-'} | "
+                f"Preset recomendado: {(presets.get(guessed) or {}).get('label') or guessed}"
+            )
+            summary_var.set(self._romaneio_profile_summary(_collect_profile()))
+
+        def _load_profile_for_printer(pr):
+            pr = dict(pr or {})
+            selected_printer["item"] = pr
+            saved = self._get_romaneio_print_profile(pr)
+            _apply_profile_to_vars(saved)
+            _refresh_detail()
+
+        initial_label = "PADRAO / GENERICA"
+        for label, item in label_map.items():
+            if upper(item.get("name") or "") == upper(active_printer.get("name") or ""):
+                initial_label = label
+                break
+        printer_var.set(initial_label)
+        _load_profile_for_printer(label_map.get(initial_label))
+
+        def _on_printer_change(_e=None):
+            _load_profile_for_printer(label_map.get(printer_var.get()) or {})
+
+        def _apply_preset(_e=None):
+            preset_key = preset_labels.get(preset_var.get())
+            if not preset_key:
+                return
+            preset_prof = dict(presets.get(preset_key) or {})
+            preset_prof["preset_key"] = preset_key
+            _apply_profile_to_vars(self._normalize_romaneio_print_profile(preset_prof, _selected_printer()))
+            _refresh_detail()
+
+        def _save():
+            prof = _collect_profile()
+            saved = self._save_romaneio_print_profile(_selected_printer(), prof)
+            if callable(on_apply):
+                try:
+                    on_apply(_selected_printer(), saved)
+                except Exception:
+                    logging.debug("Falha ao aplicar configuracao de impressora dos romaneios.", exc_info=True)
+            messagebox.showinfo(
+                "Configuracao salva",
+                "Configuracao de impressora dos romaneios salva com sucesso.",
+                parent=win,
+            )
+            win.destroy()
+
+        def _restore_default():
+            prof = self._default_romaneio_print_profile(_selected_printer())
+            _apply_profile_to_vars(prof)
+            _refresh_detail()
+
+        def _refresh_printers():
+            fresh = [{"name": "", "driver": "", "port": "", "default": False}] + self._list_windows_printers(force=True)
+            label_map.clear()
+            for item in fresh:
+                label = str(item.get("name") or "").strip() or "PADRAO / GENERICA"
+                if item.get("default") and item.get("name"):
+                    label += " (PADRAO)"
+                label_map[label] = dict(item)
+            cb_printer["values"] = list(label_map.keys())
+            if printer_var.get() not in label_map:
+                printer_var.set(list(label_map.keys())[0] if label_map else "PADRAO / GENERICA")
+            _on_printer_change()
+
+        def _open_driver_prefs():
+            try:
+                self._open_windows_printer_preferences(_selected_printer().get("name"))
+            except Exception as exc:
+                messagebox.showerror("Impressora", str(exc), parent=win)
+
+        def _open_driver_props():
+            try:
+                self._open_windows_printer_properties(_selected_printer().get("name"))
+            except Exception as exc:
+                messagebox.showerror("Impressora", str(exc), parent=win)
+
+        cb_printer.bind("<<ComboboxSelected>>", _on_printer_change)
+        cb_preset.bind("<<ComboboxSelected>>", _apply_preset)
+
+        ttk.Button(btn_bar, text="Atualizar impressoras", style="Ghost.TButton", command=_refresh_printers).pack(side="left")
+        ttk.Button(btn_bar, text="Preferencias do driver", style="Ghost.TButton", command=_open_driver_prefs).pack(side="left", padx=(8, 0))
+        ttk.Button(btn_bar, text="Propriedades", style="Ghost.TButton", command=_open_driver_props).pack(side="left", padx=(8, 0))
+        ttk.Button(btn_bar, text="Restaurar padrao", style="Ghost.TButton", command=_restore_default).pack(side="left", padx=(8, 0))
+        ttk.Button(btn_bar, text="Cancelar", style="Danger.TButton", command=win.destroy).pack(side="right")
+        ttk.Button(btn_bar, text="Salvar", style="Primary.TButton", command=_save).pack(side="right", padx=(0, 8))
+
+        win.wait_window()
 
     def _gerar_pdf_programacao_salva_em_path(
         self,
@@ -9095,10 +10305,49 @@ class ProgramacaoPage(PageBase):
             logging.debug("Falha ignorada")
         return meta
 
-    def _desenhar_bloco_romaneio(self, c, x, y_top, largura, altura, codigo_prog: str, meta: dict, item: dict, via_label: str):
+    def _desenhar_bloco_romaneio(
+        self,
+        c,
+        x,
+        y_top,
+        largura,
+        altura,
+        codigo_prog: str,
+        meta: dict,
+        item: dict,
+        via_label: str,
+        layout_profile=None,
+    ):
         from reportlab.lib.units import mm
 
-        y_base = y_top - altura
+        cfg = self._normalize_romaneio_print_profile(layout_profile)
+        base_w = 240.0 * mm
+        base_h = 139.7 * mm
+        margin_left = safe_float(cfg.get("margin_left_mm"), 2.4) * mm
+        margin_right = safe_float(cfg.get("margin_right_mm"), 2.4) * mm
+        margin_top = safe_float(cfg.get("margin_top_mm"), 2.4) * mm
+        margin_bottom = safe_float(cfg.get("margin_bottom_mm"), 2.4) * mm
+        offset_x = safe_float(cfg.get("offset_x_mm"), 0.0) * mm
+        offset_y = safe_float(cfg.get("offset_y_mm"), 0.0) * mm
+        scale_pct = max(safe_int(cfg.get("layout_scale_pct"), 100), 1) / 100.0
+
+        content_w = max(largura - margin_left - margin_right, 40 * mm)
+        content_h = max(altura - margin_top - margin_bottom, 30 * mm)
+        fit_scale = min(content_w / base_w, content_h / base_h)
+        draw_scale = max(fit_scale * scale_pct, 0.20)
+        origin_x = x + margin_left + offset_x
+        origin_y = (y_top - altura) + margin_bottom + offset_y
+
+        c.saveState()
+        c.translate(origin_x, origin_y)
+        c.scale(draw_scale, draw_scale)
+
+        x = 0
+        y_base = 0
+        largura = base_w
+        altura = base_h
+        y_top = altura
+
         c.setLineWidth(0.55)
         c.rect(x, y_base, largura, altura)
 
@@ -9120,7 +10369,6 @@ class ProgramacaoPage(PageBase):
                 pass
             return s
 
-        # Header
         logo_w = 28 * mm
         logo_h = 14.5 * mm
         c.rect(x + pad, y - logo_h, logo_w, logo_h)
@@ -9151,12 +10399,7 @@ class ProgramacaoPage(PageBase):
         media_kg_ave = (kg / total_aves) if total_aves > 0 else 0.0
         mort_kg = mort_aves * media_kg_ave
         valor_mortalidade = mort_kg * preco if preco > 0 else 0.0
-        valor_total_venda = valor_venda - valor_mortalidade
-        if valor_total_venda < 0:
-            valor_total_venda = 0.0
-        vendedor = upper(item.get("vendedor", ""))
-        if vendedor in {"NAN", "NONE", "NULL"}:
-            vendedor = ""
+        valor_total_venda = max(valor_venda - valor_mortalidade, 0.0)
         local_rota = meta.get("local_rota", "") or "-"
         local_carreg = meta.get("local_carregamento", "") or "-"
         tipo_estimativa = upper(meta.get("tipo_estimativa", "KG") or "KG")
@@ -9164,7 +10407,6 @@ class ProgramacaoPage(PageBase):
             estimativa_txt = f"CIF / CX EST: {safe_int(meta.get('caixas_estimado'), 0)}"
         else:
             estimativa_txt = f"FOB / KG EST: {safe_float(meta.get('kg_estimado'), 0.0):.2f}"
-
         data_ref = datetime.now().strftime("%d/%m/%Y")
 
         c.setFont("Helvetica", 6.9)
@@ -9172,7 +10414,6 @@ class ProgramacaoPage(PageBase):
         c.drawString(x + 90 * mm, y, f"PEDIDO: {pedido}")
         c.drawRightString(x + largura - pad, y, f"DATA: {data_ref}")
         y -= 4.2 * mm
-
         c.drawString(x + pad + logo_w + 4 * mm, y, f"RAZAO SOCIAL: {nome_cli[:75]}")
         y -= 4.0 * mm
         c.drawString(x + pad + logo_w + 4 * mm, y, f"NOME FANTASIA: {nome_cli[:73]}")
@@ -9190,18 +10431,16 @@ class ProgramacaoPage(PageBase):
         c.drawString(x + 62 * mm, y, f"PRECO DO KG: R$ {money(preco)}")
         c.drawString(x + 108 * mm, y, f"PESO MEDIO (KG): {money(media_kg_ave)}")
         c.drawRightString(x + largura - pad, y, f"LOCAL: {local_rota[:18]}")
-
         y -= 7.0 * mm
 
         c.setFont("Helvetica", 6.8)
 
-        def box(label, value, bx, by, bw=30*mm, bh=4.7*mm):
-            c.drawString(bx, by + bh + 0.7*mm, label)
+        def box(label, value, bx, by, bw=30 * mm, bh=4.7 * mm):
+            c.drawString(bx, by + bh + 0.7 * mm, label)
             c.rect(bx, by, bw, bh, stroke=1, fill=0)
             if value not in (None, ""):
-                c.drawRightString(bx + bw - 1.2*mm, by + 1.2*mm, str(value))
+                c.drawRightString(bx + bw - 1.2 * mm, by + 1.2 * mm, str(value))
 
-        # Grade principal no padrao do modelo Excel (3 colunas, 4 linhas)
         left_x = x + pad
         left_w = 35 * mm
         col_gap = 4 * mm
@@ -9217,12 +10456,10 @@ class ProgramacaoPage(PageBase):
         box("Aves por Caixa:", aves_cx, left_x, row_y - step, bw=left_w, bh=box_h)
         box("Total de Aves:", total_aves, left_x, row_y - (2 * step), bw=left_w, bh=box_h)
         box("Peso Total:", money(kg), left_x, row_y - (3 * step), bw=left_w, bh=box_h)
-
         box("Valor da Venda:", money(valor_venda), mid_x, row_y, bw=mid_w, bh=box_h)
         box("Aves Mortas (und):", mort_aves, mid_x, row_y - step, bw=mid_w, bh=box_h)
         box("Desc. Mort (R$):", money(valor_mortalidade), mid_x, row_y - (2 * step), bw=mid_w, bh=box_h)
         box("Valor Final da venda:", money(valor_total_venda), mid_x, row_y - (3 * step), bw=mid_w, bh=box_h)
-
         box("Deb. Anterior do Cliente:", "", right_x, row_y, bw=right_w, bh=box_h)
         box("Valor recebido:", "", right_x, row_y - step, bw=right_w, bh=box_h)
         box("Valor recebido:", "", right_x, row_y - (2 * step), bw=right_w, bh=box_h)
@@ -9240,7 +10477,6 @@ class ProgramacaoPage(PageBase):
             y_footer - 3.8 * mm,
             "CHAVE PIX: 37.752.738/0001-15 (CNPJ)",
         )
-
         c.setFont("Helvetica", 6.6)
         c.drawString(x + pad, y_base + 2.2 * mm, f"PROGRAMACAO: {codigo_prog}   CARREGOU EM: {local_carreg}")
         c.drawRightString(x + largura - pad, y_base + 2.2 * mm, f"MOTORISTA: {meta.get('motorista', '-')}")
@@ -9252,43 +10488,60 @@ class ProgramacaoPage(PageBase):
         )
         c.line(x + pad, y_base + 5.6 * mm, x + 85 * mm, y_base + 5.6 * mm)
         c.drawString(x + pad, y_base + 6.2 * mm, nome_cli[:38])
+        c.restoreState()
 
-    def _gerar_pdf_romaneios(self, path: str, codigo: str, itens: list, meta: dict):
+    def _gerar_pdf_romaneios(self, path: str, codigo: str, itens: list, meta: dict, layout_profile=None):
         from reportlab.lib.units import mm
 
-        # Formulario continuo 5 1/2 (duas vias):
-        # cada via: 240mm x 139,7mm | pagina final: 240mm x 279,4mm
-        via_w = 240.0 * mm
-        via_h = 139.7 * mm
+        profile = self._normalize_romaneio_print_profile(layout_profile)
+        via_w = safe_float(profile.get("paper_width_mm"), 240.0) * mm
+        via_h = safe_float(profile.get("via_height_mm"), 139.7) * mm
+        vias_por_pagina = max(safe_int(profile.get("vias_por_pagina"), 2), 1)
         pagina_w = via_w
-        pagina_h = via_h * 2.0
+        pagina_h = via_h * vias_por_pagina
 
         c = canvas.Canvas(path, pagesize=(pagina_w, pagina_h))
+        via_labels = ["VIA CLIENTE", "VIA EMPRESA"] if vias_por_pagina >= 2 else ["VIA CLIENTE"]
 
         for item in itens:
-            self._desenhar_bloco_romaneio(
-                c, 0, pagina_h, via_w, via_h,
-                codigo, meta, item, "VIA CLIENTE"
-            )
-            self._desenhar_bloco_romaneio(
-                c, 0, via_h, via_w, via_h,
-                codigo, meta, item, "VIA EMPRESA"
-            )
+            for idx, via_label in enumerate(via_labels[:vias_por_pagina]):
+                y_ref = pagina_h - (idx * via_h)
+                self._desenhar_bloco_romaneio(
+                    c,
+                    0,
+                    y_ref,
+                    via_w,
+                    via_h,
+                    codigo,
+                    meta,
+                    item,
+                    via_label,
+                    layout_profile=profile,
+                )
             c.showPage()
 
         c.save()
 
-    def _imprimir_romaneios(self, codigo: str, itens: list, meta: dict, parent=None):
+    def _imprimir_romaneios(self, codigo: str, itens: list, meta: dict, parent=None, layout_profile=None):
         if not require_reportlab():
             return None
 
+        preferred_printer = self._resolve_romaneio_active_printer()
         printer = self._select_windows_printer(
             parent=parent or self.app,
             document_label=f"Romaneios de Entrega {codigo}",
-            sheet_mode="Formulario continuo 240 x 279,4 mm",
+            sheet_mode=self._romaneio_profile_summary(
+                layout_profile or self._get_romaneio_print_profile(preferred_printer)
+            ),
             extra_hint=(
                 "Os romaneios serao enviados com as duas vias (cliente e empresa) "
-                "para a impressora selecionada."
+                "para a impressora selecionada. Use CONFIGURAR para ajustar formulario continuo, "
+                "margens, deslocamento e preferencias do driver."
+            ),
+            preferred_printer_name=str(preferred_printer.get("name") or ""),
+            setup_callback=lambda current: self._abrir_configuracao_impressora_romaneio(
+                parent=parent or self.app,
+                printer=current,
             ),
         )
         if not printer:
@@ -9296,11 +10549,18 @@ class ProgramacaoPage(PageBase):
 
         path = self._build_temp_pdf_path("ROMANEIOS", codigo)
         try:
-            self._gerar_pdf_romaneios(path, codigo, itens, meta)
+            profile = self._normalize_romaneio_print_profile(
+                layout_profile or self._get_romaneio_print_profile(printer),
+                printer,
+            )
+            self._save_romaneio_print_profile(printer, profile)
+            self._gerar_pdf_romaneios(path, codigo, itens, meta, layout_profile=profile)
             self._send_file_to_windows_printer(path, printer)
             messagebox.showinfo(
                 "Impressao enviada",
-                f"Romaneios da programacao {codigo} enviados para:\n{printer.get('name') or 'IMPRESSORA PADRAO'}",
+                f"Romaneios da programacao {codigo} enviados para:\n"
+                f"{printer.get('name') or 'IMPRESSORA PADRAO'}\n\n"
+                f"Perfil: {self._romaneio_profile_summary(profile)}",
                 parent=parent or self.app,
             )
             return path
@@ -9313,10 +10573,23 @@ class ProgramacaoPage(PageBase):
             )
             return None
 
-    def _draw_romaneio_preview_on_canvas(self, cv, w: int, h: int, codigo: str, meta: dict, item: dict, via_label: str):
+    def _draw_romaneio_preview_on_canvas(
+        self,
+        cv,
+        w: int,
+        h: int,
+        codigo: str,
+        meta: dict,
+        item: dict,
+        via_label: str,
+        layout_profile=None,
+        printer=None,
+    ):
         cv.delete("all")
-        # Mantem preview com proporcao real da via: 240mm x 139,7mm
-        ratio = 240.0 / 139.7
+        profile = self._normalize_romaneio_print_profile(layout_profile, printer)
+        page_w_mm = safe_float(profile.get("paper_width_mm"), 240.0)
+        via_h_mm = safe_float(profile.get("via_height_mm"), 139.7)
+        ratio = page_w_mm / max(via_h_mm, 1.0)
         m = 16
         avail_w = max(200, w - (2 * m))
         avail_h = max(120, h - (2 * m))
@@ -9330,18 +10603,40 @@ class ProgramacaoPage(PageBase):
         x1 = x0 + target_w
         y1 = y0 + target_h
         cv.create_rectangle(x0, y0, x1, y1, outline="#111", width=1)
+        info_text = (
+            f"Folha {safe_float(profile.get('paper_width_mm'), 0.0):.1f} x "
+            f"{safe_float(profile.get('via_height_mm'), 0.0):.1f} mm | "
+            f"Vias/Pag {safe_int(profile.get('vias_por_pagina'), 0)} | "
+            f"Escala {safe_int(profile.get('layout_scale_pct'), 100)}%"
+        )
+        if printer and printer.get("name"):
+            info_text += f" | Driver: {printer.get('driver') or '-'}"
+        cv.create_text(x0 + 8, y0 - 6, text=info_text, anchor="sw", font=("Segoe UI", 9))
+
+        inner_x0 = int(x0 + (target_w * (safe_float(profile.get("margin_left_mm"), 0.0) / max(page_w_mm, 1.0))))
+        inner_x1 = int(x1 - (target_w * (safe_float(profile.get("margin_right_mm"), 0.0) / max(page_w_mm, 1.0))))
+        inner_y0 = int(y0 + (target_h * (safe_float(profile.get("margin_top_mm"), 0.0) / max(via_h_mm, 1.0))))
+        inner_y1 = int(y1 - (target_h * (safe_float(profile.get("margin_bottom_mm"), 0.0) / max(via_h_mm, 1.0))))
+        dx = int((safe_float(profile.get("offset_x_mm"), 0.0) / max(page_w_mm, 1.0)) * target_w)
+        dy = int((safe_float(profile.get("offset_y_mm"), 0.0) / max(via_h_mm, 1.0)) * target_h)
+        inner_x0 += dx
+        inner_x1 += dx
+        inner_y0 -= dy
+        inner_y1 -= dy
+        cv.create_rectangle(inner_x0, inner_y0, inner_x1, inner_y1, outline="#2563EB", width=1, dash=(4, 2))
 
         pad = 10
-        lx = x0 + pad
-        ty = y0 + pad
+        lx = inner_x0 + pad
+        ty = inner_y0 + pad
+        rw = max(inner_x1 - inner_x0, 120)
+        rh = max(inner_y1 - inner_y0, 100)
 
-        # Header
-        logo_w, logo_h = 112, 64
+        logo_w = max(70, int(rw * 0.12))
+        logo_h = max(42, int(rh * 0.12))
         cv.create_rectangle(lx, ty, lx + logo_w, ty + logo_h, outline="#222", width=1)
-        cv.create_text(lx + logo_w / 2, ty + logo_h / 2, text="LOGO", font=("Segoe UI", 10, "bold"))
-
-        cv.create_text((x0 + x1) / 2, ty + 2, text="Romaneio de Entrega", font=("Segoe UI", 16, "bold"), anchor="n")
-        cv.create_text(x1 - pad, ty + 8, text=via_label, font=("Segoe UI", 10, "normal"), anchor="ne")
+        cv.create_text(lx + logo_w / 2, ty + logo_h / 2, text="LOGO", font=("Segoe UI", 9, "bold"))
+        cv.create_text((inner_x0 + inner_x1) / 2, ty + 2, text="Romaneio de Entrega", font=("Segoe UI", 15, "bold"), anchor="n")
+        cv.create_text(inner_x1 - pad, ty + 8, text=via_label, font=("Segoe UI", 10), anchor="ne")
 
         def fmt_pedido(v):
             s = str(v or "").strip()
@@ -9362,9 +10657,7 @@ class ProgramacaoPage(PageBase):
         cidade = self._extrair_cidade_do_endereco(endereco)
         produto = upper(item.get("produto") or "FRANGO VIVO")
         caixas = safe_int(item.get("qnt_caixas"), 0)
-        aves_cx = safe_int(meta.get("aves_por_caixa"), 6)
-        if aves_cx <= 0:
-            aves_cx = 6
+        aves_cx = max(safe_int(meta.get("aves_por_caixa"), 6), 1)
         total_aves = caixas * aves_cx
         kg = safe_float(item.get("kg"), 0.0)
         preco = self._normalizar_preco_item(item.get("preco"))
@@ -9373,12 +10666,7 @@ class ProgramacaoPage(PageBase):
         media_kg_ave = (kg / total_aves) if total_aves > 0 else 0.0
         mort_kg = mort_aves * media_kg_ave
         valor_mortalidade = mort_kg * preco if preco > 0 else 0.0
-        valor_total_venda = valor_venda - valor_mortalidade
-        if valor_total_venda < 0:
-            valor_total_venda = 0.0
-        vendedor = upper(item.get("vendedor", ""))
-        if vendedor in {"NAN", "NONE", "NULL"}:
-            vendedor = ""
+        valor_total_venda = max(valor_venda - valor_mortalidade, 0.0)
         local_rota = meta.get("local_rota", "") or "-"
         local_carreg = meta.get("local_carregamento", "") or "-"
         data_ref = datetime.now().strftime("%d/%m/%Y")
@@ -9387,65 +10675,67 @@ class ProgramacaoPage(PageBase):
             return f"{safe_float(v, 0.0):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
         tx = lx + logo_w + 14
-        y = ty + 20
-        cv.create_text(tx, y + 14, text=f"COD CLIENTE: {cod_cli}", anchor="w", font=("Segoe UI", 10))
-        cv.create_text(tx + 260, y + 14, text=f"PEDIDO: {pedido}", anchor="w", font=("Segoe UI", 10))
-        cv.create_text(x1 - pad, y + 14, text=f"DATA: {data_ref}", anchor="e", font=("Segoe UI", 10))
-        cv.create_text(tx, y + 38, text=f"RAZAO SOCIAL: {nome_cli[:42]}", anchor="w", font=("Segoe UI", 10))
-        cv.create_text(tx, y + 60, text=f"NOME FANTASIA: {nome_cli[:40]}", anchor="w", font=("Segoe UI", 10))
-        cv.create_text(tx, y + 82, text=f"ENDERECO: {endereco[:44]}", anchor="w", font=("Segoe UI", 10))
-        cv.create_text(tx, y + 104, text=f"BAIRRO: {cidade if cidade else '-'}    CIDADE: {cidade if cidade else '-'}", anchor="w", font=("Segoe UI", 10))
+        y = ty + 18
+        cv.create_text(tx, y + 12, text=f"COD CLIENTE: {cod_cli}", anchor="w", font=("Segoe UI", 10))
+        cv.create_text(tx + int(rw * 0.30), y + 12, text=f"PEDIDO: {pedido}", anchor="w", font=("Segoe UI", 10))
+        cv.create_text(inner_x1 - pad, y + 12, text=f"DATA: {data_ref}", anchor="e", font=("Segoe UI", 10))
+        cv.create_text(tx, y + 34, text=f"RAZAO SOCIAL: {nome_cli[:44]}", anchor="w", font=("Segoe UI", 10))
+        cv.create_text(tx, y + 56, text=f"NOME FANTASIA: {nome_cli[:42]}", anchor="w", font=("Segoe UI", 10))
+        cv.create_text(tx, y + 78, text=f"ENDERECO: {endereco[:46]}", anchor="w", font=("Segoe UI", 10))
+        cv.create_text(tx, y + 100, text=f"BAIRRO: {cidade or '-'}    CIDADE: {cidade or '-'}", anchor="w", font=("Segoe UI", 10))
 
-        sep_y = ty + 138
-        cv.create_line(lx, sep_y, x1 - pad, sep_y, fill="#222", width=1)
+        sep_y = ty + int(rh * 0.34)
+        cv.create_line(lx, sep_y, inner_x1 - pad, sep_y, fill="#222", width=1)
         cv.create_text(lx, sep_y + 12, text=f"PRODUTO: {produto[:24]}", anchor="w", font=("Segoe UI", 10, "bold"))
-        cv.create_text(lx + 300, sep_y + 12, text=f"PRECO DO KG: R$ {money(preco)}", anchor="w", font=("Segoe UI", 10, "bold"))
-        cv.create_text(lx + 480, sep_y + 12, text=f"PESO MEDIO (KG): {money(media_kg_ave)}", anchor="w", font=("Segoe UI", 10))
-        cv.create_text(x1 - pad - 6, sep_y + 12, text=f"LOCAL: {local_rota[:16]}", anchor="e", font=("Segoe UI", 10, "bold"))
+        cv.create_text(lx + int(rw * 0.39), sep_y + 12, text=f"PRECO DO KG: R$ {money(preco)}", anchor="w", font=("Segoe UI", 10, "bold"))
+        cv.create_text(lx + int(rw * 0.63), sep_y + 12, text=f"PESO MEDIO (KG): {money(media_kg_ave)}", anchor="w", font=("Segoe UI", 10))
+        cv.create_text(inner_x1 - pad - 6, sep_y + 12, text=f"LOCAL: {local_rota[:16]}", anchor="e", font=("Segoe UI", 10, "bold"))
 
-        # Boxes
-        by = sep_y + 48
-        content_w = (x1 - pad) - lx
+        by = sep_y + 44
+        content_w = max((inner_x1 - pad) - lx, 220)
         gap = 12
-        left_w = max(165, int((content_w - 2 * gap) * 0.30))
-        mid_w = max(220, int((content_w - 2 * gap) * 0.38))
-        right_w = (content_w - 2 * gap) - left_w - mid_w
-        if right_w < 175:
-            delta = 175 - right_w
-            mid_w = max(190, mid_w - delta)
-            right_w = 175
+        left_w = max(120, int((content_w - 2 * gap) * 0.28))
+        mid_w = max(160, int((content_w - 2 * gap) * 0.36))
+        right_w = max(140, (content_w - 2 * gap) - left_w - mid_w)
         left_x = lx
         mid_x = left_x + left_w + gap
         right_x = mid_x + mid_w + gap
-        row_h = 44
-        box_h = 28
+        row_h = 38
+        box_h = 25
 
         def draw_box(bx, byy, bw, label, value):
-            cv.create_text(bx, byy - 12, text=label, anchor="w", font=("Segoe UI", 9))
+            cv.create_text(bx, byy - 10, text=label, anchor="w", font=("Segoe UI", 9))
             cv.create_rectangle(bx, byy, bx + bw, byy + box_h, outline="#222", width=1)
-            if value is not None and str(value) != "":
+            if value not in (None, ""):
                 cv.create_text(bx + bw - 6, byy + (box_h // 2), text=str(value), anchor="e", font=("Segoe UI", 11))
 
         draw_box(left_x, by, left_w, "Qtd. de Caixas:", caixas)
         draw_box(left_x, by + row_h, left_w, "Aves por Caixa:", aves_cx)
         draw_box(left_x, by + row_h * 2, left_w, "Total de Aves:", total_aves)
         draw_box(left_x, by + row_h * 3, left_w, "Peso Total:", money(kg))
-
         draw_box(mid_x, by, mid_w, "Valor da Venda:", money(valor_venda))
         draw_box(mid_x, by + row_h, mid_w, "Aves Mortas (und):", mort_aves)
         draw_box(mid_x, by + row_h * 2, mid_w, "Desc. Mort (R$):", money(valor_mortalidade))
         draw_box(mid_x, by + row_h * 3, mid_w, "Valor Final da venda:", money(valor_total_venda))
-
         draw_box(right_x, by, right_w, "Deb. Anterior do Cliente:", "")
         draw_box(right_x, by + row_h, right_w, "Valor recebido:", "")
         draw_box(right_x, by + row_h * 2, right_w, "Valor recebido:", "")
         draw_box(right_x, by + row_h * 3, right_w, "Recebido Total:", "")
 
-        # Footer
-        cv.create_text((x0 + x1) / 2, y1 - 52, text="CONTA PARA DEPOSITO BANCO DO BRASIL AGENCIA 0532-0 CONTA CORRENTE 25.852-0", font=("Segoe UI", 10, "bold"))
-        cv.create_text((x0 + x1) / 2, y1 - 30, text="CHAVE PIX: 37.752.738/0001-15 (CNPJ)", font=("Segoe UI", 10, "bold"))
-        cv.create_text(lx, y1 - 12, text=f"PROGRAMACAO: {codigo}   CARREGOU EM: {local_carreg}", anchor="w", font=("Segoe UI", 10))
-        cv.create_text(x1 - pad, y1 - 12, text=f"MOTORISTA: {meta.get('motorista', '-')}", anchor="e", font=("Segoe UI", 10))
+        cv.create_text(
+            (inner_x0 + inner_x1) / 2,
+            inner_y1 - 48,
+            text="CONTA PARA DEPOSITO BANCO DO BRASIL AGENCIA 0532-0 CONTA CORRENTE 25.852-0",
+            font=("Segoe UI", 9, "bold"),
+        )
+        cv.create_text(
+            (inner_x0 + inner_x1) / 2,
+            inner_y1 - 28,
+            text="CHAVE PIX: 37.752.738/0001-15 (CNPJ)",
+            font=("Segoe UI", 9, "bold"),
+        )
+        cv.create_text(lx, inner_y1 - 10, text=f"PROGRAMACAO: {codigo}   CARREGOU EM: {local_carreg}", anchor="w", font=("Segoe UI", 9))
+        cv.create_text(inner_x1 - pad, inner_y1 - 10, text=f"MOTORISTA: {meta.get('motorista', '-')}", anchor="e", font=("Segoe UI", 9))
 
     def _abrir_previsualizacao_romaneios(self, codigo: str, itens: list, meta: dict):
         if not itens:
@@ -9466,26 +10756,80 @@ class ProgramacaoPage(PageBase):
 
         win = tk.Toplevel(self.app)
         win.title(f"Pre-visualizacao Romaneios - {codigo}")
-        win.geometry("1250x820")
+        win.geometry("1280x860")
+        win.minsize(960, 680)
         win.transient(self.app)
         win.grab_set()
 
-        top = ttk.Frame(win, padding=8)
-        top.pack(fill="x")
-        center = ttk.Frame(win, padding=8)
-        center.pack(fill="both", expand=True)
-        bottom = ttk.Frame(win, padding=8)
-        bottom.pack(fill="x")
+        shell = ttk.Frame(win, padding=8)
+        shell.pack(fill="both", expand=True)
+        shell.grid_columnconfigure(0, weight=1)
+        shell.grid_rowconfigure(3, weight=1)
 
-        ttk.Label(top, text="Cliente:", style="CardLabel.TLabel").pack(side="left")
-        cb = ttk.Combobox(top, state="readonly", width=60)
-        cb.pack(side="left", padx=6)
+        top = ttk.Frame(shell, style="Card.TFrame")
+        top.grid(row=0, column=0, sticky="ew")
+        top.grid_columnconfigure(0, weight=1)
+
+        top_left = ttk.Frame(top, style="Card.TFrame")
+        top_left.grid_columnconfigure(0, weight=1)
+        top_actions = ttk.Frame(top, style="Card.TFrame")
+        top_actions.grid_columnconfigure(0, weight=0)
+        selector_row = ttk.Frame(top_left, style="Card.TFrame")
+        selector_row.grid(row=0, column=0, sticky="ew")
+        selector_row.grid_columnconfigure(1, weight=1)
+
+        ttk.Label(selector_row, text="Cliente:", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w")
+        cb = ttk.Combobox(selector_row, state="readonly", width=42)
+        cb.grid(row=0, column=1, sticky="ew", padx=(6, 0))
         vias_var = tk.StringVar(value="VIA CLIENTE")
-        ttk.Radiobutton(top, text="Via Cliente", value="VIA CLIENTE", variable=vias_var).pack(side="left", padx=8)
-        ttk.Radiobutton(top, text="Via Empresa", value="VIA EMPRESA", variable=vias_var).pack(side="left")
+        via_frame = ttk.Frame(selector_row, style="Card.TFrame")
+        ttk.Radiobutton(via_frame, text="Via Cliente", value="VIA CLIENTE", variable=vias_var).pack(side="left")
+        ttk.Radiobutton(via_frame, text="Via Empresa", value="VIA EMPRESA", variable=vias_var).pack(side="left", padx=(12, 0))
 
+        hint_label = ttk.Label(
+            top_left,
+            text="",
+            style="CardLabel.TLabel",
+            justify="left",
+        )
+        hint_label.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+
+        btn_top_print = ttk.Button(top_actions, text="IMPRIMIR", style="Primary.TButton")
+        btn_top_print.grid(row=0, column=0)
+
+        printer_bar = ttk.Frame(shell, style="Card.TFrame")
+        printer_bar.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        printer_bar.grid_columnconfigure(0, weight=1)
+
+        printer_actions = ttk.Frame(printer_bar, style="Card.TFrame")
+        btn_restore = ttk.Button(printer_actions, text="RESTAURAR", style="Ghost.TButton")
+        btn_save_profile = ttk.Button(printer_actions, text="SALVAR PERFIL", style="Ghost.TButton")
+        btn_open_setup = ttk.Button(printer_actions, text="CONFIG. IMPRESSORA", style="Ghost.TButton")
+        printer_actions.grid_columnconfigure(0, weight=0)
+        printer_actions.grid_columnconfigure(1, weight=0)
+        printer_actions.grid_columnconfigure(2, weight=0)
+        btn_restore.grid(row=0, column=0, padx=(0, 8), sticky="ew")
+        btn_save_profile.grid(row=0, column=1, padx=(0, 8), sticky="ew")
+        btn_open_setup.grid(row=0, column=2, sticky="ew")
+
+        controls_bar = ttk.Frame(shell, style="Card.TFrame")
+        controls_bar.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        controls_bar.grid_columnconfigure(0, weight=1)
+        controls_wrap = ttk.Frame(controls_bar, style="Card.TFrame")
+        controls_wrap.grid(row=0, column=0, sticky="ew")
+
+        center = ttk.Frame(shell, padding=(0, 8, 0, 8))
+        center.grid(row=3, column=0, sticky="nsew")
+        center.grid_columnconfigure(0, weight=1)
+        center.grid_rowconfigure(0, weight=1)
         preview = tk.Canvas(center, bg="white", highlightthickness=1, highlightbackground="#D1D5DB")
-        preview.pack(fill="both", expand=True)
+        preview.grid(row=0, column=0, sticky="nsew")
+
+        bottom = ttk.Frame(shell, style="Card.TFrame")
+        bottom.grid(row=4, column=0, sticky="ew")
+        bottom.grid_columnconfigure(0, weight=1)
+        bottom_nav = ttk.Frame(bottom, style="Card.TFrame")
+        bottom_actions = ttk.Frame(bottom, style="Card.TFrame")
 
         options = []
         for idx, it in enumerate(itens):
@@ -9496,35 +10840,133 @@ class ProgramacaoPage(PageBase):
         cb["values"] = [o[1] for o in options]
         cb.current(0)
 
-        state = {"idx": 0}
+        preview_state = {"idx": 0, "printer": self._resolve_romaneio_active_printer()}
+        presets = self._romaneio_preset_catalog()
+        preset_by_label = {v["label"]: k for k, v in presets.items()}
+        preset_var = tk.StringVar()
+        profile_vars = {
+            "paper_width_mm": tk.StringVar(),
+            "via_height_mm": tk.StringVar(),
+            "vias_por_pagina": tk.StringVar(),
+            "margin_left_mm": tk.StringVar(),
+            "margin_top_mm": tk.StringVar(),
+            "offset_x_mm": tk.StringVar(),
+            "offset_y_mm": tk.StringVar(),
+            "layout_scale_pct": tk.StringVar(),
+        }
+
+        def _current_printer():
+            return dict(preview_state.get("printer") or {})
+
+        def _current_profile() -> dict:
+            raw = {
+                "preset_key": preset_by_label.get(preset_var.get()) or self._guess_romaneio_preset(_current_printer()),
+                "paper_width_mm": profile_vars["paper_width_mm"].get(),
+                "via_height_mm": profile_vars["via_height_mm"].get(),
+                "vias_por_pagina": profile_vars["vias_por_pagina"].get(),
+                "margin_left_mm": profile_vars["margin_left_mm"].get(),
+                "margin_right_mm": profile_vars["margin_left_mm"].get(),
+                "margin_top_mm": profile_vars["margin_top_mm"].get(),
+                "margin_bottom_mm": profile_vars["margin_top_mm"].get(),
+                "offset_x_mm": profile_vars["offset_x_mm"].get(),
+                "offset_y_mm": profile_vars["offset_y_mm"].get(),
+                "layout_scale_pct": profile_vars["layout_scale_pct"].get(),
+            }
+            return self._normalize_romaneio_print_profile(raw, _current_printer())
+
+        def _apply_profile(profile: dict):
+            prof = self._normalize_romaneio_print_profile(profile, _current_printer())
+            preset_var.set(str((presets.get(prof.get("preset_key")) or {}).get("label") or ""))
+            profile_vars["paper_width_mm"].set(f"{safe_float(prof.get('paper_width_mm'), 0.0):.1f}")
+            profile_vars["via_height_mm"].set(f"{safe_float(prof.get('via_height_mm'), 0.0):.1f}")
+            profile_vars["vias_por_pagina"].set(str(safe_int(prof.get("vias_por_pagina"), 2)))
+            profile_vars["margin_left_mm"].set(f"{safe_float(prof.get('margin_left_mm'), 0.0):.1f}")
+            profile_vars["margin_top_mm"].set(f"{safe_float(prof.get('margin_top_mm'), 0.0):.1f}")
+            profile_vars["offset_x_mm"].set(f"{safe_float(prof.get('offset_x_mm'), 0.0):.1f}")
+            profile_vars["offset_y_mm"].set(f"{safe_float(prof.get('offset_y_mm'), 0.0):.1f}")
+            profile_vars["layout_scale_pct"].set(str(safe_int(prof.get("layout_scale_pct"), 100)))
+
+        def _update_printer_info():
+            return None
+
+        render_job = {"id": None}
 
         def _render():
-            idx = state["idx"]
-            item = itens[idx]
-            w = max(preview.winfo_width(), 900)
-            h = max(preview.winfo_height(), 620)
-            self._draw_romaneio_preview_on_canvas(preview, w, h, codigo, meta, item, vias_var.get())
+            render_job["id"] = None
+            item = itens[preview_state["idx"]]
+            self._draw_romaneio_preview_on_canvas(
+                preview,
+                max(preview.winfo_width(), 900),
+                max(preview.winfo_height(), 620),
+                codigo,
+                meta,
+                item,
+                vias_var.get(),
+                layout_profile=_current_profile(),
+                printer=_current_printer(),
+            )
+            _update_printer_info()
+
+        def _schedule_render(*_):
+            if render_job["id"]:
+                try:
+                    win.after_cancel(render_job["id"])
+                except Exception:
+                    logging.debug("Falha ignorada")
+            render_job["id"] = win.after(120, _render)
 
         def _on_sel(_e=None):
             pos = cb.current()
             if pos < 0:
                 return
-            state["idx"] = options[pos][0]
-            _render()
+            preview_state["idx"] = options[pos][0]
+            _schedule_render()
 
         def _prev():
-            if state["idx"] <= 0:
+            if preview_state["idx"] <= 0:
                 return
-            state["idx"] -= 1
-            cb.current(state["idx"])
-            _render()
+            preview_state["idx"] -= 1
+            cb.current(preview_state["idx"])
+            _schedule_render()
 
         def _next():
-            if state["idx"] >= len(itens) - 1:
+            if preview_state["idx"] >= len(itens) - 1:
                 return
-            state["idx"] += 1
-            cb.current(state["idx"])
-            _render()
+            preview_state["idx"] += 1
+            cb.current(preview_state["idx"])
+            _schedule_render()
+
+        def _save_profile():
+            saved = self._save_romaneio_print_profile(_current_printer(), _current_profile())
+            _apply_profile(saved)
+            _update_printer_info()
+            messagebox.showinfo("Romaneios", "Perfil da impressora salvo para os romaneios.", parent=win)
+
+        def _restore_default():
+            _apply_profile(self._default_romaneio_print_profile(_current_printer()))
+            _schedule_render()
+
+        def _apply_preset(_e=None):
+            preset_key = preset_by_label.get(preset_var.get())
+            if not preset_key:
+                return
+            prof = dict(presets.get(preset_key) or {})
+            prof["preset_key"] = preset_key
+            _apply_profile(self._normalize_romaneio_print_profile(prof, _current_printer()))
+            _schedule_render()
+
+        def _on_apply_setup(printer_sel, profile_sel):
+            preview_state["printer"] = dict(printer_sel or {})
+            _apply_profile(profile_sel)
+            _schedule_render()
+
+        def _open_setup():
+            self._abrir_configuracao_impressora_romaneio(
+                parent=win,
+                printer=_current_printer(),
+                profile=_current_profile(),
+                on_apply=_on_apply_setup,
+            )
 
         def _export_pdf():
             path = filedialog.asksaveasfilename(
@@ -9536,27 +10978,162 @@ class ProgramacaoPage(PageBase):
             if not path:
                 return
             try:
-                self._gerar_pdf_romaneios(path, codigo, itens, meta)
-                messagebox.showinfo("OK", f"Romaneios gerados com sucesso!\n\nArquivo: {os.path.basename(path)}")
+                profile = _current_profile()
+                self._gerar_pdf_romaneios(path, codigo, itens, meta, layout_profile=profile)
+                messagebox.showinfo(
+                    "OK",
+                    f"Romaneios gerados com sucesso!\n\nArquivo: {os.path.basename(path)}\nPerfil: {self._romaneio_profile_summary(profile)}",
+                    parent=win,
+                )
             except Exception as e:
-                messagebox.showerror("ERRO", f"Erro ao gerar romaneios: {str(e)}")
+                messagebox.showerror("ERRO", f"Erro ao gerar romaneios: {str(e)}", parent=win)
 
         def _imprimir():
-            self._imprimir_romaneios(codigo, itens, meta, parent=win)
+            self._imprimir_romaneios(codigo, itens, meta, parent=win, layout_profile=_current_profile())
 
-        ttk.Label(top, text="Folha: formulário contínuo 240 x 279,4 mm", style="CardLabel.TLabel").pack(side="left", padx=(18, 0))
-        ttk.Button(top, text="\U0001F5A8 Imprimir", style="Primary.TButton", command=_imprimir).pack(side="right")
+        def _spin_group(frame, label, var, from_, to_, inc, width=7):
+            holder = ttk.Frame(frame, style="Card.TFrame")
+            ttk.Label(holder, text=label, style="CardLabel.TLabel").pack(side="left", padx=(0, 4))
+            sp = ttk.Spinbox(holder, from_=from_, to=to_, increment=inc, width=width, textvariable=var)
+            sp.pack(side="left")
+            sp.bind("<KeyRelease>", _schedule_render)
+            sp.bind("<<Increment>>", _schedule_render)
+            sp.bind("<<Decrement>>", _schedule_render)
+            return holder, sp
 
-        ttk.Button(bottom, text="Anterior", style="Ghost.TButton", command=_prev).pack(side="left")
-        ttk.Button(bottom, text="Proximo", style="Ghost.TButton", command=_next).pack(side="left", padx=8)
-        ttk.Button(bottom, text="GERAR PDF", style="Primary.TButton", command=_export_pdf).pack(side="right")
-        ttk.Button(bottom, text="IMPRIMIR", style="Ghost.TButton", command=_imprimir).pack(side="right", padx=(0, 8))
-        ttk.Button(bottom, text="Fechar", style="Danger.TButton", command=win.destroy).pack(side="right", padx=8)
+        control_groups = []
+
+        def _add_control_group(widget, span=1):
+            control_groups.append((widget, span))
+            return widget
+
+        preset_group = ttk.Frame(controls_wrap, style="Card.TFrame")
+        ttk.Label(preset_group, text="Preset:", style="CardLabel.TLabel").pack(side="left", padx=(0, 4))
+        cb_preset = ttk.Combobox(preset_group, state="readonly", width=28, textvariable=preset_var)
+        cb_preset["values"] = list(preset_by_label.keys())
+        cb_preset.pack(side="left", fill="x", expand=True)
+        cb_preset.bind("<<ComboboxSelected>>", _apply_preset)
+        _add_control_group(preset_group, span=2)
+        _add_control_group(_spin_group(controls_wrap, "Largura", profile_vars["paper_width_mm"], 140, 330, 0.5)[0])
+        _add_control_group(_spin_group(controls_wrap, "Alt. via", profile_vars["via_height_mm"], 70, 210, 0.5)[0])
+        _add_control_group(_spin_group(controls_wrap, "Vias", profile_vars["vias_por_pagina"], 1, 2, 1, width=5)[0])
+        _add_control_group(_spin_group(controls_wrap, "Margem", profile_vars["margin_left_mm"], 0, 30, 0.5)[0])
+        _add_control_group(_spin_group(controls_wrap, "Topo", profile_vars["margin_top_mm"], 0, 30, 0.5)[0])
+        _add_control_group(_spin_group(controls_wrap, "X", profile_vars["offset_x_mm"], -30, 30, 0.5)[0])
+        _add_control_group(_spin_group(controls_wrap, "Y", profile_vars["offset_y_mm"], -30, 30, 0.5)[0])
+        _add_control_group(_spin_group(controls_wrap, "Escala %", profile_vars["layout_scale_pct"], 70, 130, 1, width=6)[0])
+
+        _apply_profile(self._get_romaneio_print_profile(preview_state["printer"]))
+        _update_printer_info()
+
+        btn_top_print.configure(command=_imprimir)
+        btn_restore.configure(command=_restore_default)
+        btn_save_profile.configure(command=_save_profile)
+        btn_open_setup.configure(command=_open_setup)
+
+        btn_prev = ttk.Button(bottom_nav, text="Anterior", style="Ghost.TButton", command=_prev)
+        btn_prev.grid(row=0, column=0, sticky="ew")
+        btn_next = ttk.Button(bottom_nav, text="Proximo", style="Ghost.TButton", command=_next)
+        btn_next.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        bottom_nav.grid_columnconfigure(0, weight=1)
+        bottom_nav.grid_columnconfigure(1, weight=1)
+
+        btn_close = ttk.Button(bottom_actions, text="Fechar", style="Danger.TButton", command=win.destroy)
+        btn_close.grid(row=0, column=0, sticky="ew")
+        btn_print = ttk.Button(bottom_actions, text="IMPRIMIR", style="Ghost.TButton", command=_imprimir)
+        btn_print.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        btn_pdf = ttk.Button(bottom_actions, text="GERAR PDF", style="Primary.TButton", command=_export_pdf)
+        btn_pdf.grid(row=0, column=2, sticky="ew", padx=(8, 0))
+        bottom_actions.grid_columnconfigure(0, weight=1)
+        bottom_actions.grid_columnconfigure(1, weight=1)
+        bottom_actions.grid_columnconfigure(2, weight=1)
+
+        def _reflow_controls(avail_width: int):
+            if avail_width >= 1750:
+                total_units = 6
+            elif avail_width >= 1220:
+                total_units = 5
+            elif avail_width >= 980:
+                total_units = 4
+            else:
+                total_units = 2
+
+            for col in range(12):
+                controls_wrap.grid_columnconfigure(col, weight=0)
+            for col in range(total_units):
+                controls_wrap.grid_columnconfigure(col, weight=1, uniform="romaneio_controls")
+
+            row = 0
+            col = 0
+            for widget, span in control_groups:
+                widget.grid_forget()
+                current_span = min(max(span, 1), total_units)
+                if col and (col + current_span) > total_units:
+                    row += 1
+                    col = 0
+                widget.grid(row=row, column=col, columnspan=current_span, sticky="ew", padx=(0, 10), pady=(0, 8))
+                col += current_span
+
+        def _apply_responsive_layout(*_):
+            width = max(win.winfo_width(), shell.winfo_width(), 960)
+
+            top_left.grid_forget()
+            top_actions.grid_forget()
+            via_frame.grid_forget()
+            printer_actions.grid_forget()
+            bottom_nav.grid_forget()
+            bottom_actions.grid_forget()
+
+            for col in range(3):
+                selector_row.grid_columnconfigure(col, weight=0)
+            selector_row.grid_columnconfigure(1, weight=1)
+
+            if width >= 1500:
+                top.grid_columnconfigure(0, weight=1)
+                top.grid_columnconfigure(1, weight=0)
+                top_left.grid(row=0, column=0, sticky="ew", padx=(0, 12))
+                top_actions.grid(row=0, column=1, sticky="ne")
+                via_frame.grid(row=0, column=2, sticky="w", padx=(14, 0))
+                hint_label.grid_configure(row=1, column=0, sticky="ew", pady=(8, 0))
+            elif width >= 1220:
+                top.grid_columnconfigure(0, weight=1)
+                top.grid_columnconfigure(1, weight=0)
+                top_left.grid(row=0, column=0, sticky="ew", padx=(0, 12))
+                top_actions.grid(row=0, column=1, sticky="ne")
+                via_frame.grid(row=0, column=2, sticky="w", padx=(14, 0))
+                hint_label.grid_configure(row=1, column=0, sticky="ew", pady=(8, 0))
+            else:
+                top.grid_columnconfigure(0, weight=1)
+                top.grid_columnconfigure(1, weight=0)
+                top_left.grid(row=0, column=0, sticky="ew")
+                top_actions.grid(row=1, column=0, sticky="w", pady=(10, 0))
+                via_frame.grid(row=1, column=1, sticky="w", pady=(8, 0))
+                hint_label.grid_configure(row=2, column=0, sticky="ew", pady=(8, 0))
+
+            hint_label.configure(wraplength=max(width - 280, 320))
+
+            if width >= 1180:
+                printer_actions.grid(row=0, column=0, sticky="e")
+            else:
+                printer_actions.grid(row=0, column=0, sticky="w")
+
+            if width >= 1160:
+                bottom_nav.grid(row=0, column=0, sticky="w")
+                bottom_actions.grid(row=0, column=1, sticky="e")
+            else:
+                bottom_nav.grid(row=0, column=0, sticky="ew")
+                bottom_actions.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+
+            _reflow_controls(width - 32)
 
         cb.bind("<<ComboboxSelected>>", _on_sel)
-        vias_var.trace_add("write", lambda *_: _render())
-        preview.bind("<Configure>", lambda _e: _render())
-        _render()
+        vias_var.trace_add("write", _schedule_render)
+        for var in profile_vars.values():
+            var.trace_add("write", _schedule_render)
+        preview.bind("<Configure>", lambda _e: _schedule_render())
+        win.bind("<Configure>", _apply_responsive_layout, add="+")
+        _apply_responsive_layout()
+        _schedule_render()
 
     def imprimir_romaneios_programacao(self, codigo_override=None):
         if not require_reportlab():
@@ -16759,6 +18336,339 @@ class DespesasPage(PageBase):
 
             def _draw_retorno_sheet():
                 nonlocal y
+                ctx_ret = _build_retorno_operacional_context(prog)
+                if not bool(ctx_ret.get("ok")):
+                    return
+
+                linhas_ret = [
+                    (
+                        row["cod"],
+                        row["cliente"][:24],
+                        row["st"][:10],
+                        row["cx"],
+                        row["med"],
+                        row["kg"],
+                        row["preco"],
+                        row["valor"],
+                        row["mort"],
+                        row["div"],
+                    )
+                    for row in (ctx_ret.get("linhas") or [])
+                ]
+                ocorrencias_ret = [
+                    (
+                        row["cliente"][:20],
+                        row["st"][:10],
+                        row["cancel"],
+                        row["alter"],
+                        row["para"][:14],
+                        row["motivo"][:28],
+                        row["aut"][:14],
+                    )
+                    for row in (ctx_ret.get("ocorrencias") or [])
+                ]
+                transfer_ret = [
+                    (
+                        str(row.get("tipo") or "-")[:8],
+                        str(row.get("status") or "-")[:10],
+                        str(row.get("rota_ref") or "-")[:12],
+                        str(row.get("pedido_ref") or "-")[:20],
+                        f"{safe_int(row.get('qtd'), 0)}/{safe_int(row.get('convertida'), 0)}/{safe_int(row.get('saldo'), 0)}",
+                        str(row.get("detalhe") or "-")[:40],
+                    )
+                    for row in (ctx_ret.get("transferencias") or [])
+                ]
+                eventos_ret = [
+                    (
+                        str(row.get("quando") or "-")[:14],
+                        str(row.get("cliente") or "-")[:28],
+                        str(row.get("st") or "-")[:10],
+                        str(row.get("cx") or "0")[:6],
+                        str(row.get("kg") or "0,00")[:9],
+                        str(row.get("mort") or "0")[:7],
+                        str(row.get("detalhe") or "-")[:38],
+                    )
+                    for row in (ctx_ret.get("eventos") or [])
+                ]
+
+                data_saida_ret = ctx_ret.get("data_saida") or ""
+                hora_saida_ret = ctx_ret.get("hora_saida") or ""
+                data_chegada_ret = ctx_ret.get("data_chegada") or ""
+                hora_chegada_ret = ctx_ret.get("hora_chegada") or ""
+
+                c.showPage()
+                y = height - top
+                c.setFont("Helvetica-Bold", 14)
+                c.drawString(left, y, f"FOLHA DE RETORNO OPERACIONAL - PROGRAMACAO {prog}")
+                y -= 8 * mm
+
+                c.setFont("Helvetica", 9)
+                draw_kv(col1_x, y, "Motorista", str(ctx_ret.get("motorista") or motorista), col1_w)
+                draw_kv(col2_x, y, "Veiculo", str(ctx_ret.get("veiculo") or veiculo), col2_w)
+                y -= line_h
+                draw_kv(col1_x, y, "Equipe", str(ctx_ret.get("equipe_txt") or equipe_txt), col1_w)
+                draw_kv(col2_x, y, "NF", str(ctx_ret.get("nf") or nf), col2_w)
+                y -= line_h
+                draw_kv(col1_x, y, "Local Rota", str(ctx_ret.get("local_rota") or local_rota), col1_w)
+                draw_kv(col2_x, y, "Carregou em", str(ctx_ret.get("local_carreg") or local_carreg), col2_w)
+                y -= line_h
+                draw_kv(col1_x, y, "Saida", f"{data_saida_ret} {hora_saida_ret}".strip(), col1_w)
+                draw_kv(col2_x, y, "Chegada", f"{data_chegada_ret} {hora_chegada_ret}".strip(), col2_w)
+                y -= 6 * mm
+
+                c.setFont("Helvetica", 8)
+                resumo_carga = (
+                    f"KG NF {_retorno_fmt_decimal(ctx_ret.get('nf_kg'), 2)} | "
+                    f"KG carregado {_retorno_fmt_decimal(ctx_ret.get('kg_carregado'), 2)} | "
+                    f"Saldo NF {_retorno_fmt_decimal(ctx_ret.get('saldo_nf'), 2)} | "
+                    f"Aves/CX {safe_int(ctx_ret.get('aves_por_caixa'), 0)} | "
+                    f"CX final {safe_int(ctx_ret.get('caixa_final'), 0)}"
+                )
+                c.drawString(left, y, _clip_width(resumo_carga, width - left - right, "Helvetica", 8))
+                y -= 4.2 * mm
+                medias_linha = f"Medias lancadas: {str(ctx_ret.get('medias_lancadas_txt') or '-')}"
+                if ctx_ret.get("inicio_carregamento") or ctx_ret.get("fim_carregamento"):
+                    medias_linha += (
+                        f" | Inicio {ctx_ret.get('inicio_carregamento') or '-'}"
+                        f" | Fim {ctx_ret.get('fim_carregamento') or '-'}"
+                    )
+                c.drawString(left, y, _clip_width(medias_linha, width - left - right, "Helvetica", 8))
+                y -= 7 * mm
+
+                box_gap = 4 * mm
+                box_w = (table_w - (box_gap * 3)) / 4.0
+                box_h = 13 * mm
+
+                def _summary_box(x, y_top, titulo, valor):
+                    c.rect(x, y_top - box_h, box_w, box_h, stroke=1, fill=0)
+                    c.setFont("Helvetica-Bold", 8)
+                    c.drawString(x + 2 * mm, y_top - 4.5 * mm, titulo)
+                    c.setFont("Helvetica", 11)
+                    c.drawRightString(x + box_w - 2 * mm, y_top - 9.5 * mm, valor)
+
+                _summary_box(left, y, "Clientes", str(safe_int(ctx_ret.get("tot_clientes"), 0)))
+                _summary_box(left + box_w + box_gap, y, "Entregues/Cancel.", f"{safe_int(ctx_ret.get('tot_entregues'), 0)}/{safe_int(ctx_ret.get('tot_cancelados'), 0)}")
+                _summary_box(left + ((box_w + box_gap) * 2), y, "CX Carreg./Entreg.", f"{safe_int(ctx_ret.get('caixas_carregadas'), 0)}/{safe_int(ctx_ret.get('tot_cx_ent'), 0)}")
+                _summary_box(left + ((box_w + box_gap) * 3), y, "KG Carreg./Entreg.", f"{_retorno_fmt_decimal(ctx_ret.get('kg_carregado'), 2)}/{_retorno_fmt_decimal(ctx_ret.get('kg_entregue_resumo'), 2)}")
+                y -= (box_h + 6 * mm)
+
+                _summary_box(left, y, "Media Oper.", _retorno_fmt_decimal(ctx_ret.get('media_carregada'), 3))
+                _summary_box(left + box_w + box_gap, y, "Mortalidade", f"{safe_int(ctx_ret.get('tot_mort_aves'), 0)} / {_retorno_fmt_decimal(ctx_ret.get('tot_mort_kg'), 2)}kg")
+                _summary_box(left + ((box_w + box_gap) * 2), y, "Valor Entregue", self._fmt_money(safe_float(ctx_ret.get("tot_valor"), 0.0)))
+                _summary_box(left + ((box_w + box_gap) * 3), y, "Diverg. Peso", str(safe_int(ctx_ret.get("divergencias"), 0)))
+                y -= (box_h + 7 * mm)
+
+                c.setFont("Helvetica-Bold", 10)
+                c.drawString(left, y, "ENTREGAS POR CLIENTE")
+                y -= 5.5 * mm
+
+                row_h_ret = 5.8 * mm
+                col_cod_ret = table_w * 0.08
+                col_cli_ret = table_w * 0.21
+                col_st_ret = table_w * 0.11
+                col_cx_ret = table_w * 0.08
+                col_med_ret = table_w * 0.08
+                col_kg_ret = table_w * 0.10
+                col_preco_ret = table_w * 0.10
+                col_val_ret = table_w * 0.12
+                col_mort_ret = table_w * 0.08
+                col_div_ret = table_w - sum([col_cod_ret, col_cli_ret, col_st_ret, col_cx_ret, col_med_ret, col_kg_ret, col_preco_ret, col_val_ret, col_mort_ret])
+
+                x_cod_ret = table_x
+                x_cli_ret = x_cod_ret + col_cod_ret
+                x_st_ret = x_cli_ret + col_cli_ret
+                x_cx_ret = x_st_ret + col_st_ret
+                x_med_ret = x_cx_ret + col_cx_ret
+                x_kg_ret = x_med_ret + col_med_ret
+                x_preco_ret = x_kg_ret + col_kg_ret
+                x_val_ret = x_preco_ret + col_preco_ret
+                x_mort_ret = x_val_ret + col_val_ret
+                x_div_ret = x_mort_ret + col_mort_ret
+
+                def _draw_ret_header(title_suffix=""):
+                    nonlocal y
+                    c.setFont("Helvetica-Bold", 7)
+                    c.rect(table_x, y - row_h_ret + 1, table_w, row_h_ret, stroke=1, fill=0)
+                    c.drawString(x_cod_ret + 2, y - row_h_ret + 3, "COD")
+                    c.drawString(x_cli_ret + 2, y - row_h_ret + 3, "CLIENTE")
+                    c.drawString(x_st_ret + 2, y - row_h_ret + 3, "STATUS")
+                    c.drawRightString(x_cx_ret + col_cx_ret - 2, y - row_h_ret + 3, "CX")
+                    c.drawRightString(x_med_ret + col_med_ret - 2, y - row_h_ret + 3, "MEDIA")
+                    c.drawRightString(x_kg_ret + col_kg_ret - 2, y - row_h_ret + 3, "KG")
+                    c.drawRightString(x_preco_ret + col_preco_ret - 2, y - row_h_ret + 3, "PRECO")
+                    c.drawRightString(x_val_ret + col_val_ret - 2, y - row_h_ret + 3, "VALOR")
+                    c.drawRightString(x_mort_ret + col_mort_ret - 2, y - row_h_ret + 3, "MORT")
+                    c.drawRightString(x_div_ret + col_div_ret - 2, y - row_h_ret + 3, "DIV")
+                    y -= row_h_ret
+                    c.setFont("Helvetica", 7)
+                    if title_suffix:
+                        c.setFont("Helvetica-Bold", 12)
+                        c.drawString(left, height - top, title_suffix)
+                        c.setFont("Helvetica", 7)
+
+                _draw_ret_header()
+                if not linhas_ret:
+                    c.rect(table_x, y - row_h_ret + 1, table_w, row_h_ret, stroke=1, fill=0)
+                    c.drawString(x_cod_ret + 2, y - row_h_ret + 3, "SEM ENTREGAS REGISTRADAS")
+                    y -= row_h_ret
+                else:
+                    for row in linhas_ret:
+                        if y < bottom + 58 * mm:
+                            c.showPage()
+                            y = height - top - 8 * mm
+                            c.setFont("Helvetica-Bold", 12)
+                            c.drawString(left, height - top, f"FOLHA DE RETORNO OPERACIONAL - PROGRAMACAO {prog} (CONT.)")
+                            _draw_ret_header()
+                        c.rect(table_x, y - row_h_ret + 1, table_w, row_h_ret, stroke=1, fill=0)
+                        c.drawString(x_cod_ret + 2, y - row_h_ret + 3, _clip_width(row[0], col_cod_ret - 4, "Helvetica", 7))
+                        c.drawString(x_cli_ret + 2, y - row_h_ret + 3, _clip_width(row[1], col_cli_ret - 4, "Helvetica", 7))
+                        c.drawString(x_st_ret + 2, y - row_h_ret + 3, _clip_width(row[2], col_st_ret - 4, "Helvetica", 7))
+                        c.drawRightString(x_cx_ret + col_cx_ret - 2, y - row_h_ret + 3, row[3])
+                        c.drawRightString(x_med_ret + col_med_ret - 2, y - row_h_ret + 3, row[4].replace(".", ","))
+                        c.drawRightString(x_kg_ret + col_kg_ret - 2, y - row_h_ret + 3, row[5].replace(".", ","))
+                        c.drawRightString(x_preco_ret + col_preco_ret - 2, y - row_h_ret + 3, row[6].replace(".", ","))
+                        c.drawRightString(x_val_ret + col_val_ret - 2, y - row_h_ret + 3, row[7].replace(".", ","))
+                        c.drawRightString(x_mort_ret + col_mort_ret - 2, y - row_h_ret + 3, row[8].replace(".", ","))
+                        c.drawRightString(x_div_ret + col_div_ret - 2, y - row_h_ret + 3, row[9].replace(".", ","))
+                        y -= row_h_ret
+
+                y -= 6 * mm
+                c.setFont("Helvetica-Bold", 10)
+                c.drawString(left, y, "OCORRENCIAS / AJUSTES")
+                y -= 5.5 * mm
+
+                row_h_occ = 5.8 * mm
+                occ_cols = [0.21, 0.10, 0.06, 0.06, 0.15, 0.26, 0.16]
+                occ_ws = [table_w * v for v in occ_cols]
+                occ_ws[-1] = table_w - sum(occ_ws[:-1])
+                x_occ = [table_x]
+                for wv in occ_ws[:-1]:
+                    x_occ.append(x_occ[-1] + wv)
+
+                def _draw_occ_header():
+                    nonlocal y
+                    c.setFont("Helvetica-Bold", 7)
+                    c.rect(table_x, y - row_h_occ + 1, table_w, row_h_occ, stroke=1, fill=0)
+                    headers = ["CLIENTE", "STATUS", "CANC", "ALT", "PARA", "MOTIVO", "AUTORIZOU"]
+                    for idx_h, head in enumerate(headers):
+                        c.drawString(x_occ[idx_h] + 2, y - row_h_occ + 3, head)
+                    y -= row_h_occ
+                    c.setFont("Helvetica", 7)
+
+                _draw_occ_header()
+                if not ocorrencias_ret:
+                    c.rect(table_x, y - row_h_occ + 1, table_w, row_h_occ, stroke=1, fill=0)
+                    c.drawString(table_x + 2, y - row_h_occ + 3, "SEM OCORRENCIAS DE CANCELAMENTO/ALTERACAO")
+                    y -= row_h_occ
+                else:
+                    for row in ocorrencias_ret:
+                        if y < bottom + 20 * mm:
+                            c.showPage()
+                            y = height - top - 8 * mm
+                            c.setFont("Helvetica-Bold", 12)
+                            c.drawString(left, height - top, f"OCORRENCIAS - RETORNO OPERACIONAL {prog} (CONT.)")
+                            _draw_occ_header()
+                        c.rect(table_x, y - row_h_occ + 1, table_w, row_h_occ, stroke=1, fill=0)
+                        for idx_v, value in enumerate(row):
+                            txt = _clip_width(str(value), occ_ws[idx_v] - 4, "Helvetica", 7)
+                            if idx_v in {2, 3}:
+                                c.drawCentredString(x_occ[idx_v] + (occ_ws[idx_v] / 2.0), y - row_h_occ + 3, txt)
+                            else:
+                                c.drawString(x_occ[idx_v] + 2, y - row_h_occ + 3, txt)
+                        y -= row_h_occ
+
+                y -= 6 * mm
+                c.setFont("Helvetica-Bold", 10)
+                c.drawString(left, y, "TRANSFERENCIAS / CONVERSOES")
+                y -= 5.5 * mm
+
+                row_h_tr = 5.8 * mm
+                tr_cols = [0.10, 0.11, 0.14, 0.20, 0.12, 0.33]
+                tr_ws = [table_w * v for v in tr_cols]
+                tr_ws[-1] = table_w - sum(tr_ws[:-1])
+                x_tr = [table_x]
+                for wv in tr_ws[:-1]:
+                    x_tr.append(x_tr[-1] + wv)
+
+                def _draw_tr_header():
+                    nonlocal y
+                    c.setFont("Helvetica-Bold", 7)
+                    c.rect(table_x, y - row_h_tr + 1, table_w, row_h_tr, stroke=1, fill=0)
+                    headers = ["TIPO", "STATUS", "ROTA", "PEDIDO", "QTD", "DETALHE"]
+                    for idx_h, head in enumerate(headers):
+                        c.drawString(x_tr[idx_h] + 2, y - row_h_tr + 3, head)
+                    y -= row_h_tr
+                    c.setFont("Helvetica", 7)
+
+                _draw_tr_header()
+                if not transfer_ret:
+                    c.rect(table_x, y - row_h_tr + 1, table_w, row_h_tr, stroke=1, fill=0)
+                    c.drawString(table_x + 2, y - row_h_tr + 3, "SEM TRANSFERENCIAS REGISTRADAS")
+                    y -= row_h_tr
+                else:
+                    for row in transfer_ret:
+                        if y < bottom + 20 * mm:
+                            c.showPage()
+                            y = height - top - 8 * mm
+                            c.setFont("Helvetica-Bold", 12)
+                            c.drawString(left, height - top, f"TRANSFERENCIAS - RETORNO OPERACIONAL {prog} (CONT.)")
+                            _draw_tr_header()
+                        c.rect(table_x, y - row_h_tr + 1, table_w, row_h_tr, stroke=1, fill=0)
+                        for idx_v, value in enumerate(row):
+                            txt = _clip_width(str(value), tr_ws[idx_v] - 4, "Helvetica", 7)
+                            c.drawString(x_tr[idx_v] + 2, y - row_h_tr + 3, txt)
+                        y -= row_h_tr
+
+                y -= 6 * mm
+                c.setFont("Helvetica-Bold", 10)
+                c.drawString(left, y, "TRILHA OPERACIONAL APP")
+                y -= 5.5 * mm
+
+                row_h_evt = 5.8 * mm
+                evt_cols = [0.14, 0.23, 0.11, 0.07, 0.10, 0.08, 0.27]
+                evt_ws = [table_w * v for v in evt_cols]
+                evt_ws[-1] = table_w - sum(evt_ws[:-1])
+                x_evt = [table_x]
+                for wv in evt_ws[:-1]:
+                    x_evt.append(x_evt[-1] + wv)
+
+                def _draw_evt_header():
+                    nonlocal y
+                    c.setFont("Helvetica-Bold", 7)
+                    c.rect(table_x, y - row_h_evt + 1, table_w, row_h_evt, stroke=1, fill=0)
+                    headers = ["QUANDO", "CLIENTE/PEDIDO", "STATUS", "CX", "KG", "MORT", "DETALHE"]
+                    for idx_h, head in enumerate(headers):
+                        if idx_h in {3, 4, 5}:
+                            c.drawRightString(x_evt[idx_h] + evt_ws[idx_h] - 2, y - row_h_evt + 3, head)
+                        else:
+                            c.drawString(x_evt[idx_h] + 2, y - row_h_evt + 3, head)
+                    y -= row_h_evt
+                    c.setFont("Helvetica", 7)
+
+                _draw_evt_header()
+                if not eventos_ret:
+                    c.rect(table_x, y - row_h_evt + 1, table_w, row_h_evt, stroke=1, fill=0)
+                    c.drawString(table_x + 2, y - row_h_evt + 3, "SEM EVENTOS DETALHADOS DO APP")
+                    y -= row_h_evt
+                else:
+                    for row in eventos_ret:
+                        if y < bottom + 20 * mm:
+                            c.showPage()
+                            y = height - top - 8 * mm
+                            c.setFont("Helvetica-Bold", 12)
+                            c.drawString(left, height - top, f"TRILHA OPERACIONAL APP - {prog} (CONT.)")
+                            _draw_evt_header()
+                        c.rect(table_x, y - row_h_evt + 1, table_w, row_h_evt, stroke=1, fill=0)
+                        for idx_v, value in enumerate(row):
+                            txt = _clip_width(str(value), evt_ws[idx_v] - 4, "Helvetica", 7)
+                            if idx_v in {3, 4, 5}:
+                                c.drawRightString(x_evt[idx_v] + evt_ws[idx_v] - 2, y - row_h_evt + 3, txt)
+                            else:
+                                c.drawString(x_evt[idx_v] + 2, y - row_h_evt + 3, txt)
+                        y -= row_h_evt
+
+                return
+
                 meta_ret = fetch_programacao_meta_relatorio(prog)
                 _itens_ret_res = fetch_programacao_itens_contract(prog)
                 itens_ret = (
