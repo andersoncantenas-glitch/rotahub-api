@@ -18367,30 +18367,6 @@ class DespesasPage(PageBase):
                     )
                     for row in (ctx_ret.get("ocorrencias") or [])
                 ]
-                transfer_ret = [
-                    (
-                        str(row.get("tipo") or "-")[:8],
-                        str(row.get("status") or "-")[:10],
-                        str(row.get("rota_ref") or "-")[:12],
-                        str(row.get("pedido_ref") or "-")[:20],
-                        f"{safe_int(row.get('qtd'), 0)}/{safe_int(row.get('convertida'), 0)}/{safe_int(row.get('saldo'), 0)}",
-                        str(row.get("detalhe") or "-")[:40],
-                    )
-                    for row in (ctx_ret.get("transferencias") or [])
-                ]
-                eventos_ret = [
-                    (
-                        str(row.get("quando") or "-")[:14],
-                        str(row.get("cliente") or "-")[:28],
-                        str(row.get("st") or "-")[:10],
-                        str(row.get("cx") or "0")[:6],
-                        str(row.get("kg") or "0,00")[:9],
-                        str(row.get("mort") or "0")[:7],
-                        str(row.get("detalhe") or "-")[:38],
-                    )
-                    for row in (ctx_ret.get("eventos") or [])
-                ]
-
                 data_saida_ret = ctx_ret.get("data_saida") or ""
                 hora_saida_ret = ctx_ret.get("hora_saida") or ""
                 data_chegada_ret = ctx_ret.get("data_chegada") or ""
@@ -18576,96 +18552,6 @@ class DespesasPage(PageBase):
                             else:
                                 c.drawString(x_occ[idx_v] + 2, y - row_h_occ + 3, txt)
                         y -= row_h_occ
-
-                y -= 6 * mm
-                c.setFont("Helvetica-Bold", 10)
-                c.drawString(left, y, "TRANSFERENCIAS / CONVERSOES")
-                y -= 5.5 * mm
-
-                row_h_tr = 5.8 * mm
-                tr_cols = [0.10, 0.11, 0.14, 0.20, 0.12, 0.33]
-                tr_ws = [table_w * v for v in tr_cols]
-                tr_ws[-1] = table_w - sum(tr_ws[:-1])
-                x_tr = [table_x]
-                for wv in tr_ws[:-1]:
-                    x_tr.append(x_tr[-1] + wv)
-
-                def _draw_tr_header():
-                    nonlocal y
-                    c.setFont("Helvetica-Bold", 7)
-                    c.rect(table_x, y - row_h_tr + 1, table_w, row_h_tr, stroke=1, fill=0)
-                    headers = ["TIPO", "STATUS", "ROTA", "PEDIDO", "QTD", "DETALHE"]
-                    for idx_h, head in enumerate(headers):
-                        c.drawString(x_tr[idx_h] + 2, y - row_h_tr + 3, head)
-                    y -= row_h_tr
-                    c.setFont("Helvetica", 7)
-
-                _draw_tr_header()
-                if not transfer_ret:
-                    c.rect(table_x, y - row_h_tr + 1, table_w, row_h_tr, stroke=1, fill=0)
-                    c.drawString(table_x + 2, y - row_h_tr + 3, "SEM TRANSFERENCIAS REGISTRADAS")
-                    y -= row_h_tr
-                else:
-                    for row in transfer_ret:
-                        if y < bottom + 20 * mm:
-                            c.showPage()
-                            y = height - top - 8 * mm
-                            c.setFont("Helvetica-Bold", 12)
-                            c.drawString(left, height - top, f"TRANSFERENCIAS - RETORNO OPERACIONAL {prog} (CONT.)")
-                            _draw_tr_header()
-                        c.rect(table_x, y - row_h_tr + 1, table_w, row_h_tr, stroke=1, fill=0)
-                        for idx_v, value in enumerate(row):
-                            txt = _clip_width(str(value), tr_ws[idx_v] - 4, "Helvetica", 7)
-                            c.drawString(x_tr[idx_v] + 2, y - row_h_tr + 3, txt)
-                        y -= row_h_tr
-
-                y -= 6 * mm
-                c.setFont("Helvetica-Bold", 10)
-                c.drawString(left, y, "TRILHA OPERACIONAL APP")
-                y -= 5.5 * mm
-
-                row_h_evt = 5.8 * mm
-                evt_cols = [0.14, 0.23, 0.11, 0.07, 0.10, 0.08, 0.27]
-                evt_ws = [table_w * v for v in evt_cols]
-                evt_ws[-1] = table_w - sum(evt_ws[:-1])
-                x_evt = [table_x]
-                for wv in evt_ws[:-1]:
-                    x_evt.append(x_evt[-1] + wv)
-
-                def _draw_evt_header():
-                    nonlocal y
-                    c.setFont("Helvetica-Bold", 7)
-                    c.rect(table_x, y - row_h_evt + 1, table_w, row_h_evt, stroke=1, fill=0)
-                    headers = ["QUANDO", "CLIENTE/PEDIDO", "STATUS", "CX", "KG", "MORT", "DETALHE"]
-                    for idx_h, head in enumerate(headers):
-                        if idx_h in {3, 4, 5}:
-                            c.drawRightString(x_evt[idx_h] + evt_ws[idx_h] - 2, y - row_h_evt + 3, head)
-                        else:
-                            c.drawString(x_evt[idx_h] + 2, y - row_h_evt + 3, head)
-                    y -= row_h_evt
-                    c.setFont("Helvetica", 7)
-
-                _draw_evt_header()
-                if not eventos_ret:
-                    c.rect(table_x, y - row_h_evt + 1, table_w, row_h_evt, stroke=1, fill=0)
-                    c.drawString(table_x + 2, y - row_h_evt + 3, "SEM EVENTOS DETALHADOS DO APP")
-                    y -= row_h_evt
-                else:
-                    for row in eventos_ret:
-                        if y < bottom + 20 * mm:
-                            c.showPage()
-                            y = height - top - 8 * mm
-                            c.setFont("Helvetica-Bold", 12)
-                            c.drawString(left, height - top, f"TRILHA OPERACIONAL APP - {prog} (CONT.)")
-                            _draw_evt_header()
-                        c.rect(table_x, y - row_h_evt + 1, table_w, row_h_evt, stroke=1, fill=0)
-                        for idx_v, value in enumerate(row):
-                            txt = _clip_width(str(value), evt_ws[idx_v] - 4, "Helvetica", 7)
-                            if idx_v in {3, 4, 5}:
-                                c.drawRightString(x_evt[idx_v] + evt_ws[idx_v] - 2, y - row_h_evt + 3, txt)
-                            else:
-                                c.drawString(x_evt[idx_v] + 2, y - row_h_evt + 3, txt)
-                        y -= row_h_evt
 
                 return
 

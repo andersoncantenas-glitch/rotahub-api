@@ -1,3 +1,8 @@
+2026-04-24 09:48:40 - v4.4.2
+- Release automatizada (patch).
+- Versao anterior: v4.4.1.
+- PDF da prestacao voltou ao padrao de 3 folhas no desktop, removendo as secoes de transferencias/conversoes e trilha operacional app da impressao.
+
 2026-04-21 10:31:53 - v4.4.1
 - Release automatizada (patch).
 - Versao anterior: v4.4.0.
