@@ -17,13 +17,17 @@ Nunca reutilize o mesmo banco entre empresas.
 
 Configure no servico Render da empresa:
 
+- Tipo: `Web Service`
+- Plano: `starter` ou superior
 - `ROTA_DB=/var/data/empresa_nome.db`
 - `ROTA_SECRET=<segredo_forte_unico>`
 - `ROTA_CORS_ORIGINS=https://app-da-empresa.com` (ou vazio se nao usar web)
 
 Observacao:
 - Se nao houver dominio web, voce pode manter `ROTA_CORS_ORIGINS` vazio.
-- Para persistencia real, o servico deve ter Disk no Render.
+- Para persistencia real, o servico deve ter `Persistent Disk` montado em `/var/data`.
+- `Free web service` nao persiste SQLite local no Render. Em `restart`, `redeploy` ou `idle spin-down`, os dados locais podem ser perdidos.
+- Se quiser permanecer no plano free, a alternativa de persistencia no Render e usar `Render Postgres`, mas o projeto ainda nao esta migrado para isso.
 
 ### 2.2 Start Command
 
@@ -128,4 +132,3 @@ https://<url-da-api>/ping
 2. Confirmar `ROTA_SERVER_URL` e `ROTA_SECRET` da estacao.
 3. Confirmar `/ping` aponta para o banco da empresa atual.
 4. Limpar cache local do Desktop/celular e reabrir.
-

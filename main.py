@@ -2975,6 +2975,26 @@ def _parse_alteracao_campos(item: dict) -> tuple[str, str, str]:
     return para_quem or "-", motivo or "-", autorizado or "-"
 
 
+def _item_tem_ajuste_operacional(item: dict) -> bool:
+    item = item or {}
+    status_item = upper(str(item.get("status_pedido") or "PENDENTE").strip()) or "PENDENTE"
+    cx_prog = max(safe_int(item.get("qnt_caixas"), 0), 0)
+    cx_alt_raw = safe_int(item.get("caixas_atual"), 0)
+    preco_orig = _retorno_normalizar_preco(safe_float(item.get("preco"), 0.0))
+    preco_atual_raw = safe_float(item.get("preco_atual"), 0.0)
+    preco_final = _retorno_normalizar_preco(preco_atual_raw if preco_atual_raw > 0 else preco_orig)
+    alteracao_tipo = str(item.get("alteracao_tipo") or "").strip()
+    alteracao_detalhe = str(item.get("alteracao_detalhe") or "").strip()
+
+    return bool(
+        status_item == "ALTERADO"
+        or alteracao_tipo
+        or alteracao_detalhe
+        or (cx_alt_raw > 0 and cx_alt_raw != cx_prog)
+        or abs(preco_final - preco_orig) > 0.0001
+    )
+
+
 def _retorno_first_text(data: dict, *names: str) -> str:
     for name in names:
         if name not in data:
@@ -3378,15 +3398,7 @@ def _build_retorno_operacional_context(prog: str) -> dict:
         preco_final = _retorno_normalizar_preco(safe_float(item.get("preco_atual"), 0.0) or preco_orig)
         kg_orig = safe_float(item.get("kg"), 0.0)
         mort_aves = max(safe_int(item.get("mortalidade_aves"), 0), 0)
-        alterado = bool(
-            str(item.get("alterado_em") or "").strip()
-            or str(item.get("alterado_por") or "").strip()
-            or str(item.get("alteracao_tipo") or "").strip()
-            or str(item.get("alteracao_detalhe") or "").strip()
-            or status_item == "ALTERADO"
-            or (cx_alt > 0 and cx_alt != cx_prog)
-            or abs(preco_final - preco_orig) > 0.0001
-        )
+        alterado = _item_tem_ajuste_operacional(item)
 
         if status_item in status_cancelado:
             cx_ent = 0
@@ -3729,14 +3741,7 @@ def build_folha_retorno_operacional(prog: str) -> str:
         preco_final = safe_float(item.get("preco_atual"), 0.0) or preco_orig
         kg_orig = safe_float(item.get("kg"), 0.0)
         mort_aves = max(safe_int(item.get("mortalidade_aves"), 0), 0)
-        alterado = bool(
-            str(item.get("alterado_em") or "").strip()
-            or str(item.get("alterado_por") or "").strip()
-            or str(item.get("alteracao_tipo") or "").strip()
-            or str(item.get("alteracao_detalhe") or "").strip()
-            or (cx_alt > 0 and cx_alt != cx_prog)
-            or abs(preco_final - preco_orig) > 0.0001
-        )
+        alterado = _item_tem_ajuste_operacional(item)
 
         if status_item in status_cancelado:
             cx_ent = 0
@@ -15539,6 +15544,18 @@ class DespesasPage(PageBase):
                     self._set_ent(self.ent_km_rodado, km_rodado)
                     self._set_ent(self.ent_media, media_km_l)
                     self._set_ent(self.ent_custo_km, custo_km)
+                    self._set_cedulas_form(
+                        {
+                            200: safe_int(rota_api.get("ced_200_qtd"), 0),
+                            100: safe_int(rota_api.get("ced_100_qtd"), 0),
+                            50: safe_int(rota_api.get("ced_50_qtd"), 0),
+                            20: safe_int(rota_api.get("ced_20_qtd"), 0),
+                            10: safe_int(rota_api.get("ced_10_qtd"), 0),
+                            5: safe_int(rota_api.get("ced_5_qtd"), 0),
+                            2: safe_int(rota_api.get("ced_2_qtd"), 0),
+                        },
+                        safe_float(rota_api.get("valor_dinheiro"), 0.0),
+                    )
 
                     if hasattr(self, "txt_rota_obs") and self.txt_rota_obs:
                         try:
@@ -15759,6 +15776,18 @@ class DespesasPage(PageBase):
         self._set_ent(self.ent_km_rodado, km_rodado)
         self._set_ent(self.ent_media, media_km_l)
         self._set_ent(self.ent_custo_km, custo_km)
+        self._set_cedulas_form(
+            {
+                200: q200,
+                100: q100,
+                50: q50,
+                20: q20,
+                10: q10,
+                5: q5,
+                2: q2,
+            },
+            safe_float(valor_dinheiro, 0.0),
+        )
 
         if hasattr(self, "txt_rota_obs") and self.txt_rota_obs:
             try:
@@ -15803,6 +15832,25 @@ class DespesasPage(PageBase):
 
     def _set_ent(self, ent, val):
         self._safe_set_entry(ent, str(val if val is not None else ""))
+
+    def _set_cedulas_form(self, ced_qtd: dict, valor_dinheiro: float = 0.0):
+        total_calculado = 0.0
+        for ced in [200, 100, 50, 20, 10, 5, 2]:
+            qtd = safe_int((ced_qtd or {}).get(ced), 0)
+            total_calculado += qtd * float(ced)
+            ent = self.ced_entries.get(ced)
+            if ent:
+                self._safe_set_entry(ent, str(qtd))
+
+        total_exibicao = safe_float(valor_dinheiro, 0.0)
+        if total_exibicao <= 0 and total_calculado > 0:
+            total_exibicao = total_calculado
+        if hasattr(self, "ent_total_dinheiro") and self.ent_total_dinheiro:
+            self._safe_set_entry(
+                self.ent_total_dinheiro,
+                f"{total_exibicao:.2f}".replace(".", ","),
+            )
+        self._calc_valor_dinheiro()
 
     def _normalize_media_kg_ave(self, v) -> float:
         m = safe_float(v, 0.0)
@@ -17009,6 +17057,18 @@ class DespesasPage(PageBase):
             if not entry:
                 continue
             self._set_ent(entry, valor)
+        self._set_cedulas_form(
+            {
+                200: _pick("ced_200_qtd"),
+                100: _pick("ced_100_qtd"),
+                50: _pick("ced_50_qtd"),
+                20: _pick("ced_20_qtd"),
+                10: _pick("ced_10_qtd"),
+                5: _pick("ced_5_qtd"),
+                2: _pick("ced_2_qtd"),
+            },
+            safe_float(_pick("valor_dinheiro"), 0.0),
+        )
         self._refresh_nf_trade_summary()
 
     # =========================================================
@@ -17356,6 +17416,12 @@ class DespesasPage(PageBase):
             f"Finalizar prestacao de contas da rota {prog}?\n\n"
             "A programacao sera finalizada."
         ):
+            return
+        if not self._ensure_prestacao_saved_for_output(prog):
+            messagebox.showerror(
+                "ERRO",
+                "Nao foi possivel salvar litros, media e cedulas antes da finalizacao.",
+            )
             return
 
         try:
@@ -17885,6 +17951,12 @@ class DespesasPage(PageBase):
         if not prog:
             messagebox.showwarning("ATENCAO", "Selecione a Programacao primeiro.")
             return
+        if not self._ensure_prestacao_saved_for_output(prog):
+            messagebox.showerror(
+                "ERRO",
+                "Nao foi possivel salvar os dados atuais antes da pre-visualizacao.",
+            )
+            return
 
         relatorios = None
         if hasattr(self, "app") and hasattr(self.app, "pages"):
@@ -17911,6 +17983,21 @@ class DespesasPage(PageBase):
             except Exception:
                 logging.debug("Falha ignorada")
 
+    def _ensure_prestacao_saved_for_output(self, prog: str) -> bool:
+        prog_norm = upper(str(prog or "").strip())
+        current_norm = upper(str(getattr(self, "_current_programacao", "") or "").strip())
+        if not prog_norm or prog_norm != current_norm:
+            return True
+
+        try:
+            status = self._get_prestacao_status(prog_norm)
+        except Exception:
+            status = ""
+        if status == "FECHADA":
+            return True
+
+        return bool(self.salvar_tudo(show_feedback=False))
+
     def imprimir_resumo(self):
         if not require_reportlab():
             return
@@ -17927,6 +18014,12 @@ class DespesasPage(PageBase):
                 initialfile=f"DESPESAS_{prog}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
             )
             if not path_pdf:
+                return
+            if not self._ensure_prestacao_saved_for_output(prog):
+                messagebox.showerror(
+                    "ERRO",
+                    "Nao foi possivel salvar litros, media e cedulas antes de gerar o PDF.",
+                )
                 return
 
             from reportlab.pdfgen import canvas
@@ -18612,14 +18705,7 @@ class DespesasPage(PageBase):
                     )
                     mort_kg = mort_aves * media_cli_base if media_cli_base > 0 else 0.0
                     valor_total = max(kg_ent * preco_final, 0.0) if status_item not in status_cancelado else 0.0
-                    alterado = bool(
-                        str(item.get("alterado_em") or "").strip()
-                        or str(item.get("alterado_por") or "").strip()
-                        or str(item.get("alteracao_tipo") or "").strip()
-                        or str(item.get("alteracao_detalhe") or "").strip()
-                        or (cx_alt > 0 and cx_alt != cx_prog)
-                        or abs(preco_final - preco_orig) > 0.0001
-                    )
+                    alterado = _item_tem_ajuste_operacional(item)
                     delta_kg = kg_ent - kg_orig if kg_orig > 0 else 0.0
 
                     tot_cx_prog += cx_prog
@@ -19278,9 +19364,9 @@ class DespesasPage(PageBase):
                 lines.append(current)
         return lines
 
-    def salvar_tudo(self):
+    def salvar_tudo(self, show_feedback: bool = True):
         if not self._can_edit_current_prog():
-            return
+            return False
 
         prog = self._current_programacao
 
@@ -19386,21 +19472,25 @@ class DespesasPage(PageBase):
                     payload=payload_financeiro,
                 )
                 self.logger.info(f"Dados salvos via API para programação {prog}")
-                messagebox.showinfo("SUCESSO", "Todos os dados foram salvos com sucesso!")
+                if show_feedback:
+                    messagebox.showinfo("SUCESSO", "Todos os dados foram salvos com sucesso!")
                 self.set_status(f"STATUS: Dados salvos para {prog}")
                 self._refresh_km_insights()
                 self._refresh_nf_trade_summary()
-                return
+                return True
             except Exception as exc:
                 logging.debug("Falha ao salvar dados financeiros via API.", exc_info=True)
                 detalhe_api = _friendly_sync_error(exc, "Sem detalhes adicionais da API.")
-                messagebox.showerror(
-                    "ERRO",
-                    "Não foi possível salvar os dados financeiros na API central.\n\n"
-                    f"Detalhe da API: {detalhe_api}\n\n"
-                    "A gravação local foi bloqueada para evitar divergência entre servidor e desktop.",
-                )
-                return
+                if show_feedback:
+                    messagebox.showerror(
+                        "ERRO",
+                        "Não foi possível salvar os dados financeiros na API central.\n\n"
+                        f"Detalhe da API: {detalhe_api}\n\n"
+                        "A gravação local foi bloqueada para evitar divergência entre servidor e desktop.",
+                    )
+                else:
+                    self.set_status("STATUS: Falha ao salvar os dados financeiros antes da saida.")
+                return False
 
         try:
             with get_db() as conn:
@@ -19495,14 +19585,20 @@ class DespesasPage(PageBase):
                     )
 
             self.logger.info(f"Dados salvos para programação {prog}")
-            messagebox.showinfo("SUCESSO", "Todos os dados foram salvos com sucesso!")
+            if show_feedback:
+                messagebox.showinfo("SUCESSO", "Todos os dados foram salvos com sucesso!")
             self.set_status(f"STATUS: Dados salvos para {prog}")
             self._refresh_km_insights()
             self._refresh_nf_trade_summary()
+            return True
 
         except Exception as e:
             self.logger.error(f"Erro ao salvar dados: {str(e)}")
-            messagebox.showerror("ERRO", f"Erro ao salvar dados: {str(e)}")
+            if show_feedback:
+                messagebox.showerror("ERRO", f"Erro ao salvar dados: {str(e)}")
+            else:
+                self.set_status("STATUS: Falha ao salvar os dados antes da saida.")
+            return False
 
     # =========================================================
     # 7.9 EXPORTAR EXCEL (RELATÓRIO COMPLETO)

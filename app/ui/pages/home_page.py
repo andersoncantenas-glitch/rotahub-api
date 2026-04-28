@@ -16,6 +16,7 @@ from app.db.connection import get_db
 from app.services.api_client import _build_api_url, _call_api
 from app.services.motorista_service import bootstrap_sync_motoristas_api
 from app.context import AppContext
+from app.ui.components.legal_notice import build_developer_summary_text
 from app.ui.components.tree_helpers import enable_treeview_sorting, tree_insert_aligned
 from app.ui.components.page_base import PageBase
 from app.utils.async_ui import run_async_ui
@@ -321,8 +322,28 @@ class HomePage(PageBase):
         ttk.Label(support, text=wpp_txt, background="white", foreground="#2563EB", font=("Segoe UI", 9, "underline")).grid(row=1, column=0, sticky="w")
         ttk.Label(support, text=mail_txt, background="white", foreground="#111827", font=("Segoe UI", 9)).grid(row=2, column=0, sticky="w")
 
+        developer = ttk.Frame(panel, style="CardInset.TFrame", padding=(10, 8))
+        developer.grid(row=5, column=0, sticky="ew", pady=(10, 0))
+        developer.grid_columnconfigure(0, weight=1)
+        ttk.Label(developer, text="Desenvolvedor", style="InsetTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            developer,
+            text=build_developer_summary_text(self.SUPPORT_WHATSAPP, self.SUPPORT_EMAIL),
+            background="white",
+            foreground="#111827",
+            justify="left",
+            wraplength=255,
+            font=("Segoe UI", 9),
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Button(
+            developer,
+            text="Ler termos de uso",
+            style="Ghost.TButton",
+            command=self.open_legal_notice,
+        ).grid(row=2, column=0, sticky="ew", pady=(8, 0))
+
         alerts = ttk.Frame(panel, style="CardInset.TFrame")
-        alerts.grid(row=5, column=0, sticky="ew", pady=(10, 0))
+        alerts.grid(row=6, column=0, sticky="ew", pady=(10, 0))
         ttk.Label(alerts, text="Alertas", style="InsetTitle.TLabel").grid(row=0, column=0, sticky="w")
         self.lbl_alerts = ttk.Label(
             alerts,

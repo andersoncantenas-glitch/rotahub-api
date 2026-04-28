@@ -462,9 +462,9 @@ class _ProgramacaoDetalhePageState extends State<ProgramacaoDetalhePage> {
                           backgroundColor: VendorUiColors.primary.withValues(
                             alpha: 0.06,
                           ),
-                          child: Text(
+                          child: const Text(
                             'Pedidos com ordem sugerida sobem para o topo. ETA, distancia e confianca aparecem quando enviados pela API.',
-                            style: const TextStyle(
+                            style: TextStyle(
                               color: VendorUiColors.heading,
                               fontWeight: FontWeight.w700,
                             ),

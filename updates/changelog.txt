@@ -1,3 +1,8 @@
+2026-04-28 19:12:46 - v4.4.4
+- Release automatizada (patch).
+- Versao anterior: v4.4.3.
+- Correcao do PDF da prestacao de contas para dados de rota, contagem de cedulas e filtro de ocorrencias/ajustes.
+
 2026-04-27 23:28:31 - v4.4.3
 - Release automatizada (patch).
 - Versao anterior: v4.4.2.

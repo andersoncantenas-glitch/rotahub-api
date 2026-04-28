@@ -2,6 +2,11 @@ import logging
 import tkinter as tk
 from tkinter import ttk
 
+from app.ui.components.legal_notice import (
+    DEVELOPER_FOOTER_TEXT,
+    open_legal_notice as open_legal_notice_window,
+)
+
 
 class PageBase(ttk.Frame):
     """Classe base para todas as páginas da aplicação"""
@@ -96,6 +101,20 @@ class PageBase(ttk.Frame):
         self.footer_right = ttk.Frame(footer, style="Content.TFrame")
         self.footer_right.grid(row=0, column=1, sticky="e")
 
+        self.lbl_developer_footer = ttk.Label(
+            self.footer_left,
+            text=DEVELOPER_FOOTER_TEXT,
+            style="Subtitle.TLabel",
+        )
+        self.lbl_developer_footer.pack(side="left")
+
+        ttk.Button(
+            self.footer_right,
+            text="Termos de uso",
+            style="Ghost.TButton",
+            command=self.open_legal_notice,
+        ).pack(side="right")
+
     def _resolve_header_title(self) -> str:
         if self.page_title_override:
             return str(self.page_title_override)
@@ -114,6 +133,26 @@ class PageBase(ttk.Frame):
     def on_show(self):
         """Método chamado quando a página é exibida (pode ser sobrescrito)"""
         pass
+
+
+    def _legal_notice_kwargs(self) -> dict:
+        cfg = getattr(getattr(self, "context", None), "config", None)
+        title_from_window = ""
+        try:
+            title_from_window = str(self.winfo_toplevel().title() or "").strip()
+        except Exception:
+            logging.debug("Falha ao ler titulo da janela.", exc_info=True)
+        app_name = str(getattr(cfg, "app_title", "") or "").strip() or title_from_window or "Sistema"
+        return {
+            "app_name": app_name,
+            "app_version": str(getattr(cfg, "app_version", "") or "").strip(),
+            "support_whatsapp": str(getattr(cfg, "support_whatsapp", "") or "").strip(),
+            "support_email": str(getattr(cfg, "support_email", "") or "").strip(),
+            "apply_window_icon": getattr(self, "apply_window_icon", None),
+        }
+
+    def open_legal_notice(self):
+        open_legal_notice_window(self, **self._legal_notice_kwargs())
 
 
 __all__ = ["PageBase"]
