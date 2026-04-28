@@ -17,12 +17,13 @@ def fetch_motoristas_cache_local_by_codigo():
     out = {}
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT codigo, senha, cpf, telefone FROM motoristas")
-        for codigo, senha, cpf, telefone in (cur.fetchall() or []):
+        cur.execute("SELECT codigo, senha, cpf, telefone, COALESCE(perfil_app, 'MOTORISTA') FROM motoristas")
+        for codigo, senha, cpf, telefone, perfil_app in (cur.fetchall() or []):
             out[str(codigo or "").strip()] = {
                 "senha": str(senha or ""),
                 "cpf": str(cpf or ""),
                 "telefone": str(telefone or ""),
+                "perfil_app": str(perfil_app or "MOTORISTA").strip().upper(),
             }
     return out
 

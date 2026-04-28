@@ -27,6 +27,7 @@ class CadastrosPage(PageBase):
                 ("nome", "NOME"),
                 ("codigo", "CODIGO"),
                 ("senha", "SENHA"),
+                ("perfil_app", "PERFIL APP"),
                 ("cpf", "CPF"),
                 ("telefone", "TELEFONE"),
                 ("status", "STATUS"),

@@ -1,3 +1,8 @@
+2026-04-27 23:28:31 - v4.4.3
+- Release automatizada (patch).
+- Versao anterior: v4.4.2.
+- Admin no app motorista com perfil_app no cadastro de motoristas, login admin dedicado, acesso total a rotas e endpoint de reabertura de rota.
+
 2026-04-24 09:48:40 - v4.4.2
 - Release automatizada (patch).
 - Versao anterior: v4.4.1.

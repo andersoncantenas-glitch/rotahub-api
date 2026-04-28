@@ -1012,6 +1012,7 @@ def db_init():
         safe_add_column(cur, "motoristas", "codigo", "TEXT")
         safe_add_column(cur, "motoristas", "senha", "TEXT")
         safe_add_column(cur, "motoristas", "status", "TEXT DEFAULT 'ATIVO'")
+        safe_add_column(cur, "motoristas", "perfil_app", "TEXT DEFAULT 'MOTORISTA'")
         # Novos motoristas devem entrar no fluxo mobile sem bloqueio manual.
         safe_add_column(cur, "motoristas", "acesso_liberado", "INTEGER DEFAULT 1")
         safe_add_column(cur, "motoristas", "acesso_liberado_por", "TEXT")
@@ -1022,6 +1023,11 @@ def db_init():
                 UPDATE motoristas
                 SET status='ATIVO'
                 WHERE status IS NULL OR TRIM(status)=''
+            """)
+            cur.execute("""
+                UPDATE motoristas
+                SET perfil_app='MOTORISTA'
+                WHERE perfil_app IS NULL OR TRIM(perfil_app)=''
             """)
         except Exception:
             logging.debug("Falha ignorada")

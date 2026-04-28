@@ -179,7 +179,16 @@ def _motorista_login_candidates(codigo: str) -> List[str]:
 
 def authenticate_motorista(cur: sqlite3.Cursor, codigo: str, senha: str) -> tuple[Optional[sqlite3.Row], Optional[str]]:
     has_acesso = col_exists(cur.connection, "motoristas", "acesso_liberado")
-    select_cols = "id, nome, codigo, senha, COALESCE(acesso_liberado, 0) AS acesso_liberado" if has_acesso else "id, nome, codigo, senha"
+    has_perfil_app = col_exists(cur.connection, "motoristas", "perfil_app")
+    select_parts = [
+        "id",
+        "nome",
+        "codigo",
+        "senha",
+        "COALESCE(acesso_liberado, 0) AS acesso_liberado" if has_acesso else "1 AS acesso_liberado",
+        "UPPER(TRIM(COALESCE(perfil_app, 'MOTORISTA'))) AS perfil_app" if has_perfil_app else "'MOTORISTA' AS perfil_app",
+    ]
+    select_cols = ", ".join(select_parts)
     row = None
     for candidate in _motorista_login_candidates(codigo):
         cur.execute(
@@ -1906,6 +1915,18 @@ def verify_token(token: str) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
 
+def _motorista_app_role(row: Any) -> str:
+    if row is None:
+        return "MOTORISTA"
+    try:
+        value = str(row["perfil_app"] or "").strip().upper()
+    except Exception:
+        try:
+            value = str((row.get("perfil_app") or "")).strip().upper()
+        except Exception:
+            value = ""
+    return "ADMIN" if value == "ADMIN" else "MOTORISTA"
+
 # =========================================================
 # SCHEMAS (Pydantic)
 # =========================================================
@@ -1918,6 +1939,9 @@ class LoginOut(BaseModel):
     token: str
     nome: str
     codigo: str
+    perfil: Optional[str] = None
+    role: Optional[str] = None
+    is_admin: Optional[bool] = None
 
 
 class VendedorRascunhoItemIn(BaseModel):
@@ -2030,6 +2054,12 @@ class FinalizarRotaIn(BaseModel):
 
 class RotaStatusOperacionalIn(BaseModel):
     status_operacional: str
+    observacao: Optional[str] = None
+    evento_em: Optional[str] = None
+    idempotency_key: Optional[str] = None
+
+
+class RotaReabrirIn(BaseModel):
     observacao: Optional[str] = None
     evento_em: Optional[str] = None
     idempotency_key: Optional[str] = None
@@ -2187,6 +2217,7 @@ class DesktopMotoristaUpsertIn(BaseModel):
     telefone: Optional[str] = None
     cpf: Optional[str] = None
     status: Optional[str] = "ATIVO"
+    perfil_app: Optional[str] = "MOTORISTA"
     senha: Optional[str] = None
     acesso_liberado: Optional[bool] = None
     acesso_liberado_por: Optional[str] = None
@@ -2357,37 +2388,48 @@ def get_current_motorista(
 
     data = verify_token(token)
     if not data:
-        raise HTTPException(status_code=401, detail="Token inválido/expirado")
-    perfil = str(data.get("perfil") or "").strip().lower()
-    if perfil and perfil != "motorista":
+        raise HTTPException(status_code=401, detail="Token invÃ¡lido/expirado")
+    perfil_token = str(data.get("perfil") or "").strip().lower()
+    if perfil_token and perfil_token not in {"motorista", "admin"}:
         raise HTTPException(status_code=401, detail="Token invalido para o app do motorista")
 
     codigo = data.get("codigo")
     if not codigo:
-        raise HTTPException(status_code=401, detail="Token sem código do motorista")
+        raise HTTPException(status_code=401, detail="Token sem cÃ³digo do motorista")
 
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute("PRAGMA table_info(motoristas)")
         cols_m = {r[1] for r in (cur.fetchall() or [])}
-        if "acesso_liberado" in cols_m:
-            cur.execute(
-                """
-                SELECT id, nome, codigo, COALESCE(acesso_liberado, 0) AS acesso_liberado
-                FROM motoristas
-                WHERE codigo=?
-                """,
-                (codigo,),
-            )
-        else:
-            cur.execute("SELECT id, nome, codigo FROM motoristas WHERE codigo=?", (codigo,))
+        select_parts = [
+            "id",
+            "nome",
+            "codigo",
+            "COALESCE(acesso_liberado, 0) AS acesso_liberado" if "acesso_liberado" in cols_m else "1 AS acesso_liberado",
+            "UPPER(TRIM(COALESCE(perfil_app, 'MOTORISTA'))) AS perfil_app" if "perfil_app" in cols_m else "'MOTORISTA' AS perfil_app",
+        ]
+        cur.execute(
+            f"SELECT {', '.join(select_parts)} FROM motoristas WHERE codigo=?",
+            (codigo,),
+        )
         m = cur.fetchone()
         if not m:
-            raise HTTPException(status_code=401, detail="Motorista não encontrado")
+            raise HTTPException(status_code=401, detail="Motorista nÃ£o encontrado")
         if "acesso_liberado" in cols_m and int(m["acesso_liberado"] or 0) != 1:
             raise HTTPException(status_code=403, detail="Acesso bloqueado. Solicite desbloqueio do administrador.")
 
-    return {"codigo": m["codigo"], "nome": m["nome"], "id": m["id"]}
+        perfil_app = _motorista_app_role(m)
+        if perfil_token == "admin" and perfil_app != "ADMIN":
+            raise HTTPException(status_code=403, detail="Usuario sem perfil admin para o app do motorista")
+        is_admin = perfil_app == "ADMIN" or perfil_token == "admin"
+
+    return {
+        "codigo": m["codigo"],
+        "nome": m["nome"],
+        "id": m["id"],
+        "is_admin": is_admin,
+        "perfil_app": perfil_app,
+    }
 
 
 def get_current_vendedor(
@@ -2445,6 +2487,9 @@ def _owner_filter_for_programacoes(
 
     conds: List[str] = []
     params: List[Any] = []
+
+    if bool(motorista.get("is_admin")):
+        return "(1=1)", tuple()
 
     # Prioriza chaves estáveis.
     if "motorista_id" in cols:
@@ -2564,9 +2609,10 @@ def desktop_motoristas(_ok: bool = Depends(_require_desktop_secret)):
             if "status" in cols
             else ""
         )
+        perfil_expr = "UPPER(TRIM(COALESCE(perfil_app,'MOTORISTA')))" if "perfil_app" in cols else "'MOTORISTA'"
         cur.execute(
             f"""
-            SELECT id, COALESCE(codigo,''), COALESCE(nome,''), COALESCE(status,'ATIVO')
+            SELECT id, COALESCE(codigo,''), COALESCE(nome,''), COALESCE(status,'ATIVO'), {perfil_expr} AS perfil_app
             FROM motoristas
             {status_filter}
             ORDER BY UPPER(COALESCE(nome,'')), id
@@ -2580,6 +2626,7 @@ def desktop_motoristas(_ok: bool = Depends(_require_desktop_secret)):
                     "codigo": str(r[1] or "").strip().upper(),
                     "nome": str(r[2] or "").strip().upper(),
                     "status": str(r[3] or "ATIVO").strip().upper(),
+                    "perfil_app": str(r[4] or "MOTORISTA").strip().upper() or "MOTORISTA",
                 }
             )
         return out
@@ -2697,8 +2744,13 @@ def desktop_motoristas_upsert(payload: DesktopMotoristaUpsertIn, _ok: bool = Dep
         raise HTTPException(status_code=400, detail="codigo e nome sao obrigatorios.")
 
     status = _clean_text(payload.status or "ATIVO").upper()
-    if status not in {"ATIVO", "DESATIVADO"}:
+    if status == "DESATIVADO":
+        status = "INATIVO"
+    if status not in {"ATIVO", "INATIVO"}:
         status = "ATIVO"
+    perfil_app = _clean_text(payload.perfil_app or "MOTORISTA").upper()
+    if perfil_app not in {"MOTORISTA", "ADMIN"}:
+        perfil_app = "MOTORISTA"
 
     telefone = _clean_text(payload.telefone)
     cpf = _clean_text(payload.cpf)
@@ -2733,6 +2785,9 @@ def desktop_motoristas_upsert(payload: DesktopMotoristaUpsertIn, _ok: bool = Dep
         if "status" in cols:
             set_parts.append("status=?")
             params.append(status)
+        if "perfil_app" in cols:
+            set_parts.append("perfil_app=?")
+            params.append(perfil_app)
         # Atualização de acesso só quando vier explícito no payload.
         # Isso evita "desbloqueio automático" ao apenas editar cadastro.
         if payload.acesso_liberado is not None:
@@ -2773,6 +2828,8 @@ def desktop_motoristas_upsert(payload: DesktopMotoristaUpsertIn, _ok: bool = Dep
             cols_ins.append("cpf"); vals_ins.append(cpf)
         if "status" in cols:
             cols_ins.append("status"); vals_ins.append(status)
+        if "perfil_app" in cols:
+            cols_ins.append("perfil_app"); vals_ins.append(perfil_app)
         if "senha" in cols:
             cols_ins.append("senha"); vals_ins.append(senha_hash or hash_password_pbkdf2("1234"))
         acesso_novo = True if payload.acesso_liberado is None else bool(payload.acesso_liberado)
@@ -4125,8 +4182,49 @@ def autenticar_motorista(payload: LoginIn):
     if not m:
         raise HTTPException(status_code=401, detail="Codigo ou senha invalidos")
 
-    token = create_token(m["codigo"], perfil="motorista")
-    return {"token": token, "nome": m["nome"], "codigo": m["codigo"]}
+    perfil_app = _motorista_app_role(m)
+    is_admin = perfil_app == "ADMIN"
+    token = create_token(m["codigo"], perfil="admin" if is_admin else "motorista")
+    return {
+        "token": token,
+        "nome": m["nome"],
+        "codigo": m["codigo"],
+        "perfil": "admin" if is_admin else "motorista",
+        "role": perfil_app,
+        "is_admin": is_admin,
+    }
+
+
+@app.post("/auth/admin/login", response_model=LoginOut)
+def autenticar_admin(payload: LoginIn):
+    codigo = (payload.codigo or "").strip().upper()
+    senha = (payload.senha or "").strip()
+
+    if not codigo or not senha:
+        raise HTTPException(status_code=400, detail="Codigo e senha sao obrigatorios")
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        m, auth_err = authenticate_motorista(cur, codigo, senha)
+
+    if auth_err == "blocked":
+        raise HTTPException(status_code=403, detail="Acesso bloqueado. Solicite desbloqueio do administrador.")
+    if not m:
+        raise HTTPException(status_code=401, detail="Codigo ou senha invalidos")
+
+    perfil_app = _motorista_app_role(m)
+    if perfil_app != "ADMIN":
+        raise HTTPException(status_code=403, detail="Este usuario nao possui perfil admin para acesso total ao app.")
+
+    token = create_token(m["codigo"], perfil="admin")
+    return {
+        "token": token,
+        "nome": m["nome"],
+        "codigo": m["codigo"],
+        "perfil": "admin",
+        "role": "ADMIN",
+        "is_admin": True,
+    }
 
 
 @app.post("/auth/vendedor/login", response_model=LoginOut)
@@ -7181,6 +7279,7 @@ def salvar_controle_cliente(
 ):
     nome_motorista = (m["nome"] or "").strip()
     codigo_motorista = (m.get("codigo") or "").strip().upper()
+    is_admin = bool(m.get("is_admin"))
     codigo_programacao = (codigo_programacao or "").strip()
 
     cod_cliente = (payload.cod_cliente or "").strip()
@@ -7195,12 +7294,12 @@ def salvar_controle_cliente(
         if not pr:
             raise HTTPException(status_code=404, detail="Rota não encontrada para este motorista")
         status_atual = str(pr["status"] or "").strip().upper()
-        if status_atual in ("FINALIZADA", "FINALIZADO", "CANCELADA", "CANCELADO"):
+        if (not is_admin) and status_atual in ("FINALIZADA", "FINALIZADO", "CANCELADA", "CANCELADO"):
             raise HTTPException(
                 status_code=409,
                 detail=f"Rota encerrada. Alteracoes bloqueadas para status {status_atual}.",
             )
-        if status_atual not in ("EM_ROTA", "EM ROTA", "INICIADA", "EM_ENTREGAS", "EM ENTREGAS", "CARREGADA"):
+        if (not is_admin) and status_atual not in ("EM_ROTA", "EM ROTA", "INICIADA", "EM_ENTREGAS", "EM ENTREGAS", "CARREGADA"):
             raise HTTPException(
                 status_code=409,
                 detail=f"Rota ainda nao iniciada (status={status_atual or 'N/D'}). Inicie a rota para alterar pedidos.",
@@ -7330,10 +7429,10 @@ def salvar_controle_cliente(
             if row_status:
                 status_atual = (row_status["status_atual"] or "").strip().upper()
 
-        if status_atual == "ENTREGUE":
+        if (not is_admin) and status_atual == "ENTREGUE":
             raise HTTPException(
                 status_code=409,
-                detail="Pedido já está ENTREGUE e está bloqueado para alterações.",
+                detail="Pedido jÃ¡ estÃ¡ ENTREGUE e estÃ¡ bloqueado para alteraÃ§Ãµes.",
             )
 
         # resolve status se nao veio do app
@@ -7854,6 +7953,75 @@ def atualizar_status_operacional_rota(
         "codigo_programacao": codigo_programacao,
         "status_rota": status_rota,
         "status_operacional": status_out,
+    }
+
+
+@app.post("/rotas/{codigo_programacao}/reabrir")
+def reabrir_rota_app(
+    codigo_programacao: str,
+    payload: RotaReabrirIn,
+    m=Depends(get_current_motorista),
+):
+    if not bool(m.get("is_admin")):
+        raise HTTPException(status_code=403, detail="Somente admin pode reabrir rota.")
+
+    codigo_programacao = (codigo_programacao or "").strip().upper()
+    if not codigo_programacao:
+        raise HTTPException(status_code=400, detail="codigo_programacao obrigatorio.")
+
+    codigo_actor = str(m.get("codigo") or "").strip().upper()
+    nome_actor = str(m.get("nome") or "").strip().upper() or codigo_actor or "ADMIN"
+    evento_em = _evento_iso_or_now(payload.evento_em)
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        if _idempotency_seen(cur, codigo_actor, codigo_programacao, "reabrir_rota", payload.idempotency_key):
+            return {"ok": True, "deduplicado": True, "codigo_programacao": codigo_programacao}
+
+        _ensure_programacao_mutable(cur, codigo_programacao)
+        cur.execute("PRAGMA table_info(programacoes)")
+        cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+
+        sets: List[str] = []
+        vals: List[Any] = []
+        if "status" in cols_prog:
+            sets.append("status=?")
+            vals.append("ATIVA")
+        if "status_operacional" in cols_prog:
+            sets.append("status_operacional=?")
+            vals.append(None)
+        if "status_operacional_obs" in cols_prog:
+            sets.append("status_operacional_obs=?")
+            vals.append(None)
+        if "status_operacional_em" in cols_prog:
+            sets.append("status_operacional_em=?")
+            vals.append(evento_em)
+        if "status_operacional_por" in cols_prog:
+            sets.append("status_operacional_por=?")
+            vals.append(nome_actor)
+        if "finalizada_no_app" in cols_prog:
+            sets.append("finalizada_no_app=?")
+            vals.append(0)
+
+        if not sets:
+            raise HTTPException(status_code=500, detail="Nenhum campo elegivel para reabrir a rota.")
+
+        vals.append(codigo_programacao)
+        cur.execute(
+            f"UPDATE programacoes SET {', '.join(sets)} WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))",
+            tuple(vals),
+        )
+        if int(cur.rowcount or 0) <= 0:
+            raise HTTPException(status_code=404, detail="programacao nao encontrada.")
+
+        _idempotency_mark(cur, codigo_actor, codigo_programacao, "reabrir_rota", payload.idempotency_key)
+        conn.commit()
+
+    return {
+        "ok": True,
+        "codigo_programacao": codigo_programacao,
+        "status": "ATIVA",
+        "status_operacional": None,
     }
 
 

@@ -1,9 +1,9 @@
 {
-  "version": "4.4.2",
-  "setup_url": "https://github.com/andersoncantenas-glitch/rotahub-api/releases/download/v4.4.2/RotaHubDesktop_Setup_4.4.2.exe",
+  "version": "4.4.3",
+  "setup_url": "https://github.com/andersoncantenas-glitch/rotahub-api/releases/download/v4.4.3/RotaHubDesktop_Setup_4.4.3.exe",
   "changelog_url": "https://raw.githubusercontent.com/andersoncantenas-glitch/rotahub-api/main/updates/changelog.txt",
   "release_kind": "patch",
-  "released_at": "2026-04-24 09:48:40",
+  "released_at": "2026-04-27 23:28:31",
   "alert": "",
   "alerts": [
     "Folha da prestacao voltou ao padrao de 3 folhas no PDF impresso do desktop.",

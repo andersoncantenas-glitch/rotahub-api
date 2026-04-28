@@ -103,6 +103,9 @@ class CadastroCRUD(ttk.Frame):
                 else:
                     ent = ttk.Combobox(form, state="readonly", values=["ATIVO", "DESATIVADO"])
                 ent.set("ATIVO")
+            elif col == "perfil_app" and self.table == "motoristas":
+                ent = ttk.Combobox(form, state="readonly", values=["MOTORISTA", "ADMIN"])
+                ent.set("MOTORISTA")
             elif col == "permissoes" and self.table == "usuarios":
                 ent = ttk.Combobox(form, state="readonly", values=["ADMIN", "GERENTE", "OPERADOR", "VISUALIZADOR"])
                 ent.set("OPERADOR")
@@ -289,6 +292,8 @@ class CadastroCRUD(ttk.Frame):
             self._set("status", "ATIVO")
         if self.table == "motoristas" and "status" in self.entries:
             self._set("status", "ATIVO")
+        if self.table == "motoristas" and "perfil_app" in self.entries:
+            self._set("perfil_app", "MOTORISTA")
         if self.table == "vendedores" and "status" in self.entries:
             self._set("status", "ATIVO")
         self._set_form_mode("novo")
@@ -1045,6 +1050,11 @@ class CadastroCRUD(ttk.Frame):
                     if status_m not in {"ATIVO", "INATIVO"}:
                         status_m = "ATIVO"
                     data["status"] = status_m
+
+                    perfil_app = self._norm(data.get("perfil_app") or "MOTORISTA")
+                    if perfil_app not in {"MOTORISTA", "ADMIN"}:
+                        perfil_app = "MOTORISTA"
+                    data["perfil_app"] = perfil_app
 
                     # CPF único quando informado (se a coluna existir)
                     if cpf and db_has_column(cur, "motoristas", "cpf"):

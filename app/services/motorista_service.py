@@ -97,6 +97,7 @@ def fetch_motoristas_rows(*, fields, can_read_from_api):
                         "cpf": cpf_val,
                         "telefone": tel_val,
                         "status": str(r.get("status") or "ATIVO"),
+                        "perfil_app": str(r.get("perfil_app") or local_row.get("perfil_app") or "MOTORISTA").strip().upper(),
                     }
                     row = [int(r.get("id") or 0)]
                     for c, _ in fields:
@@ -168,6 +169,7 @@ def sync_motorista_upsert_api(
         "telefone": norm(data.get("telefone")),
         "cpf": norm(data.get("cpf")),
         "status": norm(data.get("status") or "ATIVO"),
+        "perfil_app": norm(data.get("perfil_app") or "MOTORISTA"),
         "senha": data.get("senha") or None,
         "acesso_liberado": acesso_liberado_payload,
         "acesso_liberado_por": norm(acesso_liberado_por or "DESKTOP_SYNC"),
@@ -206,6 +208,7 @@ def bootstrap_sync_motoristas_api(*, can_read_from_api, is_desktop_api_sync_enab
             return _service_result(ok=True, data={"synced": 0, "skipped": 0, "failed": 0}, source="local")
 
         acesso_expr = "COALESCE(acesso_liberado,1) AS acesso_liberado" if "acesso_liberado" in cols else "1 AS acesso_liberado"
+        perfil_expr = "UPPER(COALESCE(perfil_app,'MOTORISTA')) AS perfil_app" if "perfil_app" in cols else "'MOTORISTA' AS perfil_app"
         cur.execute(
             f"""
             SELECT
@@ -215,7 +218,8 @@ def bootstrap_sync_motoristas_api(*, can_read_from_api, is_desktop_api_sync_enab
                 COALESCE(cpf,'') AS cpf,
                 COALESCE(status,'ATIVO') AS status,
                 COALESCE(senha,'') AS senha,
-                {acesso_expr}
+                {acesso_expr},
+                {perfil_expr}
             FROM motoristas
             WHERE TRIM(COALESCE(codigo,'')) <> ''
             ORDER BY id
@@ -265,6 +269,7 @@ def bootstrap_sync_motoristas_api(*, can_read_from_api, is_desktop_api_sync_enab
         cpf = str(row["cpf"] or "").strip()
         senha = str(row["senha"] or "").strip()
         acesso_liberado = bool(int(row["acesso_liberado"] or 0))
+        perfil_app = str(row["perfil_app"] or "MOTORISTA").strip().upper() or "MOTORISTA"
 
         remote = remote_by_code.get(codigo) or {}
         same_basic_state = (
@@ -272,6 +277,7 @@ def bootstrap_sync_motoristas_api(*, can_read_from_api, is_desktop_api_sync_enab
             and str(remote.get("status") or "ATIVO").strip().upper() == status
             and str(remote.get("telefone") or "").strip() == telefone
             and str(remote.get("cpf") or "").strip() == cpf
+            and str(remote.get("perfil_app") or "MOTORISTA").strip().upper() == perfil_app
             and bool(int(remote.get("acesso_liberado") or 0)) == acesso_liberado
         )
         if same_basic_state and not senha:
@@ -284,6 +290,7 @@ def bootstrap_sync_motoristas_api(*, can_read_from_api, is_desktop_api_sync_enab
             "telefone": telefone,
             "cpf": cpf,
             "status": status,
+            "perfil_app": perfil_app,
             "senha": senha or None,
             "acesso_liberado": acesso_liberado,
             "acesso_liberado_por": "BOOTSTRAP_DESKTOP",

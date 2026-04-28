@@ -87,12 +87,24 @@ def ensure_core_schema(conn: sqlite3.Connection) -> None:
             telefone TEXT,
             codigo TEXT,
             senha TEXT,
+            perfil_app TEXT DEFAULT 'MOTORISTA',
             acesso_liberado INTEGER DEFAULT 0,
             acesso_liberado_por TEXT,
             acesso_liberado_em TEXT,
             acesso_obs TEXT,
             status TEXT DEFAULT 'ATIVO'
         )
+        """
+    )
+    cur.execute("PRAGMA table_info(motoristas)")
+    motoristas_cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+    if "perfil_app" not in motoristas_cols:
+        cur.execute("ALTER TABLE motoristas ADD COLUMN perfil_app TEXT DEFAULT 'MOTORISTA'")
+    cur.execute(
+        """
+        UPDATE motoristas
+        SET perfil_app='MOTORISTA'
+        WHERE perfil_app IS NULL OR TRIM(perfil_app)=''
         """
     )
     cur.execute(
