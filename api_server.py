@@ -138,6 +138,28 @@ def _ensure_clientes_columns(cur: sqlite3.Cursor) -> set[str]:
     return cols
 
 
+def _ensure_clientes_table(cur: sqlite3.Cursor) -> set[str]:
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='clientes'")
+    if not cur.fetchone():
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS clientes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cod_cliente TEXT UNIQUE,
+                nome_cliente TEXT,
+                endereco TEXT,
+                bairro TEXT,
+                cidade TEXT,
+                uf TEXT,
+                telefone TEXT,
+                rota TEXT,
+                vendedor TEXT
+            )
+            """
+        )
+    return _ensure_clientes_columns(cur)
+
+
 PBKDF2_ITERATIONS = 200_000
 
 def hash_password_pbkdf2(password: str, *, iterations: int = PBKDF2_ITERATIONS) -> str:
@@ -2281,6 +2303,10 @@ class DesktopClienteUpsertIn(BaseModel):
     vendedor: Optional[str] = None
 
 
+class DesktopClientesBulkUpsertIn(BaseModel):
+    clientes: List[DesktopClienteUpsertIn] = Field(default_factory=list)
+
+
 class DesktopRecebimentoIn(BaseModel):
     cod_cliente: str
     nome_cliente: str
@@ -3067,57 +3093,40 @@ def desktop_ajudantes_upsert(payload: DesktopAjudanteUpsertIn, _ok: bool = Depen
         return {"ok": True, "nome": nome, "sobrenome": sobrenome, "created": 1}
 
 
-@app.post("/desktop/cadastros/clientes/upsert")
-def desktop_clientes_upsert(payload: DesktopClienteUpsertIn, _ok: bool = Depends(_require_desktop_secret)):
+def _desktop_cliente_upsert_cur(cur: sqlite3.Cursor, payload: DesktopClienteUpsertIn, cols: set[str] | None = None) -> Dict[str, Any]:
     cod_cliente = _clean_text(payload.cod_cliente).upper()
     nome_cliente = _clean_text(payload.nome_cliente).upper()
     if not cod_cliente or not nome_cliente:
         raise HTTPException(status_code=400, detail="cod_cliente e nome_cliente sao obrigatorios.")
 
+    cols = cols or _ensure_clientes_table(cur)
+    if not cols:
+        raise HTTPException(status_code=500, detail="Tabela clientes indisponivel.")
+
     endereco = _clean_text(payload.endereco).upper()
     telefone = _clean_text(payload.telefone).upper()
     vendedor = _clean_text(payload.vendedor).upper()
 
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='clientes'")
-        if not cur.fetchone():
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS clientes (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    cod_cliente TEXT UNIQUE,
-                    nome_cliente TEXT,
-                    endereco TEXT,
-                    bairro TEXT,
-                    cidade TEXT,
-                    uf TEXT,
-                    telefone TEXT,
-                    rota TEXT,
-                    vendedor TEXT
-                )
-                """
-            )
-        cols = _ensure_clientes_columns(cur)
-        if not cols:
-            raise HTTPException(status_code=500, detail="Tabela clientes indisponivel.")
+    cur.execute(
+        """
+        SELECT
+            rowid AS row_ref,
+            COALESCE(nome_cliente,'') AS nome_cliente,
+            COALESCE(endereco,'') AS endereco,
+            COALESCE(telefone,'') AS telefone,
+            COALESCE(vendedor,'') AS vendedor
+        FROM clientes
+        WHERE UPPER(TRIM(cod_cliente))=?
+        LIMIT 1
+        """,
+        (cod_cliente,),
+    )
+    existing = cur.fetchone()
 
-        cur.execute(
-            """
-            SELECT
-                rowid AS row_ref,
-                COALESCE(nome_cliente,'') AS nome_cliente,
-                COALESCE(endereco,'') AS endereco,
-                COALESCE(telefone,'') AS telefone,
-                COALESCE(vendedor,'') AS vendedor
-            FROM clientes
-            WHERE UPPER(TRIM(cod_cliente))=?
-            LIMIT 1
-            """,
-            (cod_cliente,),
-        )
-        existing = cur.fetchone()
-
+    if existing:
+        endereco_final = endereco or str(existing["endereco"] or "").strip().upper()
+        telefone_final = telefone or str(existing["telefone"] or "").strip().upper()
+        vendedor_final = vendedor or str(existing["vendedor"] or "").strip().upper()
         set_parts: List[str] = []
         params: List[Any] = []
         if "cod_cliente" in cols:
@@ -3125,53 +3134,91 @@ def desktop_clientes_upsert(payload: DesktopClienteUpsertIn, _ok: bool = Depends
         if "nome_cliente" in cols:
             set_parts.append("nome_cliente=?"); params.append(nome_cliente)
         if "endereco" in cols:
-            set_parts.append("endereco=?"); params.append(endereco)
+            set_parts.append("endereco=?"); params.append(endereco_final)
         if "telefone" in cols:
-            set_parts.append("telefone=?"); params.append(telefone)
+            set_parts.append("telefone=?"); params.append(telefone_final)
         if "vendedor" in cols:
-            set_parts.append("vendedor=?"); params.append(vendedor)
+            set_parts.append("vendedor=?"); params.append(vendedor_final)
+        if not set_parts:
+            return {"ok": True, "cod_cliente": cod_cliente, "updated": 0}
+        params.append(int(existing["row_ref"]))
+        cur.execute(f"UPDATE clientes SET {', '.join(set_parts)} WHERE rowid=?", tuple(params))
+        return {"ok": True, "cod_cliente": cod_cliente, "updated": int(cur.rowcount or 0)}
 
-        if existing:
-            endereco_final = endereco or str(existing["endereco"] or "").strip().upper()
-            telefone_final = telefone or str(existing["telefone"] or "").strip().upper()
-            vendedor_final = vendedor or str(existing["vendedor"] or "").strip().upper()
-            if not set_parts:
-                return {"ok": True, "cod_cliente": cod_cliente, "updated": 0}
-            params = []
-            if "cod_cliente" in cols:
-                set_parts = ["cod_cliente=?"]
-                params.append(cod_cliente)
-            else:
-                set_parts = []
-            if "nome_cliente" in cols:
-                set_parts.append("nome_cliente=?"); params.append(nome_cliente)
-            if "endereco" in cols:
-                set_parts.append("endereco=?"); params.append(endereco_final)
-            if "telefone" in cols:
-                set_parts.append("telefone=?"); params.append(telefone_final)
-            if "vendedor" in cols:
-                set_parts.append("vendedor=?"); params.append(vendedor_final)
-            params.append(int(existing["row_ref"]))
-            cur.execute(f"UPDATE clientes SET {', '.join(set_parts)} WHERE rowid=?", tuple(params))
-            return {"ok": True, "cod_cliente": cod_cliente, "updated": int(cur.rowcount or 0)}
+    cols_ins: List[str] = []
+    vals_ins: List[Any] = []
+    if "cod_cliente" in cols:
+        cols_ins.append("cod_cliente"); vals_ins.append(cod_cliente)
+    if "nome_cliente" in cols:
+        cols_ins.append("nome_cliente"); vals_ins.append(nome_cliente)
+    if "endereco" in cols:
+        cols_ins.append("endereco"); vals_ins.append(endereco)
+    if "telefone" in cols:
+        cols_ins.append("telefone"); vals_ins.append(telefone)
+    if "vendedor" in cols:
+        cols_ins.append("vendedor"); vals_ins.append(vendedor)
+    if not cols_ins:
+        raise HTTPException(status_code=500, detail="Colunas de clientes indisponiveis.")
+    ph = ", ".join(["?"] * len(cols_ins))
+    cur.execute(f"INSERT INTO clientes ({', '.join(cols_ins)}) VALUES ({ph})", tuple(vals_ins))
+    return {"ok": True, "cod_cliente": cod_cliente, "created": 1}
 
-        cols_ins: List[str] = []
-        vals_ins: List[Any] = []
-        if "cod_cliente" in cols:
-            cols_ins.append("cod_cliente"); vals_ins.append(cod_cliente)
-        if "nome_cliente" in cols:
-            cols_ins.append("nome_cliente"); vals_ins.append(nome_cliente)
-        if "endereco" in cols:
-            cols_ins.append("endereco"); vals_ins.append(endereco)
-        if "telefone" in cols:
-            cols_ins.append("telefone"); vals_ins.append(telefone)
-        if "vendedor" in cols:
-            cols_ins.append("vendedor"); vals_ins.append(vendedor)
-        if not cols_ins:
-            raise HTTPException(status_code=500, detail="Colunas de clientes indisponiveis.")
-        ph = ", ".join(["?"] * len(cols_ins))
-        cur.execute(f"INSERT INTO clientes ({', '.join(cols_ins)}) VALUES ({ph})", tuple(vals_ins))
-        return {"ok": True, "cod_cliente": cod_cliente, "created": 1}
+
+@app.post("/desktop/cadastros/clientes/upsert")
+def desktop_clientes_upsert(payload: DesktopClienteUpsertIn, _ok: bool = Depends(_require_desktop_secret)):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        return _desktop_cliente_upsert_cur(cur, payload)
+
+
+@app.post("/desktop/cadastros/clientes/bulk-upsert")
+def desktop_clientes_bulk_upsert(payload: DesktopClientesBulkUpsertIn, _ok: bool = Depends(_require_desktop_secret)):
+    itens = payload.clientes or []
+    if not itens:
+        return {"ok": True, "total": 0, "created": 0, "updated": 0, "falhas": []}
+
+    total = 0
+    created = 0
+    updated = 0
+    falhas: List[Dict[str, Any]] = []
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cols = _ensure_clientes_table(cur)
+        for idx, item in enumerate(itens, start=1):
+            try:
+                result = _desktop_cliente_upsert_cur(cur, item, cols=cols)
+                total += 1
+                created += int(result.get("created") or 0)
+                updated += int(result.get("updated") or 0)
+            except HTTPException as exc:
+                falhas.append(
+                    {
+                        "index": idx,
+                        "cod_cliente": _clean_text(getattr(item, "cod_cliente", "")),
+                        "detail": exc.detail,
+                    }
+                )
+            except Exception as exc:
+                logging.exception("Falha ao importar cliente em lote")
+                falhas.append(
+                    {
+                        "index": idx,
+                        "cod_cliente": _clean_text(getattr(item, "cod_cliente", "")),
+                        "detail": str(exc or "Falha inesperada."),
+                    }
+                )
+
+        if falhas:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": "Falha ao salvar alguns clientes.",
+                    "salvos": total,
+                    "total_falhas": len(falhas),
+                    "falhas": falhas[:20],
+                },
+            )
+    return {"ok": True, "total": total, "created": created, "updated": updated, "falhas": []}
 
 
 @app.delete("/desktop/cadastros/motoristas/{codigo}")

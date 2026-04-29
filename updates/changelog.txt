@@ -1,3 +1,8 @@
+2026-04-29 15:09:15 - v4.4.7
+- Release automatizada (patch).
+- Versao anterior: v4.4.6.
+- Importacao e salvamento de clientes passam a usar envio em lote na API, reduzindo falhas por chamadas individuais e limpando valores NaN vindos do Excel.
+
 2026-04-29 13:48:55 - v4.4.6
 - Release automatizada (patch).
 - Versao anterior: v4.4.5.

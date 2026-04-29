@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import logging
 import os
+import math
 
 try:
     import pandas as pd
@@ -26,9 +27,42 @@ def _error_message(exc: Exception, default_message: str) -> str:
     return msg or str(default_message or "Falha inesperada.")
 
 
+def _cell_text(value) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd is not None and pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    if isinstance(value, float):
+        if math.isnan(value):
+            return ""
+        if value.is_integer():
+            return str(int(value))
+    text = str(value).strip()
+    if text.lower() in {"nan", "none", "nat"}:
+        return ""
+    return text
+
+
 def _api_mode(is_desktop_api_sync_enabled):
     desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
     return bool(desktop_secret and is_desktop_api_sync_enabled()), desktop_secret
+
+
+def _cliente_payload(cod, nome, endereco="", telefone="", vendedor=""):
+    cod_n = upper(_cell_text(cod))
+    nome_n = upper(_cell_text(nome))
+    if not cod_n or not nome_n:
+        return None
+    return {
+        "cod_cliente": cod_n,
+        "nome_cliente": nome_n,
+        "endereco": upper(_cell_text(endereco)),
+        "telefone": upper(_cell_text(telefone)),
+        "vendedor": upper(_cell_text(vendedor)),
+    }
 
 
 def sync_cliente_upsert_api(cod: str, nome: str, endereco: str, telefone: str, vendedor: str, *, is_desktop_api_sync_enabled):
@@ -38,18 +72,9 @@ def sync_cliente_upsert_api(cod: str, nome: str, endereco: str, telefone: str, v
     if not desktop_secret:
         return _service_result(ok=True, data=None, source="local")
 
-    cod_n = upper(str(cod or "").strip())
-    nome_n = upper(str(nome or "").strip())
-    if not cod_n or not nome_n:
+    payload = _cliente_payload(cod, nome, endereco, telefone, vendedor)
+    if not payload:
         return _service_result(ok=True, data=None, source="local")
-
-    payload = {
-        "cod_cliente": cod_n,
-        "nome_cliente": nome_n,
-        "endereco": upper(str(endereco or "").strip()),
-        "telefone": upper(str(telefone or "").strip()),
-        "vendedor": upper(str(vendedor or "").strip()),
-    }
     try:
         resp = _call_api(
             "POST",
@@ -63,6 +88,36 @@ def sync_cliente_upsert_api(cod: str, nome: str, endereco: str, telefone: str, v
             ok=False,
             data=None,
             error=_error_message(exc, "Falha ao sincronizar cliente na API."),
+            source="api",
+        )
+
+
+def sync_clientes_bulk_upsert_api(linhas, *, is_desktop_api_sync_enabled):
+    api_mode, desktop_secret = _api_mode(is_desktop_api_sync_enabled)
+    if not api_mode:
+        return _service_result(ok=True, data={"total": len(linhas or [])}, source="local")
+
+    clientes = []
+    for cod, nome, endereco, telefone, vendedor in (linhas or []):
+        payload = _cliente_payload(cod, nome, endereco, telefone, vendedor)
+        if payload:
+            clientes.append(payload)
+    if not clientes:
+        return _service_result(ok=True, data={"total": 0}, source="api")
+
+    try:
+        resp = _call_api(
+            "POST",
+            "desktop/cadastros/clientes/bulk-upsert",
+            payload={"clientes": clientes},
+            extra_headers={"X-Desktop-Secret": desktop_secret},
+        )
+        return _service_result(ok=True, data=resp, source="api")
+    except Exception as exc:
+        return _service_result(
+            ok=False,
+            data=None,
+            error=_error_message(exc, "Falha ao sincronizar clientes em lote na API."),
             source="api",
         )
 
@@ -120,30 +175,28 @@ def _fail_ref(cod, nome, result) -> str:
 def salvar_clientes_linhas(linhas, *, is_desktop_api_sync_enabled):
     total = 0
     sync_falhas = 0
-    falhas_refs = []
     api_mode, _desktop_secret = _api_mode(is_desktop_api_sync_enabled)
 
     if api_mode:
-        for cod, nome, endereco, telefone, vendedor in (linhas or []):
-            result = sync_cliente_upsert_api(
-                cod, nome, endereco, telefone, vendedor,
-                is_desktop_api_sync_enabled=is_desktop_api_sync_enabled,
+        result = sync_clientes_bulk_upsert_api(
+            linhas or [],
+            is_desktop_api_sync_enabled=is_desktop_api_sync_enabled,
+        )
+        if isinstance(result, dict) and bool(result.get("ok", False)):
+            data = result.get("data") if isinstance(result.get("data"), dict) else {}
+            total = int((data or {}).get("total") or len(linhas or []))
+        else:
+            detalhe = _error_message(
+                Exception(result.get("error") if isinstance(result, dict) else ""),
+                "Falha ao sincronizar clientes em lote na API.",
             )
-            if isinstance(result, dict) and bool(result.get("ok", False)):
-                total += 1
-            else:
-                sync_falhas += 1
-                if len(falhas_refs) < 10:
-                    falhas_refs.append(_fail_ref(cod, nome, result))
-        if sync_falhas:
-            detalhe = _build_fail_detail(sync_falhas, falhas_refs)
             return _service_result(
                 ok=False,
                 data=None,
                 error=(
                     "Falha ao salvar clientes na API central. "
                     "Nenhuma confirmação local foi aplicada.\n\n"
-                    f"Clientes com falha: {detalhe}"
+                    f"Detalhe: {detalhe}"
                 ),
                 source="api",
             )
@@ -191,48 +244,44 @@ def importar_clientes_excel(path: str, *, is_desktop_api_sync_enabled):
 
     total = 0
     sync_falhas = 0
-    falhas_refs = []
     api_mode, _desktop_secret = _api_mode(is_desktop_api_sync_enabled)
 
     linhas_local = []
     for _, r in df.iterrows():
-        cod = str(r.get(col_cod, "")).strip()
-        nome = str(r.get(col_nome, "")).strip()
+        cod = _cell_text(r.get(col_cod, ""))
+        nome = _cell_text(r.get(col_nome, ""))
         if not cod or not nome:
             continue
 
-        endereco = str(r.get(col_end, "")).strip() if col_end else ""
-        telefone = str(r.get(col_tel, "")).strip() if col_tel else ""
-        vendedor = str(r.get(col_vendedor, "")).strip() if col_vendedor else ""
+        endereco = _cell_text(r.get(col_end, "")) if col_end else ""
+        telefone = _cell_text(r.get(col_tel, "")) if col_tel else ""
+        vendedor = _cell_text(r.get(col_vendedor, "")) if col_vendedor else ""
+        linhas_local.append((upper(cod), upper(nome), upper(endereco), upper(telefone), upper(vendedor)))
 
-        if api_mode:
-            result = sync_cliente_upsert_api(
-                cod, nome, endereco, telefone, vendedor,
-                is_desktop_api_sync_enabled=is_desktop_api_sync_enabled,
-            )
-            if isinstance(result, dict) and bool(result.get("ok", False)):
-                total += 1
-            else:
-                sync_falhas += 1
-                if len(falhas_refs) < 10:
-                    falhas_refs.append(_fail_ref(cod, nome, result))
-        else:
-            linhas_local.append((upper(cod), upper(nome), upper(endereco), upper(telefone), upper(vendedor)))
-
-    if api_mode and sync_falhas:
-        detalhe = _build_fail_detail(sync_falhas, falhas_refs)
-        return _service_result(
-            ok=False,
-            data=None,
-            error=(
-                "Falha ao importar clientes na API central. "
-                "Nenhuma confirmação local foi aplicada.\n\n"
-                f"Clientes com falha: {detalhe}"
-            ),
-            source="api",
+    if api_mode:
+        result = sync_clientes_bulk_upsert_api(
+            linhas_local,
+            is_desktop_api_sync_enabled=is_desktop_api_sync_enabled,
         )
-
-    if not api_mode:
+        if isinstance(result, dict) and bool(result.get("ok", False)):
+            data = result.get("data") if isinstance(result.get("data"), dict) else {}
+            total = int((data or {}).get("total") or len(linhas_local))
+        else:
+            detalhe = _error_message(
+                Exception(result.get("error") if isinstance(result, dict) else ""),
+                "Falha ao sincronizar clientes em lote na API.",
+            )
+            return _service_result(
+                ok=False,
+                data=None,
+                error=(
+                    "Falha ao importar clientes na API central. "
+                    "Nenhuma confirmação local foi aplicada.\n\n"
+                    f"Detalhe: {detalhe}"
+                ),
+                source="api",
+            )
+    else:
         upsert_clientes_local(linhas_local)
         total = len(linhas_local)
         for cod, nome, endereco, telefone, vendedor in linhas_local:

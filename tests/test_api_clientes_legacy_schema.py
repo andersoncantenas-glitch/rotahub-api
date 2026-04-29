@@ -47,6 +47,47 @@ class ApiClientesLegacySchemaTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(row, ("001", "CLIENTE NOVO", "RUA A", "9999", "VEND 1"))
 
+    def test_bulk_upsert_clientes_accepts_legacy_table(self):
+        payload = api_server.DesktopClientesBulkUpsertIn(
+            clientes=[
+                api_server.DesktopClienteUpsertIn(
+                    cod_cliente="001",
+                    nome_cliente="Cliente Novo",
+                    telefone="9999",
+                ),
+                api_server.DesktopClienteUpsertIn(
+                    cod_cliente="002",
+                    nome_cliente="Cliente Dois",
+                    endereco="Rua Dois",
+                    vendedor="Vend 2",
+                ),
+            ]
+        )
+
+        result = api_server.desktop_clientes_bulk_upsert(payload, _ok=True)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["total"], 2)
+        self.assertEqual(result["updated"], 1)
+        self.assertEqual(result["created"], 1)
+        with sqlite3.connect(self.db_path) as conn:
+            codes = [
+                row[0]
+                for row in conn.execute(
+                    "SELECT cod_cliente FROM clientes ORDER BY cod_cliente"
+                ).fetchall()
+            ]
+            row_001 = conn.execute(
+                "SELECT nome_cliente, telefone FROM clientes WHERE cod_cliente='001'"
+            ).fetchone()
+            row_002 = conn.execute(
+                "SELECT nome_cliente, endereco, vendedor FROM clientes WHERE cod_cliente='002'"
+            ).fetchone()
+        self.assertIn("001", codes)
+        self.assertIn("002", codes)
+        self.assertEqual(row_001, ("CLIENTE NOVO", "9999"))
+        self.assertEqual(row_002, ("CLIENTE DOIS", "RUA DOIS", "VEND 2"))
+
     def test_clientes_base_returns_telefone_after_schema_repair(self):
         api_server.desktop_clientes_upsert(
             api_server.DesktopClienteUpsertIn(
