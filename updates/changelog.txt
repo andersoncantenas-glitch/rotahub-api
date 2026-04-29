@@ -1,3 +1,8 @@
+2026-04-29 13:48:55 - v4.4.6
+- Release automatizada (patch).
+- Versao anterior: v4.4.5.
+- Corrige importacao de clientes em bancos legados do Render e melhora detalhe de erro da API no desktop.
+
 2026-04-29 08:21:32 - v4.4.5
 - Release automatizada (patch).
 - Versao anterior: v4.4.4.

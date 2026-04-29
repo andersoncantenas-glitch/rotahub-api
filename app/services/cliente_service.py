@@ -108,6 +108,15 @@ def _build_fail_detail(sync_falhas: int, falhas_refs):
     return detalhe
 
 
+def _fail_ref(cod, nome, result) -> str:
+    ref = str(cod or nome or "?").strip() or "?"
+    if isinstance(result, dict):
+        err = str(result.get("error") or "").strip()
+        if err:
+            return f"{ref}: {err}"
+    return ref
+
+
 def salvar_clientes_linhas(linhas, *, is_desktop_api_sync_enabled):
     total = 0
     sync_falhas = 0
@@ -125,7 +134,7 @@ def salvar_clientes_linhas(linhas, *, is_desktop_api_sync_enabled):
             else:
                 sync_falhas += 1
                 if len(falhas_refs) < 10:
-                    falhas_refs.append(str(cod or nome or "?"))
+                    falhas_refs.append(_fail_ref(cod, nome, result))
         if sync_falhas:
             detalhe = _build_fail_detail(sync_falhas, falhas_refs)
             return _service_result(
@@ -206,7 +215,7 @@ def importar_clientes_excel(path: str, *, is_desktop_api_sync_enabled):
             else:
                 sync_falhas += 1
                 if len(falhas_refs) < 10:
-                    falhas_refs.append(str(cod or nome or "?"))
+                    falhas_refs.append(_fail_ref(cod, nome, result))
         else:
             linhas_local.append((upper(cod), upper(nome), upper(endereco), upper(telefone), upper(vendedor)))
 

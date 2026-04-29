@@ -159,6 +159,29 @@ def ensure_core_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    cur.execute("PRAGMA table_info(clientes)")
+    clientes_cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+    clientes_expected_cols = {
+        "cod_cliente": "TEXT",
+        "nome_cliente": "TEXT",
+        "endereco": "TEXT",
+        "bairro": "TEXT",
+        "cidade": "TEXT",
+        "uf": "TEXT",
+        "telefone": "TEXT",
+        "rota": "TEXT",
+        "vendedor": "TEXT",
+        "latitude": "REAL",
+        "longitude": "REAL",
+    }
+    for col, decl in clientes_expected_cols.items():
+        if col not in clientes_cols:
+            cur.execute(f"ALTER TABLE clientes ADD COLUMN {col} {decl}")
+            clientes_cols.add(col)
+    try:
+        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_clientes_cod ON clientes(cod_cliente)")
+    except Exception:
+        pass
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS equipes (

@@ -111,6 +111,33 @@ def table_exists(cur: sqlite3.Cursor, table: str) -> bool:
     return bool(cur.fetchone())
 
 
+def _ensure_clientes_columns(cur: sqlite3.Cursor) -> set[str]:
+    cur.execute("PRAGMA table_info(clientes)")
+    cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+    expected = {
+        "cod_cliente": "TEXT",
+        "nome_cliente": "TEXT",
+        "endereco": "TEXT",
+        "bairro": "TEXT",
+        "cidade": "TEXT",
+        "uf": "TEXT",
+        "telefone": "TEXT",
+        "rota": "TEXT",
+        "vendedor": "TEXT",
+        "latitude": "REAL",
+        "longitude": "REAL",
+    }
+    for col, decl in expected.items():
+        if col not in cols:
+            cur.execute(f"ALTER TABLE clientes ADD COLUMN {col} {decl}")
+            cols.add(col)
+    try:
+        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_clientes_cod ON clientes(cod_cliente)")
+    except Exception:
+        logging.debug("Indice unico de clientes(cod_cliente) nao criado; mantendo schema legado.", exc_info=True)
+    return cols
+
+
 PBKDF2_ITERATIONS = 200_000
 
 def hash_password_pbkdf2(password: str, *, iterations: int = PBKDF2_ITERATIONS) -> str:
@@ -3053,15 +3080,32 @@ def desktop_clientes_upsert(payload: DesktopClienteUpsertIn, _ok: bool = Depends
 
     with get_conn() as conn:
         cur = conn.cursor()
-        cur.execute("PRAGMA table_info(clientes)")
-        cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='clientes'")
+        if not cur.fetchone():
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS clientes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cod_cliente TEXT UNIQUE,
+                    nome_cliente TEXT,
+                    endereco TEXT,
+                    bairro TEXT,
+                    cidade TEXT,
+                    uf TEXT,
+                    telefone TEXT,
+                    rota TEXT,
+                    vendedor TEXT
+                )
+                """
+            )
+        cols = _ensure_clientes_columns(cur)
         if not cols:
             raise HTTPException(status_code=500, detail="Tabela clientes indisponivel.")
 
         cur.execute(
             """
             SELECT
-                id,
+                rowid AS row_ref,
                 COALESCE(nome_cliente,'') AS nome_cliente,
                 COALESCE(endereco,'') AS endereco,
                 COALESCE(telefone,'') AS telefone,
@@ -3107,8 +3151,8 @@ def desktop_clientes_upsert(payload: DesktopClienteUpsertIn, _ok: bool = Depends
                 set_parts.append("telefone=?"); params.append(telefone_final)
             if "vendedor" in cols:
                 set_parts.append("vendedor=?"); params.append(vendedor_final)
-            params.append(int(existing["id"]))
-            cur.execute(f"UPDATE clientes SET {', '.join(set_parts)} WHERE id=?", tuple(params))
+            params.append(int(existing["row_ref"]))
+            cur.execute(f"UPDATE clientes SET {', '.join(set_parts)} WHERE rowid=?", tuple(params))
             return {"ok": True, "cod_cliente": cod_cliente, "updated": int(cur.rowcount or 0)}
 
         cols_ins: List[str] = []
@@ -3219,12 +3263,12 @@ def desktop_clientes_base(
         cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='clientes'")
         if not cur.fetchone():
             return []
-        cur.execute("PRAGMA table_info(clientes)")
-        cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+        cols = _ensure_clientes_columns(cur)
 
         col_cod = "cod_cliente" if "cod_cliente" in cols else "''"
         col_nome = "nome_cliente" if "nome_cliente" in cols else "''"
         col_end = "endereco" if "endereco" in cols else "''"
+        col_tel = "telefone" if "telefone" in cols else "''"
         col_cid = "cidade" if "cidade" in cols else "''"
         col_bai = "bairro" if "bairro" in cols else "''"
         col_vend = "vendedor" if "vendedor" in cols else "''"
@@ -3248,6 +3292,7 @@ def desktop_clientes_base(
                 TRIM(COALESCE({col_cod}, '')) AS cod_cliente,
                 TRIM(COALESCE({col_nome}, '')) AS nome_cliente,
                 TRIM(COALESCE({col_end}, '')) AS endereco,
+                TRIM(COALESCE({col_tel}, '')) AS telefone,
                 TRIM(COALESCE({col_cid}, '')) AS cidade,
                 TRIM(COALESCE({col_bai}, '')) AS bairro,
                 TRIM(COALESCE({col_vend}, '')) AS vendedor,
@@ -3275,6 +3320,7 @@ def desktop_clientes_base(
                     "cod_cliente": str(r["cod_cliente"] or "").strip(),
                     "nome_cliente": str(r["nome_cliente"] or "").strip(),
                     "endereco": str(r["endereco"] or "").strip(),
+                    "telefone": str(r["telefone"] or "").strip(),
                     "cidade": str(r["cidade"] or "").strip(),
                     "bairro": str(r["bairro"] or "").strip(),
                     "vendedor": str(r["vendedor"] or "").strip(),
