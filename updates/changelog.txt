@@ -1,3 +1,8 @@
+2026-04-29 08:21:32 - v4.4.5
+- Release automatizada (patch).
+- Versao anterior: v4.4.4.
+- Corrige abertura da rotina Rotas e carregamento da programacao ao ir de Recebimentos para Despesas.
+
 2026-04-28 19:12:46 - v4.4.4
 - Release automatizada (patch).
 - Versao anterior: v4.4.3.

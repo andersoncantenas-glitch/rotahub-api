@@ -1885,7 +1885,12 @@ class App(tk.Tk):
         if sidebar_key:
             self.sidebar.set_active(sidebar_key)
 
-        page = self._create_page_if_needed(name)
+        try:
+            page = self._create_page_if_needed(name)
+        except Exception as e:
+            logging.exception("Erro ao criar rotina %s", name)
+            messagebox.showerror("ERRO", f"Erro ao abrir rotina '{self.get_routine_title(name)}':\n\n{e}")
+            return
         if not page:
             messagebox.showwarning("ATENÇÃO", f"Rotina '{self.get_routine_nav_label(name)}' não encontrada.")
             return
@@ -2244,15 +2249,24 @@ class RotasPage(PageBase):
         )
         self.tree.bind("<Double-1>", lambda _e: self._abrir_mapa_selecionado())
 
-        ttk.Button(self.footer_right, text="\U0001F504 ATUALIZAR", style="Ghost.TButton", command=self.carregar).grid(
-            row=0, column=0, padx=4
-        )
-        ttk.Button(self.footer_right, text="\U0001F5FA MAPA SELECIONADO", style="Primary.TButton", command=self._abrir_mapa_selecionado).grid(
-            row=0, column=1, padx=4
-        )
-        ttk.Button(self.footer_right, text="\U0001F5FA MAPA DE TODAS", style="Primary.TButton", command=self._abrir_mapa_todas).grid(
-            row=0, column=2, padx=4
-        )
+        ttk.Button(
+            self.footer_right,
+            text="\U0001F5FA MAPA DE TODAS",
+            style="Primary.TButton",
+            command=self._abrir_mapa_todas,
+        ).pack(side="right", padx=4)
+        ttk.Button(
+            self.footer_right,
+            text="\U0001F5FA MAPA SELECIONADO",
+            style="Primary.TButton",
+            command=self._abrir_mapa_selecionado,
+        ).pack(side="right", padx=4)
+        ttk.Button(
+            self.footer_right,
+            text="\U0001F504 ATUALIZAR",
+            style="Ghost.TButton",
+            command=self.carregar,
+        ).pack(side="right", padx=4)
 
         self._rows_cache = []
         self._load_seq = 0
@@ -2261,8 +2275,8 @@ class RotasPage(PageBase):
         self._refresh_job = None
         self._refresh_ms = 10000
         self._refresh_var = tk.StringVar(value="10s")
-        ttk.Label(self.footer_left, text="Atualização automática:", style="CardLabel.TLabel").grid(
-            row=0, column=0, padx=(0, 6), sticky="w"
+        ttk.Label(self.footer_left, text="Atualização automática:", style="CardLabel.TLabel").pack(
+            side="left", padx=(16, 6)
         )
         self.cb_refresh = ttk.Combobox(
             self.footer_left,
@@ -2271,7 +2285,7 @@ class RotasPage(PageBase):
             textvariable=self._refresh_var,
             values=["5s", "10s", "30s"],
         )
-        self.cb_refresh.grid(row=0, column=1, padx=(0, 6), sticky="w")
+        self.cb_refresh.pack(side="left", padx=(0, 6))
         self.cb_refresh.bind("<<ComboboxSelected>>", self._on_change_refresh_interval)
         self.bind("<Destroy>", self._on_destroy, add="+")
 
@@ -12708,7 +12722,11 @@ class RecebimentosPage(PageBase):
             except Exception:
                 logging.debug("Falha ignorada")
 
-            page = self.app.pages.get("Despesas") if hasattr(self.app, "pages") else None
+            page = None
+            if hasattr(self.app, "_create_page_if_needed"):
+                page = self.app._create_page_if_needed("Despesas")
+            elif hasattr(self.app, "pages"):
+                page = self.app.pages.get("Despesas")
             if page and hasattr(page, "set_programacao"):
                 self._set_despesas_loading(True, "Preparando despesas...", 78)
                 self._set_despesas_loading(True, f"Carregando rota {prog}...", 94)
