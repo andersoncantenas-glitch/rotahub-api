@@ -1,3 +1,8 @@
+2026-04-30 07:43:49 - v4.4.8
+- Release automatizada (patch).
+- Versao anterior: v4.4.7.
+- Origem do adiantamento de rota, recibo de adiantamento e salvamento financeiro parcial sem bloqueio por variacoes de KG/odometro.
+
 2026-04-29 15:09:15 - v4.4.7
 - Release automatizada (patch).
 - Versao anterior: v4.4.6.

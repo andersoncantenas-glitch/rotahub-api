@@ -227,6 +227,122 @@ def compute_sidebar_width(win) -> int:
     return 290
 
 
+def _fmt_receipt_money(value) -> str:
+    return f"R$ {safe_float(value, 0.0):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _normalize_adiantamento_origem(value: str) -> str:
+    text = upper(str(value or "").strip())
+    return text or "NAO INFORMADA"
+
+
+def _draw_adiantamento_receipt_pdf(c, page_width, page_height, *, codigo, motorista, veiculo,
+                                   equipe="", valor=0.0, origem="", local_rota="",
+                                   local_carregamento="", usuario="", data_emissao="",
+                                   via_labels=None):
+    """Desenha recibo de adiantamento no canvas atual."""
+    from reportlab.lib.units import mm
+
+    valor = safe_float(valor, 0.0)
+    if valor <= 0:
+        return
+
+    labels = list(via_labels or ("VIA CAIXA", "VIA MOTORISTA"))
+    copies = 2 if page_height >= 230 * mm else 1
+    labels = (labels + ["VIA MOTORISTA"])[:copies]
+    margin = 12 * mm
+    gap = 8 * mm if copies > 1 else 0
+    usable_h = page_height - (2 * margin) - gap
+    block_h = usable_h / copies
+
+    def clean(v):
+        return fix_mojibake_text(str(v or "").strip())
+
+    def draw_kv(x, y, label, value, max_chars=70):
+        c.setFont("Helvetica-Bold", 8.5)
+        c.drawString(x, y, label)
+        c.setFont("Helvetica", 8.5)
+        c.drawString(x + 33 * mm, y, clean(value)[:max_chars])
+
+    data_txt = clean(data_emissao or datetime.now().strftime("%d/%m/%Y %H:%M"))
+    origem_txt = _normalize_adiantamento_origem(origem)
+    equipe_txt = clean(equipe or "-")
+    user_txt = clean(usuario or "-")
+
+    for idx in range(copies):
+        top = page_height - margin - (idx * (block_h + gap))
+        bottom_y = top - block_h
+        if idx > 0 and gap > 0:
+            c.setDash(3, 3)
+            c.line(margin, top + (gap / 2), page_width - margin, top + (gap / 2))
+            c.setDash()
+
+        c.setLineWidth(0.8)
+        c.rect(margin, bottom_y, page_width - (2 * margin), block_h)
+
+        y = top - 7 * mm
+        c.setFont("Helvetica-Bold", 12)
+        c.drawCentredString(page_width / 2, y, "RECIBO DE ADIANTAMENTO DE ROTA")
+        c.setFont("Helvetica", 7.5)
+        c.drawRightString(page_width - margin - 4 * mm, y, labels[idx])
+        y -= 8 * mm
+
+        c.setFont("Helvetica-Bold", 16)
+        c.drawCentredString(page_width / 2, y, _fmt_receipt_money(valor))
+        y -= 8 * mm
+
+        x1 = margin + 5 * mm
+        x2 = margin + (page_width - (2 * margin)) / 2 + 4 * mm
+        draw_kv(x1, y, "Programacao:", codigo, 36)
+        draw_kv(x2, y, "Emissao:", data_txt, 32)
+        y -= 6 * mm
+        draw_kv(x1, y, "Motorista:", motorista, 42)
+        draw_kv(x2, y, "Veiculo:", veiculo or "-", 30)
+        y -= 6 * mm
+        draw_kv(x1, y, "Equipe:", equipe_txt, 42)
+        draw_kv(x2, y, "Origem:", origem_txt, 30)
+        y -= 6 * mm
+        draw_kv(x1, y, "Rota:", local_rota or "-", 42)
+        draw_kv(x2, y, "Carregamento:", local_carregamento or "-", 30)
+        y -= 8 * mm
+
+        c.setFont("Helvetica", 8.4)
+        receipt_text = (
+            "Declaro que o motorista identificado recebeu o valor acima como adiantamento "
+            "vinculado exclusivamente a esta programacao, devendo prestar contas no fechamento da rota."
+        )
+        lines = []
+        words = receipt_text.split()
+        line = ""
+        max_w = page_width - (2 * margin) - (10 * mm)
+        for word in words:
+            candidate = word if not line else f"{line} {word}"
+            if c.stringWidth(candidate, "Helvetica", 8.4) <= max_w:
+                line = candidate
+            else:
+                lines.append(line)
+                line = word
+        if line:
+            lines.append(line)
+        for line in lines:
+            c.drawString(x1, y, line)
+            y -= 4.2 * mm
+
+        y -= 4 * mm
+        sig_y = max(bottom_y + 13 * mm, y)
+        sig_w = (page_width - (2 * margin) - (18 * mm)) / 2
+        left_sig_x = margin + 7 * mm
+        right_sig_x = left_sig_x + sig_w + 18 * mm
+        c.line(left_sig_x, sig_y, left_sig_x + sig_w, sig_y)
+        c.line(right_sig_x, sig_y, right_sig_x + sig_w, sig_y)
+        c.setFont("Helvetica", 7.8)
+        c.drawCentredString(left_sig_x + sig_w / 2, sig_y - 4 * mm, "Assinatura do Motorista")
+        c.drawCentredString(right_sig_x + sig_w / 2, sig_y - 4 * mm, "Assinatura do Caixa / Responsavel")
+        c.setFont("Helvetica", 7.2)
+        c.drawString(x1, bottom_y + 4 * mm, f"Registrado por: {user_txt}")
+        c.drawRightString(page_width - margin - 5 * mm, bottom_y + 4 * mm, f"Documento vinculado a programacao {clean(codigo)}")
+
+
 ROUTINE_DEFINITIONS = (
     {
         "page_name": "Home",
@@ -1393,6 +1509,7 @@ def db_init():
         safe_add_column(cur, "programacoes", "hora_chegada", "TEXT")
         safe_add_column(cur, "programacoes", "diaria_motorista_valor", "REAL DEFAULT 0")
         safe_add_column(cur, "programacoes", "adiantamento", "REAL DEFAULT 0")
+        safe_add_column(cur, "programacoes", "adiantamento_origem", "TEXT")
         safe_add_column(cur, "programacoes", "num_nf", "TEXT")
         safe_add_column(cur, "programacoes", "kg_carregado", "REAL DEFAULT 0")
         safe_add_column(cur, "programacoes", "media", "REAL DEFAULT 0")
@@ -5515,11 +5632,12 @@ class ProgramacaoPage(PageBase):
         control = ttk.Frame(card, style="CardInset.TFrame", padding=(12, 10))
         control.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         control.grid_columnconfigure(0, weight=0, minsize=95)
-        control.grid_columnconfigure(1, weight=0, minsize=95)
-        control.grid_columnconfigure(2, weight=2, minsize=170)
-        control.grid_columnconfigure(3, weight=2, minsize=180)
-        control.grid_columnconfigure(4, weight=2, minsize=180)
-        control.grid_columnconfigure(5, weight=2, minsize=180)
+        control.grid_columnconfigure(1, weight=1, minsize=150)
+        control.grid_columnconfigure(2, weight=0, minsize=95)
+        control.grid_columnconfigure(3, weight=2, minsize=150)
+        control.grid_columnconfigure(4, weight=2, minsize=165)
+        control.grid_columnconfigure(5, weight=2, minsize=165)
+        control.grid_columnconfigure(6, weight=2, minsize=165)
 
         ttk.Label(team, text="Motorista", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w")
         self.cb_motorista = ttk.Combobox(team, state="readonly")
@@ -5578,10 +5696,15 @@ class ProgramacaoPage(PageBase):
         self.ent_adiantamento_prog.insert(0, "0,00")
         self._bind_money_entry(self.ent_adiantamento_prog)
 
-        ttk.Label(control, text="Codigo", style="CardLabel.TLabel").grid(row=0, column=1, sticky="w")
+        ttk.Label(control, text="Origem do Valor", style="CardLabel.TLabel").grid(row=0, column=1, sticky="w")
+        self.ent_adiantamento_origem_prog = ttk.Entry(control, style="Field.TEntry")
+        self.ent_adiantamento_origem_prog.grid(row=1, column=1, sticky="ew", padx=(0, 10))
+        bind_entry_smart(self.ent_adiantamento_origem_prog, "text")
+
+        ttk.Label(control, text="Codigo", style="CardLabel.TLabel").grid(row=0, column=2, sticky="w")
         self.ent_codigo = ttk.Entry(control, style="Field.TEntry", state="readonly")
-        self.ent_codigo.grid(row=1, column=1, sticky="ew", padx=(0, 10))
-        ttk.Label(control, text="Status", style="CardLabel.TLabel").grid(row=0, column=2, sticky="w")
+        self.ent_codigo.grid(row=1, column=2, sticky="ew", padx=(0, 10))
+        ttk.Label(control, text="Status", style="CardLabel.TLabel").grid(row=0, column=3, sticky="w")
         self.lbl_prog_status_badge = ttk.Label(
             control,
             text="Status atual: -",
@@ -5589,28 +5712,28 @@ class ProgramacaoPage(PageBase):
             foreground="#6B7280",
             font=("Segoe UI", 9, "bold"),
         )
-        self.lbl_prog_status_badge.grid(row=1, column=2, sticky="ew")
+        self.lbl_prog_status_badge.grid(row=1, column=3, sticky="ew")
         self.btn_salvar_prog = ttk.Button(
             control,
             text="SALVAR PROGRAMAÇÃO",
             style="Primary.TButton",
             command=self.salvar_programacao
         )
-        self.btn_salvar_prog.grid(row=1, column=3, sticky="ew", padx=(10, 8))
+        self.btn_salvar_prog.grid(row=1, column=4, sticky="ew", padx=(10, 8))
         self.btn_editar_prog = ttk.Button(
             control,
             text="EDITAR PROGRAMAÇÃO",
             style="Ghost.TButton",
             command=self.carregar_programacao_para_edicao
         )
-        self.btn_editar_prog.grid(row=1, column=4, sticky="ew", padx=(0, 8))
+        self.btn_editar_prog.grid(row=1, column=5, sticky="ew", padx=(0, 8))
         self.btn_excluir_prog = ttk.Button(
             control,
             text="EXCLUIR PROGRAMAÇÃO",
             style="Danger.TButton",
             command=self.excluir_programacao,
         )
-        self.btn_excluir_prog.grid(row=1, column=5, sticky="ew")
+        self.btn_excluir_prog.grid(row=1, column=6, sticky="ew")
 
         rank_wrap = ttk.Frame(card, style="Card.TFrame")
         rank_wrap.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
@@ -6959,6 +7082,8 @@ class ProgramacaoPage(PageBase):
             self.ent_carregamento_prog.delete(0, "end")
             self.ent_adiantamento_prog.delete(0, "end")
             self.ent_adiantamento_prog.insert(0, "0,00")
+            if hasattr(self, "ent_adiantamento_origem_prog"):
+                self.ent_adiantamento_origem_prog.delete(0, "end")
             self.ent_codigo.config(state="normal")
             self.ent_codigo.delete(0, "end")
             self.ent_codigo.config(state="readonly")
@@ -7188,6 +7313,7 @@ class ProgramacaoPage(PageBase):
         status = ""
         local_rota = local_carreg = ""
         adiantamento = 0.0
+        adiantamento_origem = ""
         motorista_codigo = ""
         motorista_id = 0
         tipo_estimativa = "KG"
@@ -7220,6 +7346,7 @@ class ProgramacaoPage(PageBase):
                         )
                     )
                     adiantamento = safe_float(rota.get("adiantamento"), safe_float(rota.get("adiantamento_rota"), 0.0))
+                    adiantamento_origem = upper(str(rota.get("adiantamento_origem") or "").strip())
                     motorista_codigo = upper(str(rota.get("motorista_codigo") or rota.get("codigo_motorista") or ""))
                     motorista_id = safe_int(rota.get("motorista_id"), 0)
                     tipo_estimativa = upper(str(rota.get("tipo_estimativa") or "KG").strip())
@@ -7249,6 +7376,7 @@ class ProgramacaoPage(PageBase):
                     if "adiantamento" in cols_prog
                     else ("COALESCE(adiantamento_rota, 0)" if "adiantamento_rota" in cols_prog else "0")
                 )
+                adiant_origem_expr = "COALESCE(adiantamento_origem, '')" if "adiantamento_origem" in cols_prog else "''"
                 mot_cod_expr = (
                     "COALESCE(motorista_codigo, '')"
                     if "motorista_codigo" in cols_prog
@@ -7269,6 +7397,7 @@ class ProgramacaoPage(PageBase):
                         {local_expr} as local_rota,
                         {carreg_expr} as local_carreg,
                         {adiant_expr} as adiantamento,
+                        {adiant_origem_expr} as adiantamento_origem,
                         {mot_cod_expr} as motorista_codigo,
                         {mot_id_expr} as motorista_id,
                         {tipo_estim_expr} as tipo_estimativa,
@@ -7293,12 +7422,13 @@ class ProgramacaoPage(PageBase):
             local_rota = self._normalize_local_rota(row[5] or "")
             local_carreg = upper(row[6] or "")
             adiantamento = safe_float(row[7], 0.0)
-            motorista_codigo = upper(row[8] or "")
-            motorista_id = safe_int(row[9], 0)
-            tipo_estimativa = upper((row[10] or "KG").strip())
+            adiantamento_origem = upper((row[8] or "").strip())
+            motorista_codigo = upper(row[9] or "")
+            motorista_id = safe_int(row[10], 0)
+            tipo_estimativa = upper((row[11] or "KG").strip())
             if tipo_estimativa not in {"KG", "CX"}:
                 tipo_estimativa = "KG"
-            caixas_estimado = safe_int(row[11], 0)
+            caixas_estimado = safe_int(row[12], 0)
 
         status_ref, status_api, status_local = self._obter_status_programacao_para_edicao(codigo, status)
         if not self._status_permite_edicao_programacao(status_ref):
@@ -7350,6 +7480,9 @@ class ProgramacaoPage(PageBase):
         self.ent_carregamento_prog.insert(0, local_carreg)
         self.ent_adiantamento_prog.delete(0, "end")
         self.ent_adiantamento_prog.insert(0, f"{adiantamento:.2f}".replace(".", ","))
+        if hasattr(self, "ent_adiantamento_origem_prog"):
+            self.ent_adiantamento_origem_prog.delete(0, "end")
+            self.ent_adiantamento_origem_prog.insert(0, adiantamento_origem)
 
         keys = [upper(p.strip()) for p in re.split(r"[|,;/]+", str(equipe_raw or "")) if p.strip()]
         valid_keys = {str(r.get("key", "")).strip() for r in (self._ajudantes_rows or [])}
@@ -7924,6 +8057,7 @@ class ProgramacaoPage(PageBase):
         add_col("chegada_dt", "TEXT")
         add_col("tipo_estimativa", "TEXT DEFAULT 'KG'")
         add_col("caixas_estimado", "INTEGER DEFAULT 0")
+        add_col("adiantamento_origem", "TEXT")
         add_col("usuario_criacao", "TEXT")
         add_col("usuario_ultima_edicao", "TEXT")
         add_col("status_operacional", "TEXT")
@@ -7980,6 +8114,9 @@ class ProgramacaoPage(PageBase):
             caixas_estimado = 0
         usuario_logado = upper(str((getattr(self.app, "user", {}) or {}).get("nome", "")).strip()) or "ADMIN"
         adiantamento_val = safe_money(self.ent_adiantamento_prog.get(), 0.0)
+        adiantamento_origem_val = upper(
+            str(getattr(self, "ent_adiantamento_origem_prog", self.ent_adiantamento_prog).get() or "").strip()
+        )
         if adiantamento_val < 0:
             messagebox.showwarning("ATENÇÃO", "Adiantamento não pode ser negativo.")
             return
@@ -8157,6 +8294,7 @@ class ProgramacaoPage(PageBase):
                         "granja_carregada": local_carreg,
                         "local_carreg": local_carreg,
                         "adiantamento": safe_float(adiantamento_val, 0.0),
+                        "adiantamento_origem": adiantamento_origem_val,
                         "total_caixas": caixas_programadas_sync,
                         "quilos": kg_programado_sync,
                         "nf_kg": nf_kg_sync,
@@ -8489,6 +8627,11 @@ class ProgramacaoPage(PageBase):
                             "UPDATE programacoes SET adiantamento_rota=? WHERE codigo_programacao=?",
                             (adiantamento_val, codigo),
                         )
+                    if "adiantamento_origem" in cols_prog:
+                        cur.execute(
+                            "UPDATE programacoes SET adiantamento_origem=? WHERE codigo_programacao=?",
+                            (adiantamento_origem_val, codigo),
+                        )
                 except Exception:
                     logging.debug("Falha ignorada")
 
@@ -8660,6 +8803,7 @@ class ProgramacaoPage(PageBase):
                     "granja_carregada": local_carreg,
                     "local_carreg": local_carreg,
                     "adiantamento": safe_float(adiantamento_val, 0.0),
+                    "adiantamento_origem": adiantamento_origem_val,
                     "total_caixas": safe_int(total_caixas, 0),
                     "quilos": safe_float(total_quilos, 0.0),
                     "usuario_criacao": usuario_logado,
@@ -9524,6 +9668,7 @@ class ProgramacaoPage(PageBase):
             raise ValueError("Sem itens na programacao.")
 
         usuario_edicao = upper(str(usuario_edicao_override or "").strip())
+        meta_prog = {}
         try:
             meta_prog = self._buscar_meta_programacao(codigo)
             usuario_criacao = upper(str(meta_prog.get("usuario_criacao") or usuario_criacao or "").strip())
@@ -9619,6 +9764,31 @@ class ProgramacaoPage(PageBase):
 
         c.setFont("Helvetica-Oblique", 9)
         c.drawCentredString(w / 2, 26, '"Tudo posso naquele que me fortalece." (Filipenses 4:13)')
+
+        adiantamento_recibo = safe_float(meta_prog.get("adiantamento"), 0.0)
+        adiantamento_origem = str(meta_prog.get("adiantamento_origem") or "").strip()
+        if adiantamento_recibo <= 0 and hasattr(self, "ent_adiantamento_prog"):
+            adiantamento_recibo = safe_money(self.ent_adiantamento_prog.get(), 0.0)
+        if not adiantamento_origem and hasattr(self, "ent_adiantamento_origem_prog"):
+            adiantamento_origem = str(self.ent_adiantamento_origem_prog.get() or "").strip()
+        if adiantamento_recibo > 0:
+            c.showPage()
+            _draw_adiantamento_receipt_pdf(
+                c,
+                w,
+                h,
+                codigo=codigo,
+                motorista=motorista,
+                veiculo=veiculo,
+                equipe=equipe_txt,
+                valor=adiantamento_recibo,
+                origem=adiantamento_origem,
+                local_rota=meta_prog.get("local_rota", ""),
+                local_carregamento=meta_prog.get("local_carregamento", ""),
+                usuario=usuario_edicao or usuario_criacao,
+                data_emissao=data_emissao,
+            )
+
         c.save()
         return path
 
@@ -10224,6 +10394,8 @@ class ProgramacaoPage(PageBase):
             "local_carregamento": "",
             "usuario_criacao": "",
             "usuario_ultima_edicao": "",
+            "adiantamento": 0.0,
+            "adiantamento_origem": "",
         }
         try:
             bundle = self._api_bundle_relatorio(upper(codigo or "").strip()) if hasattr(self, "_api_bundle_relatorio") else None
@@ -10257,6 +10429,11 @@ class ProgramacaoPage(PageBase):
                             or ""
                         )
                     )
+                    meta["adiantamento"] = safe_float(
+                        rota.get("adiantamento"),
+                        safe_float(rota.get("adiantamento_rota"), 0.0),
+                    )
+                    meta["adiantamento_origem"] = upper(str(rota.get("adiantamento_origem") or "").strip())
                     for cand in ("qnt_aves_por_cx", "aves_por_caixa", "qnt_aves_por_caixa"):
                         apc = safe_int(rota.get(cand), 0)
                         if apc > 0:
@@ -10276,12 +10453,19 @@ class ProgramacaoPage(PageBase):
                 caixas_estim_expr = "COALESCE(caixas_estimado,0)" if "caixas_estimado" in cols_prog else "0"
                 usuario_criacao_expr = "COALESCE(usuario_criacao,'')" if "usuario_criacao" in cols_prog else "''"
                 usuario_edicao_expr = "COALESCE(usuario_ultima_edicao,'')" if "usuario_ultima_edicao" in cols_prog else "''"
+                adiant_expr = (
+                    "COALESCE(adiantamento,0)"
+                    if "adiantamento" in cols_prog
+                    else ("COALESCE(adiantamento_rota,0)" if "adiantamento_rota" in cols_prog else "0")
+                )
+                adiant_origem_expr = "COALESCE(adiantamento_origem,'')" if "adiantamento_origem" in cols_prog else "''"
                 cur.execute(
                     f"""
                     SELECT COALESCE(motorista,''), COALESCE(veiculo,''), COALESCE(equipe,''),
                            {data_expr}, {kg_expr},
                            {tipo_estim_expr}, {caixas_estim_expr},
-                           {usuario_criacao_expr}, {usuario_edicao_expr}
+                           {usuario_criacao_expr}, {usuario_edicao_expr},
+                           {adiant_expr}, {adiant_origem_expr}
                     FROM programacoes
                     WHERE codigo_programacao=?
                     LIMIT 1
@@ -10299,6 +10483,8 @@ class ProgramacaoPage(PageBase):
                     meta["caixas_estimado"] = safe_int(row[6], 0)
                     meta["usuario_criacao"] = upper((row[7] or "").strip())
                     meta["usuario_ultima_edicao"] = upper((row[8] or "").strip())
+                    meta["adiantamento"] = safe_float(row[9], 0.0)
+                    meta["adiantamento_origem"] = upper((row[10] or "").strip())
 
                 for cand in ("qnt_aves_por_cx", "aves_por_caixa", "qnt_aves_por_caixa"):
                     if db_has_column(cur, "programacoes", cand):
@@ -10544,6 +10730,23 @@ class ProgramacaoPage(PageBase):
                     layout_profile=profile,
                 )
             c.showPage()
+
+        adiantamento_recibo = safe_float((meta or {}).get("adiantamento"), 0.0)
+        if adiantamento_recibo > 0:
+            _draw_adiantamento_receipt_pdf(
+                c,
+                pagina_w,
+                pagina_h,
+                codigo=codigo,
+                motorista=(meta or {}).get("motorista", ""),
+                veiculo=(meta or {}).get("veiculo", ""),
+                equipe=(meta or {}).get("equipe", ""),
+                valor=adiantamento_recibo,
+                origem=(meta or {}).get("adiantamento_origem", ""),
+                local_rota=(meta or {}).get("local_rota", ""),
+                local_carregamento=(meta or {}).get("local_carregamento", ""),
+                usuario=(meta or {}).get("usuario_ultima_edicao") or (meta or {}).get("usuario_criacao", ""),
+            )
 
         c.save()
 
@@ -17436,9 +17639,13 @@ class DespesasPage(PageBase):
         ):
             return
         if not self._ensure_prestacao_saved_for_output(prog):
+            detalhe = str(getattr(self, "_last_prestacao_save_error", "") or "").strip()
+            msg = "Nao foi possivel salvar litros, media e cedulas antes da finalizacao."
+            if detalhe:
+                msg += f"\n\nDetalhe: {detalhe}"
             messagebox.showerror(
                 "ERRO",
-                "Nao foi possivel salvar litros, media e cedulas antes da finalizacao.",
+                msg,
             )
             return
 
@@ -18014,7 +18221,11 @@ class DespesasPage(PageBase):
         if status == "FECHADA":
             return True
 
-        return bool(self.salvar_tudo(show_feedback=False))
+        self._last_prestacao_save_error = ""
+        ok = bool(self.salvar_tudo(show_feedback=False))
+        if not ok and not str(getattr(self, "_last_prestacao_save_error", "") or "").strip():
+            self._last_prestacao_save_error = "Falha ao salvar os dados financeiros."
+        return ok
 
     def imprimir_resumo(self):
         if not require_reportlab():
@@ -19455,21 +19666,51 @@ class DespesasPage(PageBase):
 
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
         if desktop_secret and is_desktop_api_sync_enabled():
+            api_nf_kg = nf_kg
+            api_nf_kg_carregado = nf_kg_carregado
+            api_nf_kg_vendido = nf_kg_vendido
+            api_nf_saldo = nf_saldo
+            if api_nf_saldo < 0:
+                api_nf_saldo = None
+            if api_nf_kg <= 0 and api_nf_kg_carregado > 0:
+                api_nf_kg = None
+            if api_nf_kg and api_nf_kg > 0 and api_nf_kg_carregado > api_nf_kg:
+                api_nf_kg_carregado = None
+                api_nf_saldo = None
+                if api_nf_kg_vendido > api_nf_kg:
+                    api_nf_kg_vendido = None
+            api_nf_kg_carregado_val = safe_float(api_nf_kg_carregado, 0.0)
+            api_nf_kg_vendido_val = safe_float(api_nf_kg_vendido, 0.0)
+            if api_nf_kg_carregado_val <= 0 and api_nf_kg_vendido_val > 0:
+                api_nf_kg_carregado = None
+                api_nf_saldo = None
+            elif api_nf_kg_carregado_val > 0 and api_nf_kg_vendido_val > api_nf_kg_carregado_val:
+                api_nf_kg_vendido = None
+                api_nf_saldo = None
+
+            api_km_final = km_final
+            api_km_rodado = km_rodado
+            api_media_km_l = media_km_l
+            if km_inicial > 0 and (km_final <= 0 or km_final < km_inicial):
+                api_km_final = None
+                api_km_rodado = None
+                api_media_km_l = None
+
             payload_financeiro = {
                 "nf_numero": nf_numero,
-                "nf_kg": nf_kg,
+                "nf_kg": api_nf_kg,
                 "nf_caixas": nf_caixas,
-                "nf_kg_carregado": nf_kg_carregado,
-                "nf_kg_vendido": nf_kg_vendido,
-                "nf_saldo": nf_saldo,
+                "nf_kg_carregado": api_nf_kg_carregado,
+                "nf_kg_vendido": api_nf_kg_vendido,
+                "nf_saldo": api_nf_saldo,
                 "nf_preco": nf_preco,
                 "media": nf_media_carregada,
                 "nf_caixa_final": nf_caixa_final,
                 "km_inicial": km_inicial,
-                "km_final": km_final,
+                "km_final": api_km_final,
                 "litros": litros,
-                "km_rodado": km_rodado,
-                "media_km_l": media_km_l,
+                "km_rodado": api_km_rodado,
+                "media_km_l": api_media_km_l,
                 "custo_km": custo_km,
                 "ced_200_qtd": cedulas_data.get("ced_200_qtd", 0),
                 "ced_100_qtd": cedulas_data.get("ced_100_qtd", 0),
@@ -19490,6 +19731,7 @@ class DespesasPage(PageBase):
                     payload=payload_financeiro,
                 )
                 self.logger.info(f"Dados salvos via API para programação {prog}")
+                self._last_prestacao_save_error = ""
                 if show_feedback:
                     messagebox.showinfo("SUCESSO", "Todos os dados foram salvos com sucesso!")
                 self.set_status(f"STATUS: Dados salvos para {prog}")
@@ -19499,6 +19741,7 @@ class DespesasPage(PageBase):
             except Exception as exc:
                 logging.debug("Falha ao salvar dados financeiros via API.", exc_info=True)
                 detalhe_api = _friendly_sync_error(exc, "Sem detalhes adicionais da API.")
+                self._last_prestacao_save_error = detalhe_api
                 if show_feedback:
                     messagebox.showerror(
                         "ERRO",
@@ -19603,6 +19846,7 @@ class DespesasPage(PageBase):
                     )
 
             self.logger.info(f"Dados salvos para programação {prog}")
+            self._last_prestacao_save_error = ""
             if show_feedback:
                 messagebox.showinfo("SUCESSO", "Todos os dados foram salvos com sucesso!")
             self.set_status(f"STATUS: Dados salvos para {prog}")
@@ -19612,6 +19856,7 @@ class DespesasPage(PageBase):
 
         except Exception as e:
             self.logger.error(f"Erro ao salvar dados: {str(e)}")
+            self._last_prestacao_save_error = str(e)
             if show_feedback:
                 messagebox.showerror("ERRO", f"Erro ao salvar dados: {str(e)}")
             else:

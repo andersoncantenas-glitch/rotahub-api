@@ -1239,6 +1239,7 @@ def ensure_tables():
             # FOB/CIF + auditoria (compatível com desktop)
             add_prog_col("tipo_estimativa", "tipo_estimativa TEXT DEFAULT 'KG'")
             add_prog_col("caixas_estimado", "caixas_estimado INTEGER DEFAULT 0")
+            add_prog_col("adiantamento_origem", "adiantamento_origem TEXT")
             add_prog_col("usuario_criacao", "usuario_criacao TEXT")
             add_prog_col("usuario_ultima_edicao", "usuario_ultima_edicao TEXT")
             add_prog_col("status_operacional", "status_operacional TEXT")
@@ -2247,6 +2248,7 @@ class DesktopRotaUpsertIn(BaseModel):
     local_carregamento: Optional[str] = None
     local_carregado: Optional[str] = None
     adiantamento: Optional[float] = 0.0
+    adiantamento_origem: Optional[str] = None
     total_caixas: Optional[int] = 0
     quilos: Optional[float] = 0.0
     nf_kg: Optional[float] = None
@@ -2362,6 +2364,7 @@ class DesktopRotaFinanceiroIn(BaseModel):
     ced_2_qtd: Optional[int] = None
     valor_dinheiro: Optional[float] = None
     adiantamento: Optional[float] = None
+    adiantamento_origem: Optional[str] = None
     rota_observacao: Optional[str] = None
 
 
@@ -3404,6 +3407,7 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
         status = str(payload.status or "ATIVA").strip().upper() or "ATIVA"
         tipo_estimativa = str(payload.tipo_estimativa or "KG").strip().upper()
         local_carregamento = str(payload.local_carregamento or payload.local_carregado or "").strip().upper()
+        adiantamento_origem = str(payload.adiantamento_origem or "").strip().upper()
         nf_kg = float(payload.nf_kg or 0.0)
         nf_preco = float(payload.nf_preco or 0.0)
         caixas_carregadas = int(
@@ -3566,6 +3570,9 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
             if "adiantamento_rota" in cols_prog:
                 sets.append("adiantamento_rota=?")
                 vals.append(float(payload.adiantamento or 0.0))
+            if "adiantamento_origem" in cols_prog:
+                sets.append("adiantamento_origem=?")
+                vals.append(adiantamento_origem)
             if "total_caixas" in cols_prog:
                 sets.append("total_caixas=?")
                 vals.append(int(payload.total_caixas or 0))
@@ -3632,6 +3639,9 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
             if "adiantamento_rota" in cols_prog:
                 col_names.append("adiantamento_rota")
                 values.append(float(payload.adiantamento or 0.0))
+            if "adiantamento_origem" in cols_prog:
+                col_names.append("adiantamento_origem")
+                values.append(adiantamento_origem)
             if "total_caixas" in cols_prog:
                 col_names.append("total_caixas")
                 values.append(int(payload.total_caixas or 0))
@@ -5771,7 +5781,6 @@ def desktop_atualizar_financeiro_rota(
         "nf_caixas",
         "nf_kg_carregado",
         "nf_kg_vendido",
-        "nf_saldo",
         "nf_preco",
         "media",
         "nf_caixa_final",
@@ -5793,12 +5802,38 @@ def desktop_atualizar_financeiro_rota(
     ):
         _ensure_non_negative(field_name, getattr(payload, field_name))
 
-    if payload.km_inicial is not None and payload.km_final is not None and float(payload.km_final) < float(payload.km_inicial):
+    if (
+        payload.km_inicial is not None
+        and payload.km_final is not None
+        and float(payload.km_inicial) > 0
+        and float(payload.km_final) > 0
+        and float(payload.km_final) < float(payload.km_inicial)
+    ):
         raise HTTPException(status_code=400, detail="km_final nao pode ser menor que km_inicial.")
-    if payload.nf_kg is not None and payload.nf_kg_carregado is not None and float(payload.nf_kg_carregado) > float(payload.nf_kg):
-        raise HTTPException(status_code=400, detail="nf_kg_carregado nao pode ser maior que nf_kg.")
-    if payload.nf_kg_carregado is not None and payload.nf_kg_vendido is not None and float(payload.nf_kg_vendido) > float(payload.nf_kg_carregado):
-        raise HTTPException(status_code=400, detail="nf_kg_vendido nao pode ser maior que nf_kg_carregado.")
+    if (
+        payload.nf_kg is not None
+        and payload.nf_kg_carregado is not None
+        and float(payload.nf_kg) > 0
+        and float(payload.nf_kg_carregado) > float(payload.nf_kg)
+    ):
+        logging.warning(
+            "Financeiro com KG carregado maior que NF | prog=%s | nf_kg=%s | carregado=%s",
+            prog,
+            payload.nf_kg,
+            payload.nf_kg_carregado,
+        )
+    if (
+        payload.nf_kg_carregado is not None
+        and payload.nf_kg_vendido is not None
+        and float(payload.nf_kg_carregado) > 0
+        and float(payload.nf_kg_vendido) > float(payload.nf_kg_carregado)
+    ):
+        logging.warning(
+            "Financeiro com KG vendido maior que carregado | prog=%s | carregado=%s | vendido=%s",
+            prog,
+            payload.nf_kg_carregado,
+            payload.nf_kg_vendido,
+        )
 
     with get_conn() as conn:
         cur = conn.cursor()
@@ -5861,6 +5896,10 @@ def desktop_atualizar_financeiro_rota(
             if "adiantamento_rota" in cols_prog:
                 sets.append("adiantamento_rota=?")
                 vals.append(adiant)
+
+        if payload.adiantamento_origem is not None and "adiantamento_origem" in cols_prog:
+            sets.append("adiantamento_origem=?")
+            vals.append(str(payload.adiantamento_origem or "").strip().upper())
 
         if payload.rota_observacao is not None and "rota_observacao" in cols_prog:
             sets.append("rota_observacao=?")

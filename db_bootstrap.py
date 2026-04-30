@@ -268,6 +268,7 @@ def ensure_core_schema(conn: sqlite3.Connection) -> None:
             data_chegada TEXT,
             hora_chegada TEXT,
             adiantamento REAL DEFAULT 0,
+            adiantamento_origem TEXT,
             num_nf TEXT,
             kg_carregado REAL DEFAULT 0,
             media REAL DEFAULT 0,
@@ -323,6 +324,10 @@ def ensure_core_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    cur.execute("PRAGMA table_info(programacoes)")
+    programacoes_cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+    if "adiantamento_origem" not in programacoes_cols:
+        cur.execute("ALTER TABLE programacoes ADD COLUMN adiantamento_origem TEXT")
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS programacao_itens (
