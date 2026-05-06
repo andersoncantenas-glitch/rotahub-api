@@ -20978,6 +20978,14 @@ class EscalaPage(PageBase):
             media_kg = max(sum(float(d.get("kg", 0.0) or 0.0) for _n, d in mot_rows) / float(len(mot_rows)), 1.0)
             media_km = max(sum(float(d.get("km_rodado", 0.0) or 0.0) for _n, d in mot_rows) / float(len(mot_rows)), 1.0)
             media_horas = max(sum(float(d.get("horas_trab", 0.0) or 0.0) for _n, d in mot_rows) / float(len(mot_rows)), 1.0)
+            media_mort = max(sum(float(d.get("mort_aves", 0.0) or 0.0) for _n, d in mot_rows) / float(len(mot_rows)), 1.0)
+            media_custo_km = max(
+                sum(
+                    (float(d.get("custo_km_sum", 0.0) or 0.0) / max(float(d.get("custo_km_count", 0) or 1), 1.0))
+                    for _n, d in mot_rows
+                ) / float(len(mot_rows)),
+                0.01
+            )
 
             def _score_motorista(d):
                 rotas = float(d.get("rotas", 0) or 0)
@@ -21025,15 +21033,47 @@ class EscalaPage(PageBase):
                     int(d.get("rotas", 0)) > media_mot * 1.25
                     or float(d.get("km_rodado", 0.0) or 0.0) > media_km * 1.25
                     or float(d.get("horas_trab", 0.0) or 0.0) > media_horas * 1.20
+                    or float(d.get("mort_aves", 0.0) or 0.0) > media_mort * 1.30
+                    or (
+                        float(d.get("custo_km_count", 0) or 0) > 0 and
+                        (float(d.get("custo_km_sum", 0.0) or 0.0) / float(d.get("custo_km_count", 0) or 1)) > media_custo_km * 1.25
+                    )
                 )
             ]
             if sob_mot:
                 recs.append("Evitar novas rotas para motoristas sobrecarregados: " + ", ".join(sob_mot[:4]))
 
+            # Recomendações específicas para mortalidade alta
+            alt_mort_mot = [
+                n for n, d in mot_rows
+                if float(d.get("mort_aves", 0.0) or 0.0) > media_mort * 1.50
+            ]
+            if alt_mort_mot:
+                recs.append("Atenção - mortalidade elevada: " + ", ".join(alt_mort_mot[:3]) + " (verificar condições das aves)")
+
+            # Recomendações específicas para custo alto
+            alt_custo_mot = [
+                n for n, d in mot_rows
+                if (
+                    float(d.get("custo_km_count", 0) or 0) > 0 and
+                    (float(d.get("custo_km_sum", 0.0) or 0.0) / float(d.get("custo_km_count", 0) or 1)) > media_custo_km * 1.40
+                )
+            ]
+            if alt_custo_mot:
+                recs.append("Otimizar rotas de alto custo: " + ", ".join(alt_custo_mot[:3]) + " (revisar trajetos)")
+
         if aj_rows:
             media_aj = max(qtd_rotas / float(len(aj_rows)), 1.0)
             media_km_aj = max(sum(float(d.get("km_rodado", 0.0) or 0.0) for _n, d in aj_rows) / float(len(aj_rows)), 1.0)
             media_horas_aj = max(sum(float(d.get("horas_trab", 0.0) or 0.0) for _n, d in aj_rows) / float(len(aj_rows)), 1.0)
+            media_mort_aj = max(sum(float(d.get("mort_aves", 0.0) or 0.0) for _n, d in aj_rows) / float(len(aj_rows)), 1.0)
+            media_custo_km_aj = max(
+                sum(
+                    (float(d.get("custo_km_sum", 0.0) or 0.0) / max(float(d.get("custo_km_count", 0) or 1), 1.0))
+                    for _n, d in aj_rows
+                ) / float(len(aj_rows)),
+                0.01
+            )
 
             def _score_ajudante(d):
                 rotas = float(d.get("rotas", 0) or 0)
@@ -21068,6 +21108,11 @@ class EscalaPage(PageBase):
                     int(d.get("rotas", 0)) > media_aj * 1.25
                     or float(d.get("km_rodado", 0.0) or 0.0) > media_km_aj * 1.25
                     or float(d.get("horas_trab", 0.0) or 0.0) > media_horas_aj * 1.20
+                    or float(d.get("mort_aves", 0.0) or 0.0) > media_mort_aj * 1.30
+                    or (
+                        float(d.get("custo_km_count", 0) or 0) > 0 and
+                        (float(d.get("custo_km_sum", 0.0) or 0.0) / float(d.get("custo_km_count", 0) or 1)) > media_custo_km_aj * 1.25
+                    )
                 )
             ]
             if sob_aj:
