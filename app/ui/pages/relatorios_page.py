@@ -41,6 +41,27 @@ from app.utils.text_fix import fix_mojibake_text
 from app.utils.validators import validate_required
 
 
+def _normalize_local_rota_value(value: str) -> str:
+    txt = fix_mojibake_text(str(value or "").strip())
+    if not txt:
+        return ""
+    key = re.sub(r"[^A-Z0-9]", "", upper(txt))
+    if key.startswith("SERRA"):
+        return "SERRA"
+    if key.startswith("SERT"):
+        return "SERTAO"
+    return ""
+
+
+def _format_local_rota_display(value: str) -> str:
+    canon = _normalize_local_rota_value(value)
+    if canon == "SERRA":
+        return "SERRA"
+    if canon == "SERTAO":
+        return "SERTÃO"
+    return upper(fix_mojibake_text(str(value or "").strip()))
+
+
 class RelatoriosPage(PageBase):
     def __init__(self, parent, app, context=None):
         self.context = context if isinstance(context, AppContext) else AppContext(
@@ -993,6 +1014,18 @@ class RelatoriosPage(PageBase):
         tipo_estimativa = upper(meta.get("tipo_estimativa") or "KG")
         kg_estimado = safe_float(meta.get("kg_estimado"), 0.0)
         caixas_estimado = safe_int(meta.get("caixas_estimado"), 0)
+        local_rota = _format_local_rota_display(meta.get("local_rota") or meta.get("tipo_rota") or meta.get("local") or "")
+        local_carregamento = upper(
+            fix_mojibake_text(
+                str(
+                    meta.get("local_carregamento")
+                    or meta.get("granja_carregada")
+                    or meta.get("local_carregado")
+                    or meta.get("local_carreg")
+                    or ""
+                )
+            )
+        )
 
         def _render(_e=None):
             canvas.delete("all")
@@ -1067,16 +1100,23 @@ class RelatoriosPage(PageBase):
             estimado_txt = (
                 f"Estimado (FOB): {caixas_estimado} CX" if tipo_estimativa == "CX" else f"Estimado (CIF): {kg_estimado:.2f} KG"
             )
-            canvas.create_text(px(0.10), py(0.18), text=estimado_txt, anchor="w", font=("Segoe UI", 11))
             canvas.create_text(
                 px(0.10),
-                py(0.21),
+                py(0.18),
+                text=f"Local da Rota: {local_rota or '-'}  |  Carregamento: {local_carregamento or '-'}",
+                anchor="w",
+                font=("Segoe UI", 11),
+            )
+            canvas.create_text(px(0.10), py(0.21), text=estimado_txt, anchor="w", font=("Segoe UI", 11))
+            canvas.create_text(
+                px(0.10),
+                py(0.24),
                 text=f"Criado por: {usuario_criacao}  |  Ultima edicao: {usuario_edicao}",
                 anchor="w",
                 font=("Segoe UI", 11),
             )
 
-            header_y = py(0.27)
+            header_y = py(0.30)
             x_cliente = ppdf(left_margin)
             x_cx = ppdf(col_cx_pdf)
             x_preco = ppdf(col_preco_pdf)
@@ -1089,10 +1129,10 @@ class RelatoriosPage(PageBase):
             canvas.create_text(ppdf(470), header_y, text="VENDEDOR", anchor="center", font=("Segoe UI", 10, "bold"))
             canvas.create_text(ppdf(548), header_y, text="PEDIDO", anchor="center", font=("Segoe UI", 10, "bold"))
 
-            line_y = py(0.285)
+            line_y = py(0.315)
             canvas.create_line(ppdf(40), line_y, ppdf(555), line_y, fill="#222")
 
-            y = py(0.315)
+            y = py(0.345)
             row_gap = page_h * 0.060
             max_rows = 10
             for idx, item in enumerate(itens[:max_rows]):
@@ -1172,6 +1212,18 @@ class RelatoriosPage(PageBase):
             kg_estimado = safe_float(meta.get("kg_estimado"), 0.0)
             tipo_estimativa = upper(meta.get("tipo_estimativa") or "KG")
             caixas_estimado = safe_int(meta.get("caixas_estimado"), 0)
+            local_rota = _format_local_rota_display(meta.get("local_rota") or meta.get("tipo_rota") or meta.get("local") or "")
+            local_carregamento = upper(
+                fix_mojibake_text(
+                    str(
+                        meta.get("local_carregamento")
+                        or meta.get("granja_carregada")
+                        or meta.get("local_carregado")
+                        or meta.get("local_carreg")
+                        or ""
+                    )
+                )
+            )
             usuario_criacao = upper(meta.get("usuario_criacao") or "")
             usuario_edicao = upper(meta.get("usuario_ultima_edicao") or "")
 
@@ -1183,6 +1235,8 @@ class RelatoriosPage(PageBase):
             c.drawString(40, y, f"Data: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
             y -= 16
             c.drawString(40, y, f"Motorista: {to_txt(motorista)}  |  Veiculo: {to_txt(veiculo)}  |  Equipe: {to_txt(equipe_txt)}")
+            y -= 16
+            c.drawString(40, y, f"Local da Rota: {to_txt(local_rota or '-')}  |  Carregamento: {to_txt(local_carregamento or '-')}")
             y -= 16
             if tipo_estimativa == "CX":
                 c.drawString(40, y, f"Estimado (FOB): {safe_int(caixas_estimado, 0)} CX")
@@ -1259,7 +1313,14 @@ class RelatoriosPage(PageBase):
                 equipe = str(rota.get("equipe") or "")
                 kg_estimado = safe_float(rota.get("kg_estimado"), 0.0)
                 status = str(rota.get("status") or "")
-                local = str(rota.get("local_rota") or rota.get("local") or "")
+                local = str(rota.get("local_rota") or rota.get("tipo_rota") or rota.get("local") or "")
+                local_carreg = str(
+                    rota.get("local_carregamento")
+                    or rota.get("granja_carregada")
+                    or rota.get("local_carregado")
+                    or rota.get("local_carreg")
+                    or ""
+                )
                 tipo_estimativa = str(rota.get("tipo_estimativa") or "KG")
                 caixas_estimado = safe_int(rota.get("caixas_estimado"), 0)
                 usuario_criacao = str(
@@ -1296,7 +1357,11 @@ class RelatoriosPage(PageBase):
                 lines.append(f"{'FOLHA DE PROGRAMAÃ‡ÃƒO':^118}")
                 lines.append("=" * 118)
                 lines.append(f"CÃ“DIGO: {prog}   DATA: {data_criacao or '-'}   STATUS: {upper(status or '-')}")
-                lines.append(f"MOTORISTA: {upper(motorista or '-')}   VEICULO: {upper(veiculo or '-')}   LOCAL: {upper(local or '-')}")
+                lines.append(f"MOTORISTA: {upper(motorista or '-')}   VEICULO: {upper(veiculo or '-')}")
+                lines.append(
+                    f"LOCAL DA ROTA: {_format_local_rota_display(local) or '-'}   "
+                    f"CARREGAMENTO: {upper(fix_mojibake_text(local_carreg)) or '-'}"
+                )
                 lines.append(f"EQUIPE: {equipe_txt or '-'}")
                 lines.append(
                     f"{estimativa_txt}   CLIENTES: {len(itens)}   TOTAL ESTIMADO: {self._fmt_rel_money(total_prev)}"
@@ -1341,7 +1406,17 @@ class RelatoriosPage(PageBase):
                 cur = conn.cursor()
                 cur.execute("PRAGMA table_info(programacoes)")
                 cols_p = {str(c[1]).lower() for c in (cur.fetchall() or [])}
-                local_expr = "COALESCE(local_rota,'')" if "local_rota" in cols_p else ("COALESCE(local,'')" if "local" in cols_p else "''")
+
+                def coalesce_text_expr(candidates):
+                    names = [name for name in candidates if name in cols_p]
+                    if not names:
+                        return "''"
+                    return "COALESCE(" + ",".join(names + ["''"]) + ")"
+
+                local_expr = coalesce_text_expr(("local_rota", "tipo_rota", "local"))
+                local_carreg_expr = coalesce_text_expr(
+                    ("local_carregamento", "granja_carregada", "local_carregado", "local_carreg")
+                )
                 kg_expr = "COALESCE(kg_estimado,0)" if "kg_estimado" in cols_p else "0"
                 status_expr = "COALESCE(status,'')" if "status" in cols_p else "''"
                 tipo_estim_expr = "COALESCE(tipo_estimativa,'KG')" if "tipo_estimativa" in cols_p else "'KG'"
@@ -1352,12 +1427,12 @@ class RelatoriosPage(PageBase):
                 cur.execute(f"""
                     SELECT COALESCE(data_criacao,''), COALESCE(motorista,''), COALESCE(veiculo,''),
                            COALESCE(equipe,''), {kg_expr}, {status_expr}, {local_expr},
-                           {tipo_estim_expr}, {caixas_estim_expr}, {user_criacao_expr}, {user_edicao_expr}
+                           {local_carreg_expr}, {tipo_estim_expr}, {caixas_estim_expr}, {user_criacao_expr}, {user_edicao_expr}
                     FROM programacoes
                     WHERE codigo_programacao=?
                     LIMIT 1
                 """, (prog,))
-                meta = cur.fetchone() or ("", "", "", "", 0, "", "", "KG", 0, "", "")
+                meta = cur.fetchone() or ("", "", "", "", 0, "", "", "", "KG", 0, "", "")
 
                 cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='programacao_itens'")
                 if cur.fetchone():
@@ -1387,7 +1462,7 @@ class RelatoriosPage(PageBase):
                 + "Verifique a estrutura do banco e tente novamente."
             )
 
-        data_criacao, motorista, veiculo, equipe, kg_estimado, status, local, tipo_estimativa, caixas_estimado, usuario_criacao, usuario_edicao = meta
+        data_criacao, motorista, veiculo, equipe, kg_estimado, status, local, local_carreg, tipo_estimativa, caixas_estimado, usuario_criacao, usuario_edicao = meta
         equipe_txt = self.resolve_equipe_nomes(equipe)
         total_prev = sum(safe_float(r[2], 0.0) for r in itens)
         tipo_estimativa = upper(tipo_estimativa or "KG")
@@ -1400,7 +1475,11 @@ class RelatoriosPage(PageBase):
         lines.append(f"{'FOLHA DE PROGRAMAÇÃO':^118}")
         lines.append("=" * 118)
         lines.append(f"CÓDIGO: {prog}   DATA: {data_criacao or '-'}   STATUS: {upper(status or '-')}")
-        lines.append(f"MOTORISTA: {upper(motorista or '-')}   VEICULO: {upper(veiculo or '-')}   LOCAL: {upper(local or '-')}")
+        lines.append(f"MOTORISTA: {upper(motorista or '-')}   VEICULO: {upper(veiculo or '-')}")
+        lines.append(
+            f"LOCAL DA ROTA: {_format_local_rota_display(local) or '-'}   "
+            f"CARREGAMENTO: {upper(fix_mojibake_text(local_carreg)) or '-'}"
+        )
         lines.append(f"EQUIPE: {equipe_txt or '-'}")
         lines.append(
             f"{estimativa_txt}   CLIENTES: {len(itens)}   TOTAL ESTIMADO: {self._fmt_rel_money(total_prev)}"
@@ -1442,6 +1521,14 @@ class RelatoriosPage(PageBase):
                 equipe = str(rota.get("equipe") or "")
                 status = str(rota.get("status") or "")
                 prest = str(rota.get("prestacao_status") or "PENDENTE")
+                local_rota = str(rota.get("local_rota") or rota.get("tipo_rota") or rota.get("local") or "")
+                local_carreg = str(
+                    rota.get("local_carregamento")
+                    or rota.get("granja_carregada")
+                    or rota.get("local_carregado")
+                    or rota.get("local_carreg")
+                    or ""
+                )
                 km_rodado = safe_float(rota.get("km_rodado"), 0.0)
                 media_km_l = safe_float(rota.get("media_km_l"), 0.0)
                 custo_km = safe_float(rota.get("custo_km"), 0.0)
@@ -1484,6 +1571,10 @@ class RelatoriosPage(PageBase):
                 lines.append("=" * 118)
                 lines.append(f"CODIGO: {prog}   DATA: {data_criacao or '-'}   STATUS: {upper(status or '-')}   PRESTACAO: {upper(prest or '-')}")
                 lines.append(f"MOTORISTA: {upper(motorista or '-')}   VEICULO: {upper(veiculo or '-')}   EQUIPE: {equipe_txt or '-'}")
+                lines.append(
+                    f"LOCAL DA ROTA: {_format_local_rota_display(local_rota) or '-'}   "
+                    f"CARREGAMENTO: {upper(fix_mojibake_text(local_carreg)) or '-'}"
+                )
                 lines.append("-" * 118)
                 lines.append(
                     f"ENTRADAS (RECEB+ADIANT.): {self._fmt_rel_money(entradas)}   "
@@ -1553,6 +1644,17 @@ class RelatoriosPage(PageBase):
                 cols_p = {str(c[1]).lower() for c in (cur.fetchall() or [])}
                 status_expr = "COALESCE(status,'')" if "status" in cols_p else "''"
                 prest_expr = "COALESCE(prestacao_status,'')" if "prestacao_status" in cols_p else "''"
+
+                def coalesce_prest_expr(candidates):
+                    names = [name for name in candidates if name in cols_p]
+                    if not names:
+                        return "''"
+                    return "COALESCE(" + ",".join(names + ["''"]) + ")"
+
+                local_rota_expr = coalesce_prest_expr(("local_rota", "tipo_rota", "local"))
+                local_carreg_expr = coalesce_prest_expr(
+                    ("local_carregamento", "granja_carregada", "local_carregado", "local_carreg")
+                )
                 km_expr = "COALESCE(km_rodado,0)" if "km_rodado" in cols_p else "0"
                 media_expr = "COALESCE(media_km_l,0)" if "media_km_l" in cols_p else "0"
                 custo_expr = "COALESCE(custo_km,0)" if "custo_km" in cols_p else "0"
@@ -1563,13 +1665,14 @@ class RelatoriosPage(PageBase):
                 data_criacao_expr = "COALESCE(data_criacao,'')" if "data_criacao" in cols_p else ("COALESCE(data,'')" if "data" in cols_p else "''")
                 cur.execute(f"""
                     SELECT {data_criacao_expr}, COALESCE(motorista,''), COALESCE(veiculo,''), COALESCE(equipe,''),
-                           {status_expr}, {prest_expr}, {km_expr}, {media_expr}, {custo_expr}, {adiant_expr},
+                           {status_expr}, {prest_expr}, {local_rota_expr}, {local_carreg_expr},
+                           {km_expr}, {media_expr}, {custo_expr}, {adiant_expr},
                            {mort_aves_expr}, {mort_kg_expr}, {obs_transb_expr}
                     FROM programacoes
                     WHERE codigo_programacao=?
                     LIMIT 1
                 """, (prog,))
-                meta = cur.fetchone() or ("", "", "", "", "", "", 0, 0, 0, 0, 0, 0.0, "")
+                meta = cur.fetchone() or ("", "", "", "", "", "", "", "", 0, 0, 0, 0, 0, 0.0, "")
 
                 cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='recebimentos'")
                 if cur.fetchone():
@@ -1636,6 +1739,8 @@ class RelatoriosPage(PageBase):
             equipe,
             status,
             prest,
+            local_rota,
+            local_carreg,
             km_rodado,
             media_km_l,
             custo_km,
@@ -1678,6 +1783,10 @@ class RelatoriosPage(PageBase):
         lines.append("=" * 118)
         lines.append(f"CÓDIGO: {prog}   DATA: {data_criacao or '-'}   STATUS: {upper(status or '-')}   PRESTAÇÃO: {upper(prest or '-')}")
         lines.append(f"MOTORISTA: {upper(motorista or '-')}   VEICULO: {upper(veiculo or '-')}   EQUIPE: {equipe_txt or '-'}")
+        lines.append(
+            f"LOCAL DA ROTA: {_format_local_rota_display(local_rota) or '-'}   "
+            f"CARREGAMENTO: {upper(fix_mojibake_text(local_carreg)) or '-'}"
+        )
         lines.append("-" * 118)
         lines.append(
             f"ENTRADAS (RECEB+ADIANT.): {self._fmt_rel_money(entradas)}   "
@@ -2038,7 +2147,13 @@ class RelatoriosPage(PageBase):
                 kg_estimado = safe_float(rota.get("kg_estimado"), 0.0)
                 nf = str(rota.get("num_nf") or rota.get("nf_numero") or "")
                 local_rota = str(rota.get("local_rota") or rota.get("tipo_rota") or "")
-                local_carreg = str(rota.get("local_carregamento") or rota.get("granja_carregada") or "")
+                local_carreg = str(
+                    rota.get("local_carregamento")
+                    or rota.get("granja_carregada")
+                    or rota.get("local_carregado")
+                    or rota.get("local_carreg")
+                    or ""
+                )
                 data_saida = str(rota.get("data_saida") or "")
                 hora_saida = str(rota.get("hora_saida") or "")
                 data_chegada = str(rota.get("data_chegada") or "")
@@ -2136,9 +2251,18 @@ class RelatoriosPage(PageBase):
                         usuario_col_name = cand
                         break
 
-                nf_col = "num_nf" if has_col("num_nf") else ("nf_numero" if has_col("nf_numero") else "'' as num_nf")
-                local_rota_col = "local_rota" if has_col("local_rota") else ("tipo_rota" if has_col("tipo_rota") else "'' as local_rota")
-                local_carreg_col = "local_carregamento" if has_col("local_carregamento") else ("granja_carregada" if has_col("granja_carregada") else "'' as local_carregamento")
+                nf_col = "num_nf" if has_col("num_nf") else ("nf_numero" if has_col("nf_numero") else "''")
+
+                def coalesce_prog_expr(candidates):
+                    names = [name for name in candidates if has_col(name)]
+                    if not names:
+                        return "''"
+                    return "COALESCE(" + ",".join(names + ["''"]) + ")"
+
+                local_rota_col = coalesce_prog_expr(("local_rota", "tipo_rota", "local"))
+                local_carreg_col = coalesce_prog_expr(
+                    ("local_carregamento", "granja_carregada", "local_carregado", "local_carreg")
+                )
 
                 if has_col("adiantamento") and has_col("adiantamento_rota"):
                     adiant_col = (
@@ -2346,6 +2470,8 @@ class RelatoriosPage(PageBase):
             self.txt.insert("end", f"Motorista: {motorista or '-'}\n")
             self.txt.insert("end", f"Equipe: {equipe_txt or '-'}\n")
             self.txt.insert("end", f"Veiculo: {veiculo or '-'}\n")
+            self.txt.insert("end", f"Local da rota: {_format_local_rota_display(local_rota) or '-'}\n")
+            self.txt.insert("end", f"Local carregamento: {upper(fix_mojibake_text(local_carreg)) or '-'}\n")
             self.txt.insert("end", f"KG estimado: {kg_estimado:.2f}\n")
             self.txt.insert("end", f"Clientes na programacao: {len(clientes_programacao)}\n")
             self.txt.insert("end", f"Total estimado (clientes): {fmt_money(valor_total_clientes)}\n\n")
@@ -2398,8 +2524,8 @@ class RelatoriosPage(PageBase):
 
         self.txt.insert("end", "[DADOS DA ROTA]\n")
         self.txt.insert("end", f"NF: {nf or '-'}\n")
-        self.txt.insert("end", f"Local da rota: {local_rota or '-'}\n")
-        self.txt.insert("end", f"Local carregamento: {local_carreg or '-'}\n")
+        self.txt.insert("end", f"Local da rota: {_format_local_rota_display(local_rota) or '-'}\n")
+        self.txt.insert("end", f"Local carregamento: {upper(fix_mojibake_text(local_carreg)) or '-'}\n")
         self.txt.insert("end", f"Saida: {(data_saida + ' ' + hora_saida).strip() or '-'}\n")
         self.txt.insert("end", f"Chegada: {(data_chegada + ' ' + hora_chegada).strip() or '-'}\n\n")
 

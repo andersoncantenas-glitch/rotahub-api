@@ -1,9 +1,9 @@
 {
-  "version": "4.4.8",
-  "setup_url": "https://github.com/andersoncantenas-glitch/rotahub-api/releases/download/v4.4.8/RotaHubDesktop_Setup_4.4.8.exe",
+  "version": "4.4.9",
+  "setup_url": "https://github.com/andersoncantenas-glitch/rotahub-api/releases/download/v4.4.9/RotaHubDesktop_Setup_4.4.9.exe",
   "changelog_url": "https://raw.githubusercontent.com/andersoncantenas-glitch/rotahub-api/main/updates/changelog.txt",
   "release_kind": "patch",
-  "released_at": "2026-04-30 07:43:49",
+  "released_at": "2026-05-05 21:53:34",
   "alert": "",
   "alerts": [
     "Programacao agora registra a origem do valor do adiantamento da rota.",

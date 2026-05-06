@@ -63,6 +63,13 @@ def count_rows(cur: sqlite3.Cursor, table: str) -> int:
     return int(row[0] if row else 0)
 
 
+def _safe_add_column(cur: sqlite3.Cursor, table: str, col: str, coltype: str) -> None:
+    cur.execute(f"PRAGMA table_info({table})")
+    cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+    if col.lower() not in cols:
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {coltype}")
+
+
 def ensure_core_schema(conn: sqlite3.Connection) -> None:
     cur = conn.cursor()
     cur.execute(
@@ -261,8 +268,12 @@ def ensure_core_schema(conn: sqlite3.Connection) -> None:
             kg_estimado REAL,
             status TEXT DEFAULT 'ATIVA',
             prestacao_status TEXT DEFAULT 'PENDENTE',
+            local_rota TEXT,
             tipo_rota TEXT,
+            local_carregamento TEXT,
             granja_carregada TEXT,
+            local_carregado TEXT,
+            local_carreg TEXT,
             data_saida TEXT,
             hora_saida TEXT,
             data_chegada TEXT,
@@ -293,6 +304,7 @@ def ensure_core_schema(conn: sqlite3.Connection) -> None:
             ced_5_qtd INTEGER DEFAULT 0,
             ced_2_qtd INTEGER DEFAULT 0,
             valor_dinheiro REAL DEFAULT 0,
+            pix_motorista REAL DEFAULT 0,
             diaria_motorista_valor REAL DEFAULT 0,
             rota_observacao TEXT,
             motorista_id INTEGER,
@@ -328,6 +340,12 @@ def ensure_core_schema(conn: sqlite3.Connection) -> None:
     programacoes_cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
     if "adiantamento_origem" not in programacoes_cols:
         cur.execute("ALTER TABLE programacoes ADD COLUMN adiantamento_origem TEXT")
+    _safe_add_column(cur, "programacoes", "local_rota", "TEXT")
+    _safe_add_column(cur, "programacoes", "tipo_rota", "TEXT")
+    _safe_add_column(cur, "programacoes", "local_carregamento", "TEXT")
+    _safe_add_column(cur, "programacoes", "granja_carregada", "TEXT")
+    _safe_add_column(cur, "programacoes", "local_carregado", "TEXT")
+    _safe_add_column(cur, "programacoes", "local_carreg", "TEXT")
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS programacao_itens (
@@ -406,6 +424,22 @@ def ensure_core_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    _safe_add_column(cur, "vendas_importadas", "pedido", "TEXT")
+    _safe_add_column(cur, "vendas_importadas", "selecionada", "INTEGER DEFAULT 0")
+    _safe_add_column(cur, "vendas_importadas", "data_venda", "TEXT")
+    _safe_add_column(cur, "vendas_importadas", "cliente", "TEXT")
+    _safe_add_column(cur, "vendas_importadas", "nome_cliente", "TEXT")
+    _safe_add_column(cur, "vendas_importadas", "vendedor", "TEXT")
+    _safe_add_column(cur, "vendas_importadas", "produto", "TEXT")
+    _safe_add_column(cur, "vendas_importadas", "vr_total", "REAL")
+    _safe_add_column(cur, "vendas_importadas", "qnt", "REAL")
+    _safe_add_column(cur, "vendas_importadas", "cidade", "TEXT")
+    _safe_add_column(cur, "vendas_importadas", "valor_unitario", "REAL")
+    _safe_add_column(cur, "vendas_importadas", "observacao", "TEXT")
+    _safe_add_column(cur, "vendas_importadas", "usada", "INTEGER DEFAULT 0")
+    _safe_add_column(cur, "vendas_importadas", "usada_em", "TEXT")
+    _safe_add_column(cur, "vendas_importadas", "codigo_programacao", "TEXT")
+    _safe_add_column(cur, "programacoes", "pix_motorista", "REAL DEFAULT 0")
     conn.commit()
 
 

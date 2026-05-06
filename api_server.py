@@ -512,7 +512,9 @@ def _decorate_rota_row(row: Dict[str, Any], cur: Optional[sqlite3.Cursor] = None
         "local",
     )
     if loc_rota is not None:
-        row["local_rota"] = str(loc_rota).strip()
+        loc_rota_txt = str(loc_rota).strip()
+        row["local_rota"] = loc_rota_txt
+        row["tipo_rota"] = loc_rota_txt
 
     # Alias de local de carregamento (prioridade mobile).
     loc_car = _first_non_empty(
@@ -1239,7 +1241,14 @@ def ensure_tables():
             # FOB/CIF + auditoria (compatível com desktop)
             add_prog_col("tipo_estimativa", "tipo_estimativa TEXT DEFAULT 'KG'")
             add_prog_col("caixas_estimado", "caixas_estimado INTEGER DEFAULT 0")
+            add_prog_col("local_rota", "local_rota TEXT")
+            add_prog_col("tipo_rota", "tipo_rota TEXT")
+            add_prog_col("local_carregamento", "local_carregamento TEXT")
+            add_prog_col("granja_carregada", "granja_carregada TEXT")
+            add_prog_col("local_carregado", "local_carregado TEXT")
+            add_prog_col("local_carreg", "local_carreg TEXT")
             add_prog_col("adiantamento_origem", "adiantamento_origem TEXT")
+            add_prog_col("pix_motorista", "pix_motorista REAL DEFAULT 0")
             add_prog_col("usuario_criacao", "usuario_criacao TEXT")
             add_prog_col("usuario_ultima_edicao", "usuario_ultima_edicao TEXT")
             add_prog_col("status_operacional", "status_operacional TEXT")
@@ -2245,10 +2254,14 @@ class DesktopRotaUpsertIn(BaseModel):
     caixas_estimado: Optional[int] = 0
     status: Optional[str] = "ATIVA"
     local_rota: Optional[str] = None
+    tipo_rota: Optional[str] = None
     local_carregamento: Optional[str] = None
     local_carregado: Optional[str] = None
+    granja_carregada: Optional[str] = None
+    local_carreg: Optional[str] = None
     adiantamento: Optional[float] = 0.0
     adiantamento_origem: Optional[str] = None
+    pix_motorista: Optional[float] = 0.0
     total_caixas: Optional[int] = 0
     quilos: Optional[float] = 0.0
     nf_kg: Optional[float] = None
@@ -2363,6 +2376,7 @@ class DesktopRotaFinanceiroIn(BaseModel):
     ced_5_qtd: Optional[int] = None
     ced_2_qtd: Optional[int] = None
     valor_dinheiro: Optional[float] = None
+    pix_motorista: Optional[float] = None
     adiantamento: Optional[float] = None
     adiantamento_origem: Optional[str] = None
     rota_observacao: Optional[str] = None
@@ -3406,7 +3420,14 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
         equipe = str(payload.equipe or "").strip().upper()
         status = str(payload.status or "ATIVA").strip().upper() or "ATIVA"
         tipo_estimativa = str(payload.tipo_estimativa or "KG").strip().upper()
-        local_carregamento = str(payload.local_carregamento or payload.local_carregado or "").strip().upper()
+        local_rota = str(payload.local_rota or payload.tipo_rota or "").strip().upper()
+        local_carregamento = str(
+            payload.local_carregamento
+            or payload.local_carregado
+            or payload.granja_carregada
+            or payload.local_carreg
+            or ""
+        ).strip().upper()
         adiantamento_origem = str(payload.adiantamento_origem or "").strip().upper()
         nf_kg = float(payload.nf_kg or 0.0)
         nf_preco = float(payload.nf_preco or 0.0)
@@ -3557,12 +3578,21 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
                 vals.append(int(payload.caixas_estimado or 0))
             if "local_rota" in cols_prog:
                 sets.append("local_rota=?")
-                vals.append(str(payload.local_rota or "").strip().upper())
+                vals.append(local_rota)
+            if "tipo_rota" in cols_prog:
+                sets.append("tipo_rota=?")
+                vals.append(local_rota)
             if "local_carregamento" in cols_prog:
                 sets.append("local_carregamento=?")
                 vals.append(local_carregamento)
+            if "granja_carregada" in cols_prog:
+                sets.append("granja_carregada=?")
+                vals.append(local_carregamento)
             if "local_carregado" in cols_prog:
                 sets.append("local_carregado=?")
+                vals.append(local_carregamento)
+            if "local_carreg" in cols_prog:
+                sets.append("local_carreg=?")
                 vals.append(local_carregamento)
             if "adiantamento" in cols_prog:
                 sets.append("adiantamento=?")
@@ -3573,6 +3603,9 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
             if "adiantamento_origem" in cols_prog:
                 sets.append("adiantamento_origem=?")
                 vals.append(adiantamento_origem)
+            if "pix_motorista" in cols_prog:
+                sets.append("pix_motorista=?")
+                vals.append(float(payload.pix_motorista or 0.0))
             if "total_caixas" in cols_prog:
                 sets.append("total_caixas=?")
                 vals.append(int(payload.total_caixas or 0))
@@ -3626,12 +3659,21 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
                 values.append(int(payload.caixas_estimado or 0))
             if "local_rota" in cols_prog:
                 col_names.append("local_rota")
-                values.append(str(payload.local_rota or "").strip().upper())
+                values.append(local_rota)
+            if "tipo_rota" in cols_prog:
+                col_names.append("tipo_rota")
+                values.append(local_rota)
             if "local_carregamento" in cols_prog:
                 col_names.append("local_carregamento")
                 values.append(local_carregamento)
+            if "granja_carregada" in cols_prog:
+                col_names.append("granja_carregada")
+                values.append(local_carregamento)
             if "local_carregado" in cols_prog:
                 col_names.append("local_carregado")
+                values.append(local_carregamento)
+            if "local_carreg" in cols_prog:
+                col_names.append("local_carreg")
                 values.append(local_carregamento)
             if "adiantamento" in cols_prog:
                 col_names.append("adiantamento")
@@ -3642,6 +3684,9 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
             if "adiantamento_origem" in cols_prog:
                 col_names.append("adiantamento_origem")
                 values.append(adiantamento_origem)
+            if "pix_motorista" in cols_prog:
+                col_names.append("pix_motorista")
+                values.append(float(payload.pix_motorista or 0.0))
             if "total_caixas" in cols_prog:
                 col_names.append("total_caixas")
                 values.append(int(payload.total_caixas or 0))
@@ -5798,6 +5843,7 @@ def desktop_atualizar_financeiro_rota(
         "ced_5_qtd",
         "ced_2_qtd",
         "valor_dinheiro",
+        "pix_motorista",
         "adiantamento",
     ):
         _ensure_non_negative(field_name, getattr(payload, field_name))
@@ -5887,6 +5933,7 @@ def desktop_atualizar_financeiro_rota(
         _add_num(sets, vals, cols_prog, "ced_5_qtd", payload.ced_5_qtd, int)
         _add_num(sets, vals, cols_prog, "ced_2_qtd", payload.ced_2_qtd, int)
         _add_num(sets, vals, cols_prog, "valor_dinheiro", payload.valor_dinheiro, float)
+        _add_num(sets, vals, cols_prog, "pix_motorista", payload.pix_motorista, float)
 
         if payload.adiantamento is not None:
             adiant = float(payload.adiantamento or 0.0)
@@ -6002,7 +6049,8 @@ def desktop_upsert_cliente_manual_programacao(
             """,
             (prog, cod),
         )
-        exists = int((cur.fetchone() or {}).get("n") or 0)
+        row = cur.fetchone()
+        exists = int((row["n"] if row else 0) or 0)
         if exists:
             cur.execute(
                 """
@@ -9974,7 +10022,8 @@ def desktop_vincular_vendas_importadas(
             """,
             (*ids, codigo_programacao),
         )
-        conflito = int((cur.fetchone() or {}).get("n") or 0)
+        row = cur.fetchone()
+        conflito = int((row["n"] if row else 0) or 0)
         if conflito > 0:
             raise HTTPException(
                 status_code=409,
@@ -10005,15 +10054,11 @@ def desktop_apagar_vendas_importadas(_ok: bool = Depends(_require_desktop_secret
             WHERE IFNULL(usada,0)=1 OR TRIM(COALESCE(codigo_programacao,''))<>''
             """
         )
-        protegidas = int((cur.fetchone() or {}).get("n") or 0)
-        if protegidas > 0:
-            raise HTTPException(
-                status_code=409,
-                detail="existem vendas ja vinculadas ou consumidas; limpe apenas a fila livre de importacao.",
-            )
+        row = cur.fetchone()
+        protegidas = int((row["n"] if row else 0) or 0)
         cur.execute("DELETE FROM vendas_importadas WHERE IFNULL(usada,0)=0 AND TRIM(COALESCE(codigo_programacao,''))=''")
         deleted = int(cur.rowcount or 0)
-    return {"ok": True, "deleted": deleted}
+    return {"ok": True, "deleted": deleted, "preserved": protegidas}
 
 
 @app.delete("/desktop/vendas-importadas/ids")
@@ -10046,7 +10091,8 @@ def desktop_apagar_ids_vendas_importadas(
             """,
             tuple(id_list),
         )
-        protegidas = int((cur.fetchone() or {}).get("n") or 0)
+        row = cur.fetchone()
+        protegidas = int((row["n"] if row else 0) or 0)
         if protegidas > 0:
             raise HTTPException(
                 status_code=409,

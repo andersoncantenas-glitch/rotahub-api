@@ -1,3 +1,8 @@
+2026-05-05 21:53:34 - v4.4.9
+- Release automatizada (patch).
+- Versao anterior: v4.4.8.
+- Local da Rota vinculado a programacao, PDFs e Recebimentos; PIX Motorista; recibo de adiantamento; limpeza segura de vendas importadas.
+
 2026-04-30 07:43:49 - v4.4.8
 - Release automatizada (patch).
 - Versao anterior: v4.4.7.
