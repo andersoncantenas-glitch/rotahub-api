@@ -20462,7 +20462,7 @@ class EscalaPage(PageBase):
         resumo = ttk.Frame(self.body, style="Card.TFrame", padding=12)
         resumo.grid(row=1, column=0, sticky="ew", pady=(10, 10))
         resumo.grid_columnconfigure(0, weight=1)
-        ttk.Label(resumo, text="Resumo de distribuicao", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(resumo, text="Resumo de Distribuição", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
 
         kpi_row = ttk.Frame(resumo, style="Card.TFrame")
         kpi_row.grid(row=1, column=0, sticky="ew", pady=(8, 4))
@@ -20470,23 +20470,43 @@ class EscalaPage(PageBase):
             kpi_row.grid_columnconfigure(c, weight=1)
 
         kpi_1 = ttk.LabelFrame(kpi_row, text=" Rotas no Periodo ", padding=8)
-        kpi_1.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        kpi_1.grid(row=0, column=0, sticky="ew", padx=(0, 6), pady=(0, 6))
         self.lbl_esc_kpi_rotas = ttk.Label(kpi_1, text="0", font=("Segoe UI", 13, "bold"), foreground="#1D4ED8")
         self.lbl_esc_kpi_rotas.grid(row=0, column=0, sticky="w")
 
         kpi_2 = ttk.LabelFrame(kpi_row, text=" Motoristas ", padding=8)
-        kpi_2.grid(row=0, column=1, sticky="ew", padx=6)
+        kpi_2.grid(row=0, column=1, sticky="ew", padx=6, pady=(0, 6))
         self.lbl_esc_kpi_mot = ttk.Label(kpi_2, text="0", font=("Segoe UI", 13, "bold"), foreground="#0F766E")
         self.lbl_esc_kpi_mot.grid(row=0, column=0, sticky="w")
 
-        kpi_3 = ttk.LabelFrame(kpi_row, text=" KM Medio/Motorista ", padding=8)
-        kpi_3.grid(row=0, column=2, sticky="ew", padx=6)
-        self.lbl_esc_kpi_km = ttk.Label(kpi_3, text="0,0", font=("Segoe UI", 13, "bold"), foreground="#B45309")
+        kpi_3 = ttk.LabelFrame(kpi_row, text=" Ajudantes ", padding=8)
+        kpi_3.grid(row=0, column=2, sticky="ew", padx=6, pady=(0, 6))
+        self.lbl_esc_kpi_aj = ttk.Label(kpi_3, text="0", font=("Segoe UI", 13, "bold"), foreground="#0B7285")
+        self.lbl_esc_kpi_aj.grid(row=0, column=0, sticky="w")
+
+        kpi_4 = ttk.LabelFrame(kpi_row, text=" Mortalidade/Média ", padding=8)
+        kpi_4.grid(row=0, column=3, sticky="ew", padx=(6, 0), pady=(0, 6))
+        self.lbl_esc_kpi_mort = ttk.Label(kpi_4, text="0,0", font=("Segoe UI", 13, "bold"), foreground="#7F1D1D")
+        self.lbl_esc_kpi_mort.grid(row=0, column=0, sticky="w")
+
+        kpi_5 = ttk.LabelFrame(kpi_row, text=" KM Total ", padding=8)
+        kpi_5.grid(row=1, column=0, sticky="ew", padx=(0, 6))
+        self.lbl_esc_kpi_km_total = ttk.Label(kpi_5, text="0,0", font=("Segoe UI", 13, "bold"), foreground="#B45309")
+        self.lbl_esc_kpi_km_total.grid(row=0, column=0, sticky="w")
+
+        kpi_6 = ttk.LabelFrame(kpi_row, text=" KM Medio/Motorista ", padding=8)
+        kpi_6.grid(row=1, column=1, sticky="ew", padx=6)
+        self.lbl_esc_kpi_km = ttk.Label(kpi_6, text="0,0", font=("Segoe UI", 13, "bold"), foreground="#7C2D12")
         self.lbl_esc_kpi_km.grid(row=0, column=0, sticky="w")
 
-        kpi_4 = ttk.LabelFrame(kpi_row, text=" Horas Medias/Motorista ", padding=8)
-        kpi_4.grid(row=0, column=3, sticky="ew", padx=(6, 0))
-        self.lbl_esc_kpi_horas = ttk.Label(kpi_4, text="0,00", font=("Segoe UI", 13, "bold"), foreground="#7C3AED")
+        kpi_7 = ttk.LabelFrame(kpi_row, text=" Media km/L ", padding=8)
+        kpi_7.grid(row=1, column=2, sticky="ew", padx=6)
+        self.lbl_esc_kpi_lkm = ttk.Label(kpi_7, text="0,0", font=("Segoe UI", 13, "bold"), foreground="#0F4365")
+        self.lbl_esc_kpi_lkm.grid(row=0, column=0, sticky="w")
+
+        kpi_8 = ttk.LabelFrame(kpi_row, text=" Horas Medias/Motorista ", padding=8)
+        kpi_8.grid(row=1, column=3, sticky="ew", padx=(6, 0))
+        self.lbl_esc_kpi_horas = ttk.Label(kpi_8, text="0,00", font=("Segoe UI", 13, "bold"), foreground="#7C3AED")
         self.lbl_esc_kpi_horas.grid(row=0, column=0, sticky="w")
 
         txt_row = ttk.Frame(resumo, style="Card.TFrame")
@@ -20560,7 +20580,7 @@ class EscalaPage(PageBase):
         chart_wrap.grid_columnconfigure(0, weight=1)
         self.lbl_esc_chart_title = ttk.Label(
             chart_wrap,
-            text="Carga de Horas por Motorista (top 8)",
+            text="Carga de horas por motorista (top 8)",
             style="CardLabel.TLabel",
         )
         self.lbl_esc_chart_title.grid(row=0, column=0, sticky="w")
@@ -20672,11 +20692,25 @@ class EscalaPage(PageBase):
     def on_show(self):
         self.refresh_data()
 
-    def _set_kpi_escala(self, rotas: int, motoristas: int, km_medio: float, horas_medias: float):
+    def _set_kpi_escala(
+        self,
+        rotas: int,
+        motoristas: int,
+        ajudantes: int,
+        mort_media: float,
+        km_total: float,
+        km_medio: float,
+        lkm_media: float,
+        horas_medias: float,
+    ):
         try:
             self.lbl_esc_kpi_rotas.config(text=str(max(safe_int(rotas, 0), 0)))
             self.lbl_esc_kpi_mot.config(text=str(max(safe_int(motoristas, 0), 0)))
+            self.lbl_esc_kpi_aj.config(text=str(max(safe_int(ajudantes, 0), 0)))
+            self.lbl_esc_kpi_mort.config(text=f"{safe_float(mort_media, 0.0):.2f}".replace(".", ","))
+            self.lbl_esc_kpi_km_total.config(text=f"{safe_float(km_total, 0.0):.1f}".replace(".", ","))
             self.lbl_esc_kpi_km.config(text=f"{safe_float(km_medio, 0.0):.1f}".replace(".", ","))
+            self.lbl_esc_kpi_lkm.config(text=f"{safe_float(lkm_media, 0.0):.2f}".replace(".", ","))
             self.lbl_esc_kpi_horas.config(text=f"{safe_float(horas_medias, 0.0):.2f}".replace(".", ","))
         except Exception:
             logging.debug("Falha ignorada")
@@ -20698,6 +20732,13 @@ class EscalaPage(PageBase):
         else:
             self.reco_content.grid()
             self.btn_toggle_reco_escala.configure(text="Ocultar")
+
+    def _get_optional_row_value(self, row, keys, default=0.0):
+        if hasattr(row, "keys"):
+            for key in keys:
+                if key in row:
+                    return row[key]
+        return default
 
     def _on_escala_resize(self, event=None):
         try:
@@ -20896,11 +20937,21 @@ class EscalaPage(PageBase):
         media_km: float = 0.0,
         horas_trab: float = 0.0,
         media_horas: float = 0.0,
+        mort_aves: float = 0.0,
+        media_mort: float = 0.0,
+        custo_km: float = 0.0,
+        media_custo_km: float = 0.0,
     ) -> str:
         idx_rotas = (float(rotas) / float(media_rotas)) if media_rotas and media_rotas > 0 else 0.0
         idx_km = (float(km_rodado) / float(media_km)) if media_km and media_km > 0 else 0.0
         idx_horas = (float(horas_trab) / float(media_horas)) if media_horas and media_horas > 0 else 0.0
-        idx = max(idx_rotas, idx_km, idx_horas)
+        idx_mort = 0.0
+        if media_mort and media_mort > 0:
+            idx_mort = float(mort_aves) / float(media_mort)
+        elif mort_aves > 0:
+            idx_mort = 1.5
+        idx_custo = (float(custo_km) / float(media_custo_km)) if media_custo_km and media_custo_km > 0 else 0.0
+        idx = max(idx_rotas, idx_km, idx_horas, idx_mort * 1.2, idx_custo * 1.1)
         if idx > 1.25:
             return "carga_sobrecarga"
         if idx > 1.05:
@@ -21152,6 +21203,16 @@ class EscalaPage(PageBase):
                 local_rota = upper(str((r["local_rota"] if hasattr(r, "keys") else r[12]) or "").strip())
                 km_rodado = safe_float(r["km_rodado"] if hasattr(r, "keys") else r[13], 0.0)
 
+                mort_aves = safe_int(self._get_optional_row_value(r, ["mortalidade_transbordo_aves", "mortalidade_aves"]), 0)
+                mort_kg = safe_float(self._get_optional_row_value(r, ["mortalidade_transbordo_kg"]), 0.0)
+                litros = safe_float(self._get_optional_row_value(r, ["litros"]), 0.0)
+                media_km_l = safe_float(self._get_optional_row_value(r, ["media_km_l"]), 0.0)
+                custo_km = safe_float(self._get_optional_row_value(r, ["custo_km"]), 0.0)
+                nota_motorista = safe_float(
+                    self._get_optional_row_value(r, ["nota_motorista", "avaliacao_motorista", "rating_motorista"]),
+                    0.0,
+                )
+
                 m = mot.setdefault(
                     motorista,
                     {
@@ -21163,6 +21224,15 @@ class EscalaPage(PageBase):
                         "kg": 0.0,
                         "km_rodado": 0.0,
                         "horas_trab": 0.0,
+                        "mort_aves": 0,
+                        "mort_kg": 0.0,
+                        "litros": 0.0,
+                        "media_km_l_sum": 0.0,
+                        "media_km_l_count": 0,
+                        "custo_km_sum": 0.0,
+                        "custo_km_count": 0,
+                        "rating_sum": 0.0,
+                        "rating_count": 0,
                         "local_ref": "-",
                         "last_dt": None,
                         "local_counts": {},
@@ -21173,6 +21243,18 @@ class EscalaPage(PageBase):
                 m["kg"] += kg
                 m["km_rodado"] += km_rodado
                 m["horas_trab"] += horas_trab
+                m["mort_aves"] += mort_aves
+                m["mort_kg"] += mort_kg
+                m["litros"] += litros
+                if media_km_l > 0:
+                    m["media_km_l_sum"] += media_km_l
+                    m["media_km_l_count"] += 1
+                if custo_km > 0:
+                    m["custo_km_sum"] += custo_km
+                    m["custo_km_count"] += 1
+                if nota_motorista > 0:
+                    m["rating_sum"] += nota_motorista
+                    m["rating_count"] += 1
                 if isinstance(dt_prog, datetime):
                     if m.get("last_dt") is None or dt_prog > m["last_dt"]:
                         m["last_dt"] = dt_prog
@@ -21207,6 +21289,10 @@ class EscalaPage(PageBase):
 
                 equipe = r["equipe"] if hasattr(r, "keys") else r[3]
                 ajudantes = self._split_ajudantes(equipe)
+                nota_ajudante = safe_float(
+                    self._get_optional_row_value(r, ["nota_ajudante", "avaliacao_ajudante", "rating_ajudante"]),
+                    0.0,
+                )
                 for nm in ajudantes:
                     a = aju.setdefault(
                         nm,
@@ -21218,12 +21304,33 @@ class EscalaPage(PageBase):
                             "canceladas": 0,
                             "km_rodado": 0.0,
                             "horas_trab": 0.0,
+                            "mort_aves": 0,
+                            "mort_kg": 0.0,
+                            "litros": 0.0,
+                            "media_km_l_sum": 0.0,
+                            "media_km_l_count": 0,
+                            "custo_km_sum": 0.0,
+                            "custo_km_count": 0,
+                            "rating_sum": 0.0,
+                            "rating_count": 0,
                             "last_dt": None,
                         },
                     )
                     a["rotas"] += 1
                     a["km_rodado"] += km_rodado
                     a["horas_trab"] += horas_trab
+                    a["mort_aves"] += mort_aves
+                    a["mort_kg"] += mort_kg
+                    a["litros"] += litros
+                    if media_km_l > 0:
+                        a["media_km_l_sum"] += media_km_l
+                        a["media_km_l_count"] += 1
+                    if custo_km > 0:
+                        a["custo_km_sum"] += custo_km
+                        a["custo_km_count"] += 1
+                    if nota_ajudante > 0:
+                        a["rating_sum"] += nota_ajudante
+                        a["rating_count"] += 1
                     if isinstance(dt_prog, datetime):
                         if a.get("last_dt") is None or dt_prog > a["last_dt"]:
                             a["last_dt"] = dt_prog
@@ -21250,7 +21357,19 @@ class EscalaPage(PageBase):
             media_horas_mot = (
                 sum(float(d.get("horas_trab", 0.0) or 0.0) for _n, d in mot_rows) / float(len(mot_rows))
             ) if mot_rows else 0.0
+            media_mort_mot = (
+                sum(float(d.get("mort_aves", 0.0) or 0.0) for _n, d in mot_rows) / float(len(mot_rows))
+            ) if mot_rows else 0.0
+            media_custo_km_mot = (
+                sum(
+                    (float(d.get("custo_km_sum", 0.0) or 0.0) / float(d.get("custo_km_count", 0) or 1))
+                    for _n, d in mot_rows
+                ) / float(len(mot_rows))
+            ) if mot_rows else 0.0
             for nome, d in mot_rows:
+                custo_km_val = 0.0
+                if float(d.get("custo_km_count", 0) or 0) > 0:
+                    custo_km_val = float(d.get("custo_km_sum", 0.0) or 0.0) / float(d.get("custo_km_count", 0) or 1)
                 tag = self._tag_por_carga(
                     int(d["rotas"]),
                     media_mot,
@@ -21258,6 +21377,10 @@ class EscalaPage(PageBase):
                     media_km_mot,
                     float(d.get("horas_trab", 0.0) or 0.0),
                     media_horas_mot,
+                    float(d.get("mort_aves", 0.0) or 0.0),
+                    media_mort_mot,
+                    custo_km_val,
+                    media_custo_km_mot,
                 )
                 tree_insert_aligned(
                     self.tree_m,
@@ -21285,7 +21408,19 @@ class EscalaPage(PageBase):
             media_horas_aju = (
                 sum(float(d.get("horas_trab", 0.0) or 0.0) for _n, d in aj_rows) / float(len(aj_rows))
             ) if aj_rows else 0.0
+            media_mort_aju = (
+                sum(float(d.get("mort_aves", 0.0) or 0.0) for _n, d in aj_rows) / float(len(aj_rows))
+            ) if aj_rows else 0.0
+            media_custo_km_aju = (
+                sum(
+                    (float(d.get("custo_km_sum", 0.0) or 0.0) / float(d.get("custo_km_count", 0) or 1))
+                    for _n, d in aj_rows
+                ) / float(len(aj_rows))
+            ) if aj_rows else 0.0
             for nome, d in aj_rows:
+                custo_km_val = 0.0
+                if float(d.get("custo_km_count", 0) or 0) > 0:
+                    custo_km_val = float(d.get("custo_km_sum", 0.0) or 0.0) / float(d.get("custo_km_count", 0) or 1)
                 tag = self._tag_por_carga(
                     int(d["rotas"]),
                     media_aju,
@@ -21293,6 +21428,10 @@ class EscalaPage(PageBase):
                     media_km_aju,
                     float(d.get("horas_trab", 0.0) or 0.0),
                     media_horas_aju,
+                    float(d.get("mort_aves", 0.0) or 0.0),
+                    media_mort_aju,
+                    custo_km_val,
+                    media_custo_km_aju,
                 )
                 tree_insert_aligned(
                     self.tree_a,
@@ -21316,6 +21455,13 @@ class EscalaPage(PageBase):
             total_km = sum(float(d.get("km_rodado", 0.0) or 0.0) for _n, d in mot_rows)
             total_horas = sum(float(d.get("horas_trab", 0.0) or 0.0) for _n, d in mot_rows)
             total_dias_trab = sum(len((d.get("dias_set") or set())) for _n, d in mot_rows)
+            total_mort_aves = sum(float(d.get("mort_aves", 0) or 0) for _n, d in mot_rows)
+            total_litros = sum(float(d.get("litros", 0.0) or 0.0) for _n, d in mot_rows)
+            total_media_km_l_sum = sum(float(d.get("media_km_l_sum", 0.0) or 0.0) for _n, d in mot_rows)
+            total_media_km_l_count = sum(int(d.get("media_km_l_count", 0) or 0) for _n, d in mot_rows)
+            avg_mort_por_rota = total_mort_aves / float(qtd_rotas) if qtd_rotas > 0 else 0.0
+            avg_consumo_l_km = total_litros / total_km if total_km > 0 else 0.0
+            avg_media_km_l = total_media_km_l_sum / total_media_km_l_count if total_media_km_l_count > 0 else 0.0
             if qtd_motoristas > 0:
                 media = qtd_rotas / float(qtd_motoristas)
                 media_km = total_km / float(qtd_motoristas)
@@ -21332,20 +21478,29 @@ class EscalaPage(PageBase):
                     nivel = "ALERTA"
                     cor_nivel = "#9A3412"
                 msg = (
-                    f"Nivel da escala: {nivel} | Maior carga atual: {mais_sobrecarregado}\n"
+                    f"Nivel da escala: {nivel} | Motorista mais carregado: {mais_sobrecarregado}\n"
                     f"Rotas no filtro: {qtd_rotas} | Motoristas: {qtd_motoristas} | Ajudantes: {qtd_ajudantes}\n"
-                    f"Média por motorista: {media:.2f} | KM total: {total_km:.1f} | KM médio/motorista: {media_km:.1f}\n"
+                    f"KM total: {total_km:.1f} | KM médio/motorista: {media_km:.1f}\n"
                     f"Horas totais: {total_horas:.2f} | Horas médias/motorista: {media_horas:.2f}\n"
-                    f"Dias trabalhados (motoristas): {total_dias_trab} | Média de dias/motorista: {media_dias:.2f}\n"
+                    f"Mortalidade média/rota: {avg_mort_por_rota:.2f} aves | Consumo médio: {avg_consumo_l_km:.2f} L/km\n"
+                    f"KM/L médio: {avg_media_km_l:.1f} | Dias ativos/motorista: {total_dias_trab} / {media_dias:.2f}\n"
                     "Legenda visual: verde=equilibrado | laranja=alerta | vermelho=sobrecarga"
                 )
                 self.lbl_resumo.config(foreground=cor_nivel)
-                self._set_kpi_escala(qtd_rotas, qtd_motoristas, media_km, media_horas)
+                self._set_kpi_escala(
+                    qtd_rotas,
+                    qtd_motoristas,
+                    qtd_ajudantes,
+                    avg_mort_por_rota,
+                    total_km,
+                    media_km,
+                    avg_media_km_l,
+                    media_horas,
+                )
             else:
                 msg = f"Rotas no filtro: {qtd_rotas} | Sem motoristas no periodo/filtro selecionado."
                 self.lbl_resumo.config(foreground="#6B7280")
-                self._set_kpi_escala(qtd_rotas, 0, 0.0, 0.0)
-
+                self._set_kpi_escala(qtd_rotas, 0, qtd_ajudantes, 0.0, total_km, 0.0, 0.0, 0.0)
             self.lbl_resumo.config(text=msg)
             chart_rows = sorted(
                 [
@@ -21549,17 +21704,21 @@ class EscalaPage(PageBase):
             y -= 6 * mm
 
             card_gap = 4 * mm
-            card_w = (usable_w - card_gap) / 2.0
+            card_w = (usable_w - 3 * card_gap) / 4.0
             card_h = 12 * mm
             kpi_cards = [
                 ("Rotas no periodo", self.lbl_esc_kpi_rotas.cget("text")),
                 ("Motoristas", self.lbl_esc_kpi_mot.cget("text")),
+                ("Ajudantes", self.lbl_esc_kpi_aj.cget("text")),
+                ("Mortalidade/rota", self.lbl_esc_kpi_mort.cget("text")),
+                ("KM Total", self.lbl_esc_kpi_km_total.cget("text")),
                 ("KM medio/motorista", self.lbl_esc_kpi_km.cget("text")),
+                ("Media km/L", self.lbl_esc_kpi_lkm.cget("text")),
                 ("Horas medias/motorista", self.lbl_esc_kpi_horas.cget("text")),
             ]
             for idx, (label, value) in enumerate(kpi_cards):
-                row = idx // 2
-                col = idx % 2
+                row = idx // 4
+                col = idx % 4
                 bx = left + col * (card_w + card_gap)
                 by = y - row * (card_h + 3 * mm)
                 c.rect(bx, by - card_h, card_w, card_h, stroke=1, fill=0)
