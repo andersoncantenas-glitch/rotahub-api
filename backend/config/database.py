@@ -3,6 +3,8 @@
 Database configuration and connection management
 """
 import logging
+import tempfile
+from pathlib import Path
 from typing import AsyncGenerator
 from sqlalchemy import event
 from sqlalchemy import inspect, text
@@ -12,17 +14,44 @@ from backend.config.settings import settings
 
 logger = logging.getLogger(__name__)
 
+
+def _prepare_sqlite_database_url(database_url: str) -> str:
+    if "sqlite" not in database_url:
+        return database_url
+    prefix = "sqlite+aiosqlite:///"
+    if not database_url.startswith(prefix):
+        return database_url
+    raw_path = database_url.removeprefix(prefix)
+    if raw_path in {"", ":memory:"}:
+        return database_url
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = path.resolve()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        probe = path.parent / ".rotahub_write_probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return f"{prefix}{path.as_posix()}"
+    except Exception as exc:
+        fallback = Path(tempfile.gettempdir()) / "rotahub" / (path.name or "rotadb.db")
+        fallback.parent.mkdir(parents=True, exist_ok=True)
+        logger.warning("SQLite path %s is not writable (%s); using %s", path, exc, fallback)
+        return f"{prefix}{fallback.as_posix()}"
+
+
 # Async engine for SQLite/PostgreSQL
-if "sqlite" in settings.DATABASE_URL:
+DATABASE_URL = _prepare_sqlite_database_url(settings.DATABASE_URL)
+if "sqlite" in DATABASE_URL:
     engine = create_async_engine(
-        settings.DATABASE_URL,
+        DATABASE_URL,
         echo=settings.DEBUG,
         pool_size=10,
         max_overflow=20,
     )
 else:
     engine = create_async_engine(
-        settings.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://"),
+        DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://"),
         echo=settings.DEBUG,
         pool_size=10,
         max_overflow=20,

@@ -3,6 +3,7 @@
 Application settings and configuration
 """
 import os
+import tempfile
 from pathlib import Path
 from typing import Annotated, Any, List
 from pydantic import field_validator
@@ -14,8 +15,25 @@ def default_database_url() -> str:
     if rota_db:
         if "://" in rota_db:
             return rota_db
-        return f"sqlite+aiosqlite:///{Path(rota_db).expanduser().resolve().as_posix()}"
+        path = writable_sqlite_path(rota_db)
+        return f"sqlite+aiosqlite:///{path.as_posix()}"
     return "sqlite+aiosqlite:///./rotadb.db"
+
+
+def writable_sqlite_path(value: str) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = path.resolve()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        probe = path.parent / ".rotahub_write_probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return path
+    except Exception:
+        fallback = Path(tempfile.gettempdir()) / "rotahub" / (path.name or "rotadb.db")
+        fallback.parent.mkdir(parents=True, exist_ok=True)
+        return fallback
 
 
 class Settings(BaseSettings):
