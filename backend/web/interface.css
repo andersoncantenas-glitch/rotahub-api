@@ -1,0 +1,1282 @@
+/* RotaHub interface layer.
+   Loaded after the legacy stylesheet to keep visual rules predictable. */
+:root {
+  --rh-bg: #e6edf4;
+  --rh-bg-grid: rgba(8, 127, 122, 0.04);
+  --rh-surface: #ffffff;
+  --rh-surface-soft: #f4f8fb;
+  --rh-header: #edf4fa;
+  --rh-ink: #0d2235;
+  --rh-muted: #52677d;
+  --rh-line: #c5d2df;
+  --rh-line-strong: #98adbf;
+  --rh-primary: #087f7a;
+  --rh-primary-strong: #06645f;
+  --rh-danger: #b42318;
+  --rh-danger-soft: #fff0ee;
+  --rh-sidebar: #1c2836;
+  --rh-sidebar-soft: #243447;
+}
+
+#relatoriosView .relatorios-mode-cards {
+  display: grid !important;
+  grid-template-columns: repeat(4, minmax(180px, 1fr)) !important;
+  gap: 10px !important;
+}
+
+#relatoriosView .relatorios-mode-card {
+  min-height: 112px !important;
+  max-height: none !important;
+  white-space: normal !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
+}
+
+#relatoriosView .relatorios-actions {
+  display: grid !important;
+  grid-template-columns: minmax(320px, 1fr) repeat(8, minmax(150px, auto)) !important;
+  overflow-x: auto !important;
+}
+
+#relatoriosView .relatorios-actions button {
+  min-width: 150px !important;
+  max-width: none !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
+}
+
+#relatoriosView #relatoriosPrintProgramacaoButton,
+#relatoriosView #relatoriosPrintPrestacaoButton,
+#relatoriosView #relatoriosPrintRomaneiosButton {
+  min-width: 205px !important;
+}
+
+#relatoriosView .relatorios-context-panel {
+  display: grid !important;
+  grid-template-columns: minmax(220px, 0.7fr) minmax(420px, 1.2fr) minmax(260px, 0.8fr) !important;
+}
+
+#relatoriosView .relatorios-metrics {
+  grid-template-columns: repeat(4, minmax(130px, 1fr)) !important;
+}
+
+body {
+  background:
+    linear-gradient(90deg, var(--rh-bg-grid) 1px, transparent 1px),
+    linear-gradient(0deg, rgba(13, 34, 53, 0.035) 1px, transparent 1px),
+    var(--rh-bg) !important;
+  background-size: 38px 38px !important;
+  color: var(--rh-ink) !important;
+}
+
+.shell {
+  grid-template-columns: 272px minmax(0, 1fr) !important;
+}
+
+.workspace {
+  padding: 22px 24px 28px !important;
+}
+
+.sidebar {
+  background: var(--rh-sidebar) !important;
+  border-right: 1px solid #122032 !important;
+  padding: 18px 14px !important;
+  box-shadow: 10px 0 30px rgba(13, 34, 53, 0.14) !important;
+}
+
+.brand-row {
+  min-height: 48px !important;
+  padding: 8px 8px 14px !important;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12) !important;
+}
+
+.brand-row strong {
+  color: #ffffff !important;
+  font-size: 17px !important;
+}
+
+.nav-list {
+  gap: 12px !important;
+  margin-top: 16px !important;
+}
+
+.nav-group summary {
+  background: var(--rh-sidebar-soft) !important;
+  border-color: #34475e !important;
+  color: #dce7f3 !important;
+}
+
+.nav-item {
+  border-radius: 7px !important;
+  color: #e9f1fa !important;
+}
+
+.nav-item:hover {
+  background: #2e4157 !important;
+  color: #ffffff !important;
+}
+
+.nav-item.active {
+  background: #344861 !important;
+  border-left: 4px solid #29c7b8 !important;
+  color: #ffffff !important;
+}
+
+.nav-item.plan-locked {
+  cursor: not-allowed;
+  opacity: .48;
+}
+
+.nav-item.plan-locked::after {
+  content: "Upgrade";
+  margin-left: auto;
+  color: #fbbf24;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.home-quick-actions button.plan-locked {
+  cursor: not-allowed;
+  opacity: .48;
+}
+
+.billing-summary .metric-card small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.billing-plans {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+  padding: 14px;
+}
+
+.billing-plan-card {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  min-height: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px;
+  background: #fff;
+}
+
+.billing-plan-card.current {
+  border-color: #0f766e;
+  box-shadow: inset 4px 0 0 #0f766e;
+}
+
+.billing-plan-card span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.billing-plan-card h3 {
+  margin: 4px 0;
+  font-size: 18px;
+}
+
+.billing-plan-card p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.billing-plan-limits,
+.billing-plan-features {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.billing-plan-limits span,
+.billing-plan-features span {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: #f8fafc;
+  color: #344054;
+}
+
+.topbar {
+  position: sticky !important;
+  top: 0 !important;
+  z-index: 20 !important;
+  margin: -22px -24px 18px !important;
+  padding: 22px 24px 18px !important;
+  background: rgba(230, 237, 244, 0.94) !important;
+  border-bottom: 1px solid #c6d3e0 !important;
+  backdrop-filter: blur(8px);
+}
+
+.topbar h1 {
+  color: #071827 !important;
+  font-size: clamp(24px, 2vw, 32px) !important;
+  font-weight: 800 !important;
+}
+
+.topbar p,
+.panel-subtitle {
+  color: var(--rh-muted) !important;
+}
+
+.session-box {
+  background: #172434 !important;
+  border: 1px solid #223448 !important;
+  box-shadow: 0 8px 18px rgba(13, 34, 53, 0.12) !important;
+}
+
+.panel,
+.auth-panel,
+.modal,
+.subpanel,
+.module-note,
+.status-box,
+.programacao-ranking-block {
+  position: relative !important;
+  background: var(--rh-surface) !important;
+  border: 1px solid var(--rh-line) !important;
+  border-radius: 8px !important;
+  box-shadow: 0 8px 18px rgba(13, 34, 53, 0.055) !important;
+}
+
+.panel::before {
+  content: "" !important;
+  position: absolute !important;
+  inset: 0 auto 0 0 !important;
+  width: 3px !important;
+  background: linear-gradient(180deg, var(--rh-primary), rgba(8, 127, 122, 0)) !important;
+  opacity: 0.58 !important;
+  pointer-events: none !important;
+}
+
+.panel-header,
+.cadastro-actionbar,
+.compras-toolbar,
+.recebimentos-load-row,
+.recebimento-form,
+.recebimento-manual-form,
+.despesas-load-row,
+.despesa-form,
+.despesas-route-form,
+.despesas-nf-form,
+.despesas-financeiro-form {
+  background: linear-gradient(180deg, #fbfdff 0%, var(--rh-header) 100%) !important;
+  border-bottom: 1px solid var(--rh-line) !important;
+}
+
+.panel-header {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 14px !important;
+  min-height: 64px !important;
+  overflow: visible !important;
+  padding: 16px 20px !important;
+}
+
+.panel-header > div:not(.actions) {
+  flex: 1 1 260px !important;
+  min-width: 180px !important;
+}
+
+.cedulas-live-summary {
+  align-self: end;
+  min-height: 46px;
+  padding: 10px 12px;
+  border: 1px solid var(--rh-line);
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--rh-text);
+  font-weight: 900;
+  display: flex;
+  align-items: center;
+}
+
+.cedulas-live-summary.success,
+.despesas-summary-item.success {
+  border-color: #15803d !important;
+  background: #f0fdf4 !important;
+  color: #166534 !important;
+}
+
+.cedulas-live-summary.danger,
+.despesas-summary-item.danger {
+  border-color: var(--rh-danger) !important;
+  background: var(--rh-danger-soft) !important;
+  color: var(--rh-danger) !important;
+}
+
+.cedulas-live-summary.warning,
+.despesas-summary-item.warning {
+  border-color: #b45309 !important;
+  background: #fffbeb !important;
+  color: #92400e !important;
+}
+
+.despesas-summary-item.success strong,
+.despesas-summary-item.danger strong,
+.despesas-summary-item.warning strong {
+  color: inherit !important;
+}
+
+.panel-header > .actions,
+.actions,
+.form-actions,
+.backup-actions,
+.ferramentas-actions,
+.home-quick-actions,
+.despesa-actions,
+.recebimento-actions,
+.modal-actions {
+  display: flex !important;
+  flex-wrap: nowrap !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  gap: 8px !important;
+  max-width: 100% !important;
+  overflow-x: auto !important;
+  padding-bottom: 2px !important;
+}
+
+.panel-header > .actions {
+  margin-left: auto !important;
+  min-width: 0 !important;
+  max-width: min(100%, 920px) !important;
+}
+
+.panel h2,
+.panel-header h2 {
+  color: #071827 !important;
+  font-size: 18px !important;
+  font-weight: 800 !important;
+}
+
+button,
+.panel-header > .actions button,
+.panel-header > button,
+.actions button,
+.cadastro-actionbar button,
+.backup-actions button,
+.ferramentas-actions button,
+.home-quick-actions button,
+.despesa-actions button,
+.recebimento-actions button,
+.modal-actions button {
+  min-height: 30px !important;
+  max-height: 36px !important;
+  padding: 0 11px !important;
+  border-radius: 6px !important;
+  font-size: 11.5px !important;
+  font-weight: 800 !important;
+  letter-spacing: 0 !important;
+  white-space: nowrap !important;
+  box-shadow: none !important;
+}
+
+.primary,
+button.primary,
+.tab-button.active {
+  background: var(--rh-primary) !important;
+  border-color: var(--rh-primary) !important;
+  color: #ffffff !important;
+}
+
+.primary:hover,
+button.primary:hover,
+.tab-button.active:hover {
+  background: var(--rh-primary-strong) !important;
+  border-color: var(--rh-primary-strong) !important;
+}
+
+.secondary,
+button.secondary,
+.warning,
+button.warning,
+.tab-button,
+.ghost {
+  background: #eef4fa !important;
+  border-color: #b7c8da !important;
+  color: #102a43 !important;
+}
+
+.secondary:hover,
+button.secondary:hover,
+.warning:hover,
+button.warning:hover,
+.tab-button:hover,
+.ghost:hover {
+  background: #e0ebf5 !important;
+  border-color: var(--rh-line-strong) !important;
+}
+
+.danger,
+button.danger {
+  background: var(--rh-danger-soft) !important;
+  border-color: #e6a7a1 !important;
+  color: var(--rh-danger) !important;
+}
+
+.danger:hover,
+button.danger:hover {
+  background: #ffe4e0 !important;
+  border-color: #d96a61 !important;
+}
+
+button:disabled,
+.primary:disabled,
+.secondary:disabled,
+.warning:disabled,
+.danger:disabled {
+  background: #edf1f6 !important;
+  border-color: #d4dde8 !important;
+  color: #8a99aa !important;
+}
+
+input,
+select,
+textarea,
+.table-wrap input,
+.table-wrap select,
+.wide-table input,
+.wide-table select {
+  background: #ffffff !important;
+  border-color: #c3cfdd !important;
+  color: var(--rh-ink) !important;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--rh-primary) !important;
+  box-shadow: 0 0 0 3px rgba(8, 127, 122, 0.12) !important;
+}
+
+.form-grid,
+.filter-row,
+.vinculo-row,
+.relatorios-filter,
+.despesas-nf-form,
+.despesas-route-form,
+.despesas-financeiro-form,
+.recebimento-form,
+.recebimento-manual-form,
+.compras-maintenance-row {
+  gap: 12px !important;
+}
+
+.form-grid,
+.relatorios-filter,
+.despesas-nf-form,
+.programacao-form-grid {
+  padding: 16px 18px !important;
+}
+
+.cadastro-actionbar {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  overflow-x: auto !important;
+}
+
+.cadastro-actionbar .status-filter {
+  margin-left: auto !important;
+  min-width: 210px !important;
+}
+
+.table-wrap,
+.compact-table-wrap,
+.compras-table-wrap {
+  background: #ffffff !important;
+  border: 1px solid var(--rh-line) !important;
+  border-radius: 7px !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8) !important;
+}
+
+table {
+  border-collapse: separate !important;
+  border-spacing: 0 !important;
+}
+
+th,
+.wide-table th,
+.compact-table th,
+.editable-table th,
+.compras-table th {
+  background: #eaf1f8 !important;
+  color: #082033 !important;
+  border-bottom: 1px solid #aebfd1 !important;
+  font-size: 11px !important;
+  font-weight: 900 !important;
+  height: 34px !important;
+  padding: 7px 10px !important;
+  white-space: nowrap !important;
+}
+
+td,
+.wide-table td,
+.compact-table td,
+.editable-table td,
+.compras-table td {
+  color: #102a43 !important;
+  border-bottom: 1px solid #d9e2ec !important;
+  height: 42px !important;
+  padding: 7px 10px !important;
+  vertical-align: middle !important;
+}
+
+td .actions,
+.table-wrap td .actions {
+  display: inline-flex !important;
+  flex-wrap: nowrap !important;
+  gap: 6px !important;
+  align-items: center !important;
+  justify-content: flex-start !important;
+  overflow: visible !important;
+  padding: 0 !important;
+}
+
+.actions-col,
+th.actions-col {
+  width: 1% !important;
+  min-width: 126px !important;
+  text-align: left !important;
+}
+
+td button,
+.table-wrap button,
+.compact-action {
+  min-height: 28px !important;
+  max-height: 32px !important;
+  padding: 0 10px !important;
+  font-size: 11px !important;
+}
+
+tbody tr:nth-child(odd) td {
+  background: #ffffff !important;
+}
+
+tbody tr:nth-child(even) td {
+  background: #f7fafc !important;
+}
+
+tbody tr:hover td {
+  background: #e8f5f3 !important;
+}
+
+.selected-row td,
+tr.selected-row td,
+.selected-row:hover td {
+  background: #dff2ff !important;
+  color: #082033 !important;
+}
+
+.metric,
+.home-kpi,
+.module-card,
+.compras-estoque-grid article,
+.despesas-summary-grid article,
+.programacao-ajudantes-field,
+.status-box {
+  background: #f8fbfd !important;
+  border: 1px solid #d4dde8 !important;
+  border-radius: 7px !important;
+  box-shadow: 0 4px 10px rgba(13, 34, 53, 0.035) !important;
+}
+
+.metric strong,
+.home-kpi strong {
+  color: #071827 !important;
+}
+
+.metric-grid {
+  gap: 12px !important;
+}
+
+.compact-metrics,
+.compras-estoque-grid {
+  padding: 0 18px 16px !important;
+}
+
+.compras-tabs,
+.compras-search-row,
+.compras-footer,
+.compras-maintenance-row {
+  padding-inline: 18px !important;
+}
+
+.table-wrap td .actions,
+td .actions {
+  display: inline-flex !important;
+  flex-wrap: nowrap !important;
+  gap: 6px !important;
+}
+
+.actions-col,
+th.actions-col,
+td.actions-col {
+  min-width: 132px !important;
+}
+
+.column-filter-button {
+  background: #dce8f3 !important;
+  border-color: #95aabe !important;
+}
+
+.column-filter-menu {
+  background: #fff8bc !important;
+  border-color: #8fa1b3 !important;
+}
+
+/* Interface detail pass: tabs, filter bars and dense operational forms. */
+.tabs,
+.compras-tabs {
+  display: flex !important;
+  flex-wrap: nowrap !important;
+  gap: 8px !important;
+  overflow-x: auto !important;
+  padding: 12px 18px !important;
+  background: #f8fbfd !important;
+  border-bottom: 1px solid var(--rh-line) !important;
+}
+
+.tab-button,
+.tabs button,
+.compras-tabs button {
+  min-height: 34px !important;
+  border-radius: 999px !important;
+  padding: 0 14px !important;
+}
+
+.tab-button.active,
+.tabs button.active,
+.compras-tabs button.active {
+  background: var(--rh-primary) !important;
+  border-color: var(--rh-primary) !important;
+  color: #ffffff !important;
+}
+
+.filter-row,
+.relatorios-filter,
+.importar-vendas-filter,
+.permissions-toolbar,
+.saas-admin-toolbar,
+.upload-row,
+.vinculo-row,
+.recebimentos-load-row,
+.despesas-load-row,
+.compras-search-row,
+.compras-footer,
+.compras-maintenance-row,
+.mortalidade-manual-form {
+  display: flex !important;
+  flex-wrap: nowrap !important;
+  align-items: end !important;
+  gap: 10px !important;
+  overflow-x: auto !important;
+  padding: 14px 18px !important;
+  background: #f8fbfd !important;
+  border-bottom: 1px solid var(--rh-line) !important;
+}
+
+.filter-row label,
+.relatorios-filter label,
+.importar-vendas-filter label,
+.permissions-toolbar label,
+.saas-admin-toolbar label,
+.upload-row label,
+.vinculo-row label,
+.recebimentos-load-row label,
+.despesas-load-row label,
+.compras-search-row label,
+.compras-maintenance-row label,
+.mortalidade-manual-form label {
+  min-width: 150px !important;
+}
+
+.filter-row .wide-field,
+.upload-row .wide-field,
+.mortalidade-manual-form .wide-field,
+.compras-search-row label:first-child {
+  min-width: min(520px, 55vw) !important;
+  flex: 1 1 320px !important;
+}
+
+.compras-footer {
+  justify-content: flex-start !important;
+}
+
+.compras-footer .spacer {
+  flex: 1 1 auto !important;
+  min-width: 24px !important;
+}
+
+.compras-summary,
+.panel-subtitle,
+.metric span,
+label {
+  letter-spacing: 0 !important;
+}
+
+label {
+  color: #33465b !important;
+  font-size: 12px !important;
+  font-weight: 750 !important;
+}
+
+input,
+select,
+textarea {
+  min-height: 36px !important;
+  border-radius: 7px !important;
+}
+
+.table-wrap {
+  margin: 0 !important;
+}
+
+.table-wrap table {
+  border-collapse: separate !important;
+  border-spacing: 0 !important;
+}
+
+.table-wrap th:first-child {
+  border-top-left-radius: 7px !important;
+}
+
+.table-wrap th:last-child {
+  border-top-right-radius: 7px !important;
+}
+
+.wide-table button,
+.table-wrap td > button,
+.table-wrap td .actions button {
+  min-height: 30px !important;
+  padding: 0 10px !important;
+  border-radius: 6px !important;
+}
+
+.column-filter-header {
+  padding-right: 30px !important;
+}
+
+.column-filter-button {
+  right: 6px !important;
+  width: 19px !important;
+  height: 19px !important;
+  min-width: 19px !important;
+  min-height: 19px !important;
+  border-radius: 4px !important;
+}
+
+.column-filter-menu {
+  border-radius: 6px !important;
+  box-shadow: 0 16px 34px rgba(13, 34, 53, 0.24) !important;
+}
+
+.column-filter-actions {
+  background: #f7efa6 !important;
+}
+
+.home-quick-actions {
+  padding: 14px 18px 18px !important;
+  background: #f8fbfd !important;
+  border-top: 1px solid #edf2f7 !important;
+}
+
+.home-quick-actions button {
+  justify-content: center !important;
+}
+
+.home-layout,
+.permissions-layout,
+.saas-admin-layout,
+.despesas-split,
+.mortalidade-dashboard-grid {
+  gap: 14px !important;
+}
+
+.module-note,
+.home-info-item,
+.centro-custos-insight,
+.mortalidade-insight {
+  background: #f8fbfd !important;
+  border-color: #d4dde8 !important;
+  border-radius: 7px !important;
+}
+
+.toast {
+  border-radius: 8px !important;
+  box-shadow: 0 18px 42px rgba(13, 34, 53, 0.22) !important;
+}
+
+/* Dashboard, cards and dense operational surfaces. */
+.metric-grid {
+  display: grid !important;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)) !important;
+  gap: 12px !important;
+}
+
+.metric-grid > *,
+.module-card,
+.compras-estoque-grid article,
+.home-info-item,
+.home-route-header-item,
+.home-route-finance section {
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbfd 100%) !important;
+  border: 1px solid #d7e1ec !important;
+  border-radius: 8px !important;
+  box-shadow: 0 8px 20px rgba(18, 38, 63, 0.05) !important;
+}
+
+.metric-grid > * {
+  min-height: 82px !important;
+  padding: 14px 16px !important;
+}
+
+.metric-grid span,
+.metric-grid small,
+.compras-estoque-grid span,
+.compras-estoque-grid em,
+.home-info-item span,
+.home-route-header-item span {
+  color: #5d6f85 !important;
+  font-size: 0.78rem !important;
+  font-weight: 750 !important;
+  text-transform: uppercase !important;
+}
+
+.metric-grid strong,
+.compras-estoque-grid strong,
+.home-info-item strong,
+.home-route-header-item strong {
+  color: #0f2236 !important;
+  font-size: 1.35rem !important;
+  line-height: 1.2 !important;
+}
+
+.home-layout {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1.55fr) minmax(320px, 0.9fr) !important;
+  align-items: start !important;
+}
+
+#homeRouteDialog {
+  width: min(1320px, calc(100vw - 32px)) !important;
+}
+
+.home-info-grid,
+.home-route-header {
+  display: grid !important;
+  gap: 10px !important;
+}
+
+.home-info-item,
+.home-route-header-item {
+  min-height: 74px !important;
+  padding: 12px 14px !important;
+}
+
+.home-info-grid {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)) !important;
+  align-items: stretch !important;
+}
+
+.home-route-header {
+  grid-template-columns: repeat(auto-fit, minmax(165px, 1fr)) !important;
+  align-items: stretch !important;
+  gap: 6px !important;
+  padding: 8px !important;
+}
+
+.home-route-header-item {
+  display: flex !important;
+  min-width: 0 !important;
+  min-height: 54px !important;
+  flex-direction: column !important;
+  justify-content: flex-start !important;
+  gap: 3px !important;
+  padding: 7px 9px !important;
+}
+
+.home-route-header-item span {
+  display: block !important;
+  font-size: 0.68rem !important;
+  line-height: 1.08 !important;
+}
+
+.home-route-header-item span::after {
+  content: "" !important;
+}
+
+.home-route-header-item strong {
+  display: block !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+  font-size: 0.92rem !important;
+  line-height: 1.08 !important;
+  white-space: normal !important;
+  overflow-wrap: anywhere !important;
+  word-break: normal !important;
+}
+
+#homeRouteSummary {
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)) !important;
+  gap: 6px !important;
+  padding: 8px 0 0 !important;
+}
+
+#homeRouteSummary .home-info-item {
+  min-height: 54px !important;
+  padding: 7px 9px !important;
+}
+
+#homeRouteSummary .home-info-item strong {
+  font-size: 0.95rem !important;
+  line-height: 1.08 !important;
+}
+
+.home-routes-table td,
+.home-routes-table th {
+  white-space: nowrap !important;
+}
+
+#cadastroFormPanel .form-grid {
+  display: grid !important;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)) !important;
+  align-items: end !important;
+  gap: 12px !important;
+}
+
+#cadastroFormPanel .form-grid label {
+  min-width: 0 !important;
+}
+
+#cadastroTablePanel .panel-header,
+.compras-produtos-panel .panel-header {
+  min-height: 58px !important;
+}
+
+.programacao-rankings-grid {
+  display: grid !important;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  gap: 12px !important;
+}
+
+.programacao-ranking-block {
+  padding: 0 !important;
+  overflow: hidden !important;
+}
+
+.programacao-ranking-block h3 {
+  margin: 0 !important;
+  padding: 12px 14px 2px !important;
+}
+
+.programacao-ranking-block > p,
+.programacao-ranking-block > small {
+  display: block !important;
+  padding: 0 14px 10px !important;
+}
+
+.programacao-ranking-block .table-wrap {
+  border-right: 0 !important;
+  border-left: 0 !important;
+  border-bottom: 0 !important;
+  border-radius: 0 !important;
+}
+
+.compras-estoque-grid {
+  display: grid !important;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)) !important;
+  gap: 12px !important;
+}
+
+.compras-produtos-panel {
+  display: grid !important;
+  gap: 12px !important;
+}
+
+.compras-table-wrap,
+.home-routes-table,
+.table-wrap {
+  background: #ffffff !important;
+}
+
+.feature-grid {
+  display: grid !important;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)) !important;
+  gap: 12px !important;
+}
+
+.module-card {
+  padding: 16px !important;
+}
+
+.module-card .actions {
+  margin-top: 12px !important;
+  justify-content: flex-start !important;
+}
+
+/* Layout hardening for the largest operational screens. */
+#programacaoView .panel-header {
+  display: grid !important;
+  grid-template-columns: minmax(230px, 320px) minmax(0, 1fr) !important;
+  align-items: center !important;
+}
+
+#programacaoView .panel-header > .actions {
+  display: flex !important;
+  flex-wrap: nowrap !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  min-width: 0 !important;
+  justify-content: flex-start !important;
+  overflow-x: auto !important;
+}
+
+#programacaoView .panel-header > .actions button {
+  flex: 0 0 auto !important;
+  min-width: auto !important;
+  width: auto !important;
+}
+
+#programacaoView .panel-header > div:not(.actions) {
+  min-width: 0 !important;
+}
+
+.programacao-form-grid {
+  display: grid !important;
+  grid-template-columns:
+    minmax(130px, 0.75fr)
+    minmax(220px, 1.15fr)
+    minmax(180px, 1fr)
+    minmax(180px, 1fr)
+    minmax(240px, 1.25fr) !important;
+  align-items: end !important;
+}
+
+.programacao-code-field,
+.programacao-driver-field,
+.programacao-vehicle-field,
+.programacao-route-field,
+.programacao-estimate-field,
+.programacao-load-field,
+.programacao-money-field,
+.programacao-origin-field,
+.programacao-transbordo-field,
+.programacao-transbordo-obs-field,
+.programacao-ajudantes-field,
+.status-box {
+  grid-column: auto !important;
+  min-width: 0 !important;
+}
+
+.programacao-load-field {
+  grid-column: span 2 !important;
+}
+
+.programacao-ajudantes-field {
+  grid-column: span 2 !important;
+}
+
+.programacao-transbordo-obs-field {
+  grid-column: span 2 !important;
+}
+
+.status-box {
+  min-height: 58px !important;
+}
+
+.compras-toolbar,
+.compras-tabs,
+.compras-search-row,
+.compras-footer,
+.compras-maintenance-row {
+  scrollbar-width: thin !important;
+}
+
+.compras-maintenance-row {
+  display: grid !important;
+  grid-template-columns:
+    minmax(180px, 1fr)
+    minmax(120px, 0.7fr)
+    minmax(120px, 0.7fr)
+    minmax(100px, 0.55fr)
+    minmax(260px, 1.35fr)
+    auto !important;
+  align-items: end !important;
+}
+
+.compras-maintenance-row label {
+  min-width: 0 !important;
+}
+
+.compras-maintenance-row button {
+  min-width: 150px !important;
+}
+
+.despesas-nf-form {
+  display: grid !important;
+  grid-template-columns: repeat(5, minmax(135px, 1fr)) !important;
+  align-items: end !important;
+}
+
+.despesas-nf-form .wide-field {
+  grid-column: span 3 !important;
+}
+
+.despesas-nf-form button {
+  justify-self: start !important;
+  min-width: 130px !important;
+}
+
+.mortalidade-manual-form {
+  display: grid !important;
+  grid-template-columns: repeat(6, minmax(130px, 1fr)) !important;
+  align-items: end !important;
+}
+
+.mortalidade-manual-form .manual-form-heading {
+  grid-column: 1 / -1 !important;
+}
+
+.mortalidade-manual-form .wide-field {
+  grid-column: span 2 !important;
+}
+
+.mortalidade-manual-form button {
+  min-width: 150px !important;
+}
+
+.relatorios-filter {
+  display: grid !important;
+  grid-template-columns: minmax(220px, 1.4fr) repeat(4, minmax(130px, 1fr)) minmax(100px, auto) minmax(100px, auto) !important;
+  align-items: end !important;
+}
+
+.relatorios-filter-heading {
+  grid-column: 1 / -1 !important;
+}
+
+.relatorios-actions {
+  display: grid !important;
+  grid-template-columns: minmax(260px, 1fr) repeat(8, minmax(104px, auto)) !important;
+  align-items: end !important;
+  gap: 8px !important;
+  overflow-x: auto !important;
+}
+
+.relatorios-actions button {
+  min-height: 32px !important;
+  min-width: 104px !important;
+  white-space: nowrap !important;
+}
+
+#relatoriosView .relatorios-actions {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  align-items: flex-end !important;
+  overflow: visible !important;
+}
+
+#relatoriosView .relatorios-actions > label {
+  flex: 1 1 320px !important;
+}
+
+#relatoriosView .relatorios-actions button {
+  width: auto !important;
+  max-width: none !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
+}
+
+.relatorios-filter .wide-field {
+  grid-column: span 2 !important;
+}
+
+.permissions-toolbar,
+.saas-admin-toolbar {
+  display: grid !important;
+  grid-template-columns: minmax(220px, 1fr) minmax(160px, 0.7fr) repeat(3, auto) !important;
+  align-items: end !important;
+}
+
+.permissions-toolbar label,
+.saas-admin-toolbar label {
+  min-width: 0 !important;
+}
+
+@media (max-width: 1320px) {
+  .home-layout,
+  .programacao-rankings-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  #programacaoView .panel-header > .actions {
+    max-width: 100% !important;
+    min-width: 0 !important;
+  }
+
+  .programacao-form-grid,
+  .compras-maintenance-row,
+  .despesas-nf-form,
+  .mortalidade-manual-form,
+  .relatorios-filter,
+  .relatorios-actions {
+    grid-template-columns: repeat(3, minmax(160px, 1fr)) !important;
+  }
+
+  .programacao-load-field,
+  .programacao-ajudantes-field,
+  .despesas-nf-form .wide-field,
+  .mortalidade-manual-form .wide-field,
+  .relatorios-filter .wide-field {
+    grid-column: span 2 !important;
+  }
+}
+
+@media (max-width: 760px) {
+  .programacao-form-grid,
+  .compras-maintenance-row,
+  .despesas-nf-form,
+  .mortalidade-manual-form,
+  .relatorios-filter,
+  .relatorios-actions,
+  .permissions-toolbar,
+  .saas-admin-toolbar {
+    grid-template-columns: 1fr !important;
+  }
+
+  .programacao-load-field,
+  .programacao-ajudantes-field,
+  .despesas-nf-form .wide-field,
+  .mortalidade-manual-form .wide-field,
+  .relatorios-filter .wide-field {
+    grid-column: auto !important;
+  }
+}
+
+@media (max-width: 900px) {
+  .shell {
+    grid-template-columns: 1fr !important;
+  }
+
+  .sidebar {
+    position: static !important;
+    box-shadow: none !important;
+  }
+
+  .workspace {
+    padding: 16px !important;
+  }
+
+  .topbar {
+    margin: -16px -16px 16px !important;
+    padding: 16px !important;
+  }
+}

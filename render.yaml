@@ -2,15 +2,33 @@ services:
   - type: web
     name: rotahub-api
     runtime: python
-    plan: starter
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "uvicorn api_server:app --host 0.0.0.0 --port $PORT"
+    plan: free
+    buildCommand: "pip install -r backend/requirements.txt"
+    startCommand: "uvicorn backend.main:app --host 0.0.0.0 --port $PORT"
     envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: JWT_SECRET_KEY
+        generateValue: true
       - key: ROTA_SECRET
         sync: false
+      - key: ROTA_ENABLE_LEGACY_MOBILE_API
+        value: "1"
+      - key: ROTA_ENFORCE_PLAN_FEATURES
+        value: "1"
+      - key: ROTA_ENFORCE_BILLING
+        value: "1"
+      - key: ENVIRONMENT
+        value: production
+      - key: DEBUG
+        value: "false"
+      - key: ALLOWED_HOSTS
+        value: rotahub-api.onrender.com
+      - key: CORS_ORIGINS
+        value: https://rotahub-api.onrender.com
+      - key: DATABASE_URL
+        value: sqlite+aiosqlite:////tmp/rotahub/rotadb.db
       - key: ROTA_DB
-        value: /var/data/rota_granja.db
-    disk:
-      name: rota-data
-      mountPath: /var/data
-      sizeGB: 1
+        value: /tmp/rotahub/rotadb.db
+      - key: ROTA_MOBILE_PHOTOS_DIR
+        value: /tmp/rotahub/fotos_rotas

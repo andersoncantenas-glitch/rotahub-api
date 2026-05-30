@@ -34,6 +34,7 @@ def criar_banco():
     _add_coluna_se_nao_existir(cursor, "usuarios", "cpf", "cpf TEXT")
     _add_coluna_se_nao_existir(cursor, "usuarios", "idade", "idade INTEGER")
     _add_coluna_se_nao_existir(cursor, "usuarios", "telefone", "telefone TEXT")
+    _add_coluna_se_nao_existir(cursor, "usuarios", "codigo", "codigo TEXT")
 
     # ===================== MOTORISTAS =====================
     cursor.execute("""
@@ -70,12 +71,65 @@ def criar_banco():
         placa TEXT NOT NULL UNIQUE,
         modelo TEXT,
         ano TEXT,
-        cor TEXT
+        cor TEXT,
+        status TEXT DEFAULT 'ATIVO'
     )
     """)
     _add_coluna_se_nao_existir(cursor, "veiculos", "modelo", "modelo TEXT")
     _add_coluna_se_nao_existir(cursor, "veiculos", "ano", "ano TEXT")
     _add_coluna_se_nao_existir(cursor, "veiculos", "cor", "cor TEXT")
+    _add_coluna_se_nao_existir(cursor, "veiculos", "status", "status TEXT DEFAULT 'ATIVO'")
+    _add_coluna_se_nao_existir(cursor, "veiculos", "capacidade_cx", "capacidade_cx INTEGER DEFAULT 0")
+
+    # ===================== CAIXAS =====================
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS caixas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        codigo TEXT UNIQUE,
+        lote TEXT,
+        cor TEXT,
+        veiculo_placa TEXT,
+        status TEXT DEFAULT 'EM_ESTOQUE',
+        data_compra TEXT,
+        observacao TEXT
+    )
+    """)
+    _add_coluna_se_nao_existir(cursor, "caixas", "codigo", "codigo TEXT")
+    _add_coluna_se_nao_existir(cursor, "caixas", "lote", "lote TEXT")
+    _add_coluna_se_nao_existir(cursor, "caixas", "cor", "cor TEXT")
+    _add_coluna_se_nao_existir(cursor, "caixas", "veiculo_placa", "veiculo_placa TEXT")
+    _add_coluna_se_nao_existir(cursor, "caixas", "status", "status TEXT DEFAULT 'EM_ESTOQUE'")
+    _add_coluna_se_nao_existir(cursor, "caixas", "data_compra", "data_compra TEXT")
+    _add_coluna_se_nao_existir(cursor, "caixas", "observacao", "observacao TEXT")
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_caixas_codigo_unique ON caixas (codigo)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_caixas_lote ON caixas (lote)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_caixas_veiculo ON caixas (veiculo_placa)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_caixas_status ON caixas (status)")
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS caixas_movimentos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        caixa_id INTEGER,
+        codigo TEXT,
+        movimento TEXT,
+        veiculo_origem TEXT,
+        veiculo_destino TEXT,
+        status_origem TEXT,
+        status_destino TEXT,
+        observacao TEXT,
+        criado_em TEXT
+    )
+    """)
+    _add_coluna_se_nao_existir(cursor, "caixas_movimentos", "caixa_id", "caixa_id INTEGER")
+    _add_coluna_se_nao_existir(cursor, "caixas_movimentos", "codigo", "codigo TEXT")
+    _add_coluna_se_nao_existir(cursor, "caixas_movimentos", "movimento", "movimento TEXT")
+    _add_coluna_se_nao_existir(cursor, "caixas_movimentos", "veiculo_origem", "veiculo_origem TEXT")
+    _add_coluna_se_nao_existir(cursor, "caixas_movimentos", "veiculo_destino", "veiculo_destino TEXT")
+    _add_coluna_se_nao_existir(cursor, "caixas_movimentos", "status_origem", "status_origem TEXT")
+    _add_coluna_se_nao_existir(cursor, "caixas_movimentos", "status_destino", "status_destino TEXT")
+    _add_coluna_se_nao_existir(cursor, "caixas_movimentos", "observacao", "observacao TEXT")
+    _add_coluna_se_nao_existir(cursor, "caixas_movimentos", "criado_em", "criado_em TEXT")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_caixas_movimentos_caixa ON caixas_movimentos (caixa_id, criado_em)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_caixas_movimentos_codigo ON caixas_movimentos (codigo, criado_em)")
 
     # ===================== EQUIPES =====================
     cursor.execute("""
@@ -102,6 +156,54 @@ def criar_banco():
     _add_coluna_se_nao_existir(cursor, "vendedores", "telefone", "telefone TEXT")
     _add_coluna_se_nao_existir(cursor, "vendedores", "rota", "rota TEXT")
 
+    # ===================== PRODUTOS =====================
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS produtos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        codigo TEXT UNIQUE,
+        nome TEXT NOT NULL,
+        descricao TEXT,
+        categoria TEXT DEFAULT 'AVES',
+        unidade TEXT DEFAULT 'KG',
+        unidade_estoque TEXT DEFAULT 'KG',
+        controla_estoque_fisico INTEGER DEFAULT 1,
+        controla_estoque_fiscal INTEGER DEFAULT 1,
+        estoque_min_kg REAL DEFAULT 0,
+        estoque_min_caixas INTEGER DEFAULT 0,
+        ncm TEXT,
+        cest TEXT,
+        cfop_entrada TEXT,
+        cfop_saida TEXT,
+        ean TEXT,
+        custo_padrao REAL DEFAULT 0,
+        preco_padrao REAL DEFAULT 0,
+        status TEXT DEFAULT 'ATIVO'
+    )
+    """)
+    for coluna, ddl in {
+        "codigo": "codigo TEXT",
+        "nome": "nome TEXT",
+        "descricao": "descricao TEXT",
+        "categoria": "categoria TEXT DEFAULT 'AVES'",
+        "unidade": "unidade TEXT DEFAULT 'KG'",
+        "unidade_estoque": "unidade_estoque TEXT DEFAULT 'KG'",
+        "controla_estoque_fisico": "controla_estoque_fisico INTEGER DEFAULT 1",
+        "controla_estoque_fiscal": "controla_estoque_fiscal INTEGER DEFAULT 1",
+        "estoque_min_kg": "estoque_min_kg REAL DEFAULT 0",
+        "estoque_min_caixas": "estoque_min_caixas INTEGER DEFAULT 0",
+        "ncm": "ncm TEXT",
+        "cest": "cest TEXT",
+        "cfop_entrada": "cfop_entrada TEXT",
+        "cfop_saida": "cfop_saida TEXT",
+        "ean": "ean TEXT",
+        "custo_padrao": "custo_padrao REAL DEFAULT 0",
+        "preco_padrao": "preco_padrao REAL DEFAULT 0",
+        "status": "status TEXT DEFAULT 'ATIVO'",
+    }.items():
+        _add_coluna_se_nao_existir(cursor, "produtos", coluna, ddl)
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_produtos_codigo ON produtos(codigo)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_produtos_nome ON produtos(nome)")
+
     # ===================== VENDAS IMPORTADAS (WIBI) =====================
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS vendas_importadas (
@@ -122,6 +224,7 @@ def criar_banco():
     """)
     _add_coluna_se_nao_existir(cursor, "vendas_importadas", "kg_cliente", "kg_cliente REAL")
     _add_coluna_se_nao_existir(cursor, "vendas_importadas", "produto", "produto TEXT")
+    _add_coluna_se_nao_existir(cursor, "vendas_importadas", "produto_id", "produto_id INTEGER")
     _add_coluna_se_nao_existir(cursor, "vendas_importadas", "bonificacao", "bonificacao TEXT")
     _add_coluna_se_nao_existir(cursor, "vendas_importadas", "observacao", "observacao TEXT")
     _add_coluna_se_nao_existir(cursor, "vendas_importadas", "importado_em", "importado_em TEXT")
@@ -167,6 +270,7 @@ def criar_banco():
     _add_coluna_se_nao_existir(cursor, "programacao_itens", "caixas", "caixas INTEGER")
     _add_coluna_se_nao_existir(cursor, "programacao_itens", "preco", "preco REAL")
     _add_coluna_se_nao_existir(cursor, "programacao_itens", "kg_cliente", "kg_cliente REAL")
+    _add_coluna_se_nao_existir(cursor, "programacao_itens", "produto_id", "produto_id INTEGER")
 
     # ===================== PDC =====================
     cursor.execute("""

@@ -122,6 +122,12 @@ class CentroCustosPage(PageBase):
         self.cb_chart_metric.bind("<<ComboboxSelected>>", lambda _e: self.refresh_data())
 
     def on_show(self):
+        if not self.app.can_access_routine("CentroCustos"):
+            messagebox.showwarning(
+                "Plano não compatível",
+                "O plano atual não permite uso da rotina Analise de Custos. Atualize para o plano Professional para liberar.",
+            )
+            return
         self.refresh_comboboxes()
         self.refresh_data()
 
@@ -276,6 +282,10 @@ class CentroCustosPage(PageBase):
                         (r or {}).get("km_rodado", 0),
                         (r or {}).get("kg_carregado", 0),
                         (r or {}).get("total_desp", 0),
+                        (r or {}).get("tipo_estimativa", "KG"),
+                        (r or {}).get("operacao_tipo", "VENDA"),
+                        (r or {}).get("transbordo_modalidade", ""),
+                        (r or {}).get("transbordo_grupo", ""),
                     )
                     for r in (arr or [])
                     if isinstance(r, dict)
@@ -301,6 +311,15 @@ class CentroCustosPage(PageBase):
                     data_expr = "''"
                 km_expr = "COALESCE(km_rodado,0)" if "km_rodado" in cols else "0"
                 kg_expr = "COALESCE(nf_kg_carregado, kg_carregado, 0)" if "nf_kg_carregado" in cols else ("COALESCE(kg_carregado,0)" if "kg_carregado" in cols else "0")
+                tipo_estimativa_expr = "COALESCE(p.tipo_estimativa,'KG')" if "tipo_estimativa" in cols else "'KG'"
+                if "operacao_tipo" in cols and "tipo_estimativa" in cols:
+                    operacao_tipo_expr = "COALESCE(p.operacao_tipo, CASE WHEN COALESCE(p.tipo_estimativa,'KG')='CX' THEN 'TRANSBORDO' ELSE 'VENDA' END)"
+                elif "tipo_estimativa" in cols:
+                    operacao_tipo_expr = "CASE WHEN COALESCE(p.tipo_estimativa,'KG')='CX' THEN 'TRANSBORDO' ELSE 'VENDA' END"
+                else:
+                    operacao_tipo_expr = "'VENDA'"
+                transbordo_modalidade_expr = "COALESCE(p.transbordo_modalidade,'')" if "transbordo_modalidade" in cols else "''"
+                transbordo_grupo_expr = "COALESCE(p.transbordo_grupo,'')" if "transbordo_grupo" in cols else "''"
                 cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='despesas'")
                 has_despesas = bool(cur.fetchone())
                 despesas_join = (
@@ -323,7 +342,11 @@ class CentroCustosPage(PageBase):
                            {data_expr} as data_ref,
                            {km_expr} as km_rodado,
                            {kg_expr} as kg_carregado,
-                           {total_desp_expr} as total_desp
+                           {total_desp_expr} as total_desp,
+                           {tipo_estimativa_expr} as tipo_estimativa,
+                           {operacao_tipo_expr} as operacao_tipo,
+                           {transbordo_modalidade_expr} as transbordo_modalidade,
+                           {transbordo_grupo_expr} as transbordo_grupo
                       FROM programacoes p
                     {despesas_join}
                      WHERE trim(COALESCE(p.veiculo,'')) <> ''
@@ -338,6 +361,10 @@ class CentroCustosPage(PageBase):
             km = safe_float(r[3], 0.0)
             kg = safe_float(r[4], 0.0)
             desp = safe_float(r[5], 0.0)
+            tipo_estimativa = upper(str(r[6] if len(r) > 6 else "KG").strip()) or "KG"
+            operacao_tipo = upper(str(r[7] if len(r) > 7 else "VENDA").strip()) or "VENDA"
+            if operacao_tipo not in {"TRANSBORDO", "VENDA"}:
+                operacao_tipo = "TRANSBORDO" if tipo_estimativa == "CX" else "VENDA"
 
             if cutoff is not None:
                 if dt_ref is None or dt_ref < cutoff:
@@ -347,11 +374,15 @@ class CentroCustosPage(PageBase):
             if not veiculo:
                 continue
 
-            d = agg.setdefault(veiculo, {"rotas": 0, "km": 0.0, "kg": 0.0, "desp": 0.0})
+            d = agg.setdefault(veiculo, {"rotas": 0, "km": 0.0, "kg": 0.0, "desp": 0.0, "venda": 0, "transbordo": 0})
             d["rotas"] += 1
             d["km"] += km
             d["kg"] += kg
             d["desp"] += desp
+            if operacao_tipo == "TRANSBORDO":
+                d["transbordo"] += 1
+            else:
+                d["venda"] += 1
 
         self.tree.delete(*self.tree.get_children())
         rows_out = []
@@ -397,6 +428,8 @@ class CentroCustosPage(PageBase):
         total_km = sum(r[2] for r in rows_out)
         total_kg = sum(r[3] for r in rows_out)
         total_desp = sum(r[4] for r in rows_out)
+        total_venda = sum(safe_int(d.get("venda"), 0) for d in agg.values())
+        total_transbordo = sum(safe_int(d.get("transbordo"), 0) for d in agg.values())
         custo_km_global = (total_desp / total_km) if total_km > 0 else 0.0
         custo_kg_global = (total_desp / total_kg) if total_kg > 0 else 0.0
         metric = upper(self.var_chart_metric.get().strip())
@@ -418,12 +451,13 @@ class CentroCustosPage(PageBase):
         self.lbl_resumo.config(
             text=(
                 f"Veiculos: {len(rows_out)} | Rotas: {total_rotas} | "
+                f"Venda: {total_venda} | Transbordo: {total_transbordo} | "
                 f"KM: {total_km:.1f} | KG carregado: {total_kg:.2f} | "
                 f"Despesas: R$ {total_desp:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
                 + f" | Custo/KM global: {custo_km_global:.3f} | Custo/KG global: {custo_kg_global:.3f}"
             )
         )
-        self.set_status(f"STATUS: Centro de Custos atualizado ({self.var_periodo.get()} dias / veiculo {self.var_veiculo.get()}).")
+        self.set_status(f"STATUS: Analise de Custos atualizada ({self.var_periodo.get()} dias / veiculo {self.var_veiculo.get()}).")
 
 
 __all__ = ["CentroCustosPage", "configure_centro_custos_page_dependencies"]

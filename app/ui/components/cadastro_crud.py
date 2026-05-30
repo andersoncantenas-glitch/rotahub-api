@@ -95,14 +95,29 @@ class CadastroCRUD(ttk.Frame):
                 row=r, column=c, sticky="w", padx=8, pady=(0, 6)
             )
 
-            if col == "status" and self.table in {"ajudantes", "motoristas", "vendedores"}:
+            if col == "status" and self.table in {"ajudantes", "motoristas", "vendedores", "veiculos", "caixas", "produtos"}:
                 if self.table == "motoristas":
                     ent = ttk.Combobox(form, state="readonly", values=["ATIVO", "INATIVO"])
+                elif self.table == "caixas":
+                    ent = ttk.Combobox(form, state="readonly", values=["EM_ESTOQUE", "VINCULADA", "EM_USO", "QUEBRADA", "BAIXADA"])
+                elif self.table == "produtos":
+                    ent = ttk.Combobox(form, state="readonly", values=["ATIVO", "INATIVO"])
+                elif self.table == "veiculos":
+                    ent = ttk.Combobox(form, state="readonly", values=["ATIVO", "DESATIVADO"])
                 elif self.table == "vendedores":
                     ent = ttk.Combobox(form, state="readonly", values=["ATIVO", "DESATIVADO"])
                 else:
                     ent = ttk.Combobox(form, state="readonly", values=["ATIVO", "DESATIVADO"])
-                ent.set("ATIVO")
+                ent.set("EM_ESTOQUE" if self.table == "caixas" else "ATIVO")
+            elif col == "categoria" and self.table == "produtos":
+                ent = ttk.Combobox(form, state="readonly", values=["AVES", "INSUMOS", "EMBALAGENS", "SERVICOS", "OUTROS"])
+                ent.set("AVES")
+            elif col in {"unidade", "unidade_estoque"} and self.table == "produtos":
+                ent = ttk.Combobox(form, state="readonly", values=["KG", "CX", "UN", "PC", "LT"])
+                ent.set("KG")
+            elif col in {"controla_estoque_fisico", "controla_estoque_fiscal"} and self.table == "produtos":
+                ent = ttk.Combobox(form, state="readonly", values=["1", "0"])
+                ent.set("1")
             elif col == "perfil_app" and self.table == "motoristas":
                 ent = ttk.Combobox(form, state="readonly", values=["MOTORISTA", "ADMIN"])
                 ent.set("MOTORISTA")
@@ -156,15 +171,21 @@ class CadastroCRUD(ttk.Frame):
             )
             self.btn_senha.grid(row=0, column=5, padx=4, sticky="ew")
 
-        if self.table == "ajudantes":
+        if self.table in {"ajudantes", "produtos", "caixas"}:
             self._ajudantes_status_filter = tk.StringVar(value="TODOS")
             ttk.Label(actions, text="FILTRO STATUS:", style="CardLabel.TLabel").grid(row=0, column=10, padx=(18, 6), sticky="e")
+            if self.table == "caixas":
+                filter_values = ["TODOS", "EM_ESTOQUE", "VINCULADA", "EM_USO", "QUEBRADA", "BAIXADA"]
+            elif self.table == "produtos":
+                filter_values = ["TODOS", "ATIVO", "INATIVO"]
+            else:
+                filter_values = ["TODOS", "ATIVO", "DESATIVADO"]
             cb_status_filter = ttk.Combobox(
                 actions,
                 state="readonly",
                 width=14,
                 textvariable=self._ajudantes_status_filter,
-                values=["TODOS", "ATIVO", "DESATIVADO"],
+                values=filter_values,
             )
             cb_status_filter.grid(row=0, column=11, padx=6, sticky="w")
             cb_status_filter.bind("<<ComboboxSelected>>", lambda _e: self.carregar())
@@ -296,6 +317,21 @@ class CadastroCRUD(ttk.Frame):
             self._set("perfil_app", "MOTORISTA")
         if self.table == "vendedores" and "status" in self.entries:
             self._set("status", "ATIVO")
+        if self.table == "veiculos" and "status" in self.entries:
+            self._set("status", "ATIVO")
+        if self.table == "caixas" and "status" in self.entries:
+            self._set("status", "EM_ESTOQUE")
+        if self.table == "produtos":
+            for key, value in {
+                "categoria": "AVES",
+                "unidade": "KG",
+                "unidade_estoque": "KG",
+                "controla_estoque_fisico": "1",
+                "controla_estoque_fiscal": "1",
+                "status": "ATIVO",
+            }.items():
+                if key in self.entries:
+                    self._set(key, value)
         self._set_form_mode("novo")
         self._update_password_controls()
 
@@ -306,8 +342,8 @@ class CadastroCRUD(ttk.Frame):
         if not self.selected_id:
             messagebox.showwarning("ATENCAO", "Selecione um cadastro na tabela.")
             return
-        status_on = "ATIVO"
-        status_off = "INATIVO" if self.table == "motoristas" else "DESATIVADO"
+        status_on = "EM_ESTOQUE" if self.table == "caixas" else "ATIVO"
+        status_off = "QUEBRADA" if self.table == "caixas" else "INATIVO" if self.table in {"motoristas", "produtos"} else "DESATIVADO"
         self._set("status", status_on if liberar else status_off)
         self._edit_mode = "status"
         self.salvar()
@@ -470,7 +506,7 @@ class CadastroCRUD(ttk.Frame):
                 else:
                     senha_ent.config(state="disabled")
             else:
-                if self._is_admin and not self.selected_id:
+                if self._edit_mode == "novo" and not self.selected_id:
                     senha_ent.config(state="normal")
                 else:
                     senha_ent.config(state="disabled")
@@ -552,6 +588,7 @@ class CadastroCRUD(ttk.Frame):
             "placa": placa,
             "modelo": modelo,
             "capacidade_cx": int(safe_int(data.get("capacidade_cx"), 0)),
+            "status": self._norm(data.get("status") or "ATIVO"),
         }
         _call_api(
             "POST",
@@ -700,6 +737,27 @@ class CadastroCRUD(ttk.Frame):
                     cur.execute("SELECT COUNT(*) FROM equipes WHERE " + " OR ".join(conds), tuple(params))
                     if int((cur.fetchone() or [0])[0] or 0) > 0:
                         return "Ajudante vinculado a equipe."
+            elif self.table == "produtos":
+                codigo = self._norm(self._get("codigo"))
+                nome = self._norm(self._get("nome"))
+                refs = [
+                    ("programacao_itens", "produto_id", str(self.selected_id), "Produto vinculado a itens de programacao."),
+                    ("vendas_importadas", "produto_id", str(self.selected_id), "Produto vinculado a vendas importadas."),
+                    ("estoque_movimentos", "produto_id", str(self.selected_id), "Produto vinculado ao estoque."),
+                ]
+                for table_name, column, value, message in refs:
+                    if value and table_has_column(cur, table_name, column):
+                        cur.execute(f"SELECT COUNT(*) FROM {table_name} WHERE COALESCE({column}, 0)=?", (value,))
+                        if int((cur.fetchone() or [0])[0] or 0) > 0:
+                            return message
+                if nome and table_has_column(cur, "estoque_movimentos", "produto"):
+                    cur.execute("SELECT COUNT(*) FROM estoque_movimentos WHERE UPPER(COALESCE(produto,''))=UPPER(?)", (nome,))
+                    if int((cur.fetchone() or [0])[0] or 0) > 0:
+                        return "Produto vinculado ao estoque."
+                if nome and table_has_column(cur, "programacao_itens", "produto"):
+                    cur.execute("SELECT COUNT(*) FROM programacao_itens WHERE UPPER(COALESCE(produto,''))=UPPER(?)", (nome,))
+                    if int((cur.fetchone() or [0])[0] or 0) > 0:
+                        return "Produto vinculado a itens de programacao."
         except Exception:
             logging.debug("Falha na verificação de vÃÂnculos para exclusão", exc_info=True)
         return ""
@@ -719,6 +777,21 @@ class CadastroCRUD(ttk.Frame):
                 self._set("codigo", self._next_motorista_codigo())
         if self.table == "vendedores" and "status" in self.entries:
             self._set("status", "ATIVO")
+        if self.table == "veiculos" and "status" in self.entries:
+            self._set("status", "ATIVO")
+        if self.table == "caixas" and "status" in self.entries:
+            self._set("status", "EM_ESTOQUE")
+        if self.table == "produtos":
+            for key, value in {
+                "categoria": "AVES",
+                "unidade": "KG",
+                "unidade_estoque": "KG",
+                "controla_estoque_fisico": "1",
+                "controla_estoque_fiscal": "1",
+                "status": "ATIVO",
+            }.items():
+                if key in self.entries:
+                    self._set(key, value)
         self._set_form_mode("view")
         self._update_password_controls()
 
@@ -728,6 +801,9 @@ class CadastroCRUD(ttk.Frame):
             messagebox.showwarning("ATENCAO", "Selecione um item na tabela para alterar.")
             return
         self._on_select()
+        if self.table in {"produtos", "caixas"}:
+            self._set_form_mode("novo")
+            return
         if not self._has_status_field:
             messagebox.showwarning("ATENCAO", "Este cadastro nao possui campo STATUS.")
             return
@@ -792,6 +868,7 @@ class CadastroCRUD(ttk.Frame):
                                 "placa": str(r.get("placa") or ""),
                                 "modelo": str(r.get("modelo") or ""),
                                 "capacidade_cx": str(r.get("capacidade_cx") or 0),
+                                "status": str(r.get("status") or "ATIVO"),
                             }
                         elif self.table == "ajudantes":
                             row_map = {
@@ -823,7 +900,7 @@ class CadastroCRUD(ttk.Frame):
                 else:
                     select_cols.append(f"'' AS {c}")
             cols_db = ", ".join(select_cols)
-            if self.table == "ajudantes" and status_filter in {"ATIVO", "DESATIVADO"}:
+            if self.table in {"ajudantes", "produtos", "caixas"} and status_filter in {"ATIVO", "DESATIVADO", "INATIVO", "EM_ESTOQUE", "VINCULADA", "EM_USO", "QUEBRADA", "BAIXADA"}:
                 cur.execute(
                     f"SELECT id, {cols_db} FROM {self.table} "
                     "WHERE UPPER(COALESCE(status, 'ATIVO'))=? ORDER BY id DESC",
@@ -857,7 +934,7 @@ class CadastroCRUD(ttk.Frame):
 
     def carregar(self, async_load=True):
         status_filter = "TODOS"
-        if self.table == "ajudantes":
+        if self.table in {"ajudantes", "produtos", "caixas"}:
             try:
                 status_filter = upper(self._ajudantes_status_filter.get())
             except Exception:
@@ -899,7 +976,7 @@ class CadastroCRUD(ttk.Frame):
         data = {col: self.entries[col].get().strip() for col, _ in self.fields}
 
         # Normalizações por tabela
-        if self.table in {"motoristas", "vendedores", "usuarios", "veiculos", "equipes", "ajudantes", "clientes"}:
+        if self.table in {"motoristas", "vendedores", "usuarios", "veiculos", "caixas", "equipes", "ajudantes", "clientes", "produtos"}:
             for k in list(data.keys()):
                 data[k] = self._norm(data[k])
 
@@ -929,13 +1006,30 @@ class CadastroCRUD(ttk.Frame):
                     messagebox.showwarning("ATENCAO", "Status invalido. Use ATIVO ou DESATIVADO.")
                     return
                 data["status"] = novo_status
+            elif self.table == "veiculos":
+                if novo_status not in {"ATIVO", "DESATIVADO"}:
+                    messagebox.showwarning("ATENCAO", "Status invalido. Use ATIVO ou DESATIVADO.")
+                    return
+                data["status"] = novo_status
+            elif self.table == "caixas":
+                if novo_status not in {"EM_ESTOQUE", "VINCULADA", "EM_USO", "QUEBRADA", "BAIXADA"}:
+                    messagebox.showwarning("ATENCAO", "Status invalido para caixa.")
+                    return
+                data["status"] = novo_status
+            elif self.table == "produtos":
+                if novo_status not in {"ATIVO", "INATIVO"}:
+                    messagebox.showwarning("ATENCAO", "Status invalido. Use ATIVO ou INATIVO.")
+                    return
+                data["status"] = novo_status
 
-            if api_sync_enabled and self.table in {"motoristas", "vendedores", "ajudantes"}:
+            if api_sync_enabled and self.table in {"motoristas", "vendedores", "veiculos", "ajudantes"}:
                 try:
                     if self.table == "motoristas":
                         self._sync_motorista_upsert_api(data)
                     elif self.table == "vendedores":
                         self._sync_vendedor_upsert_api(data)
+                    elif self.table == "veiculos":
+                        self._sync_veiculo_upsert_api(data)
                     elif self.table == "ajudantes":
                         self._sync_ajudante_upsert_api(data)
                 except Exception as e:
@@ -1248,24 +1342,127 @@ class CadastroCRUD(ttk.Frame):
                     data["status"] = status
 
                 # -------------------------
-                # VECULOS (placa, modelo, capacidade_cx)
+                # VECULOS (placa, modelo, capacidade_cx, status)
                 # -------------------------
                 if self.table == "veiculos":
-                    ok, f = self._require_fields(["placa", "modelo", "capacidade_cx"])
+                    ok, f = self._require_fields(["placa", "modelo", "capacidade_cx", "status"])
                     if not ok:
                         messagebox.showwarning("ATENÇÃO", f"PREENCHA O CAMPO: {f.upper()}.")
                         return
 
                     placa = self._norm(data.get("placa"))
+                    modelo = self._norm(data.get("modelo"))
+                    status = self._norm(data.get("status") or "ATIVO")
                     if self._dup_exists(cur, "placa", placa, ignore_id=self.selected_id):
                         messagebox.showerror("ERRO", f"J EXISTE VECULO COM ESTA PLACA: {placa}")
+                        return
+                    if status not in {"ATIVO", "DESATIVADO"}:
+                        messagebox.showwarning("ATENCAO", "STATUS invalido para veiculo.")
                         return
 
                     cap = safe_int(data.get("capacidade_cx"), -1)
                     if cap < 0:
                         messagebox.showwarning("ATENÇÃO", "CAPACIDADE (CX) deve ser um número inteiro >= 0.")
                         return
+                    data["placa"] = placa
+                    data["modelo"] = modelo
                     data["capacidade_cx"] = cap
+                    data["status"] = status
+
+                # -------------------------
+                # CAIXAS (rastreio por codigo, lote, cor, veiculo e status)
+                # -------------------------
+                if self.table == "caixas":
+                    ok, f = self._require_fields(["codigo", "lote", "cor", "status"])
+                    if not ok:
+                        messagebox.showwarning("ATENCAO", f"PREENCHA O CAMPO: {f.upper()}.")
+                        return
+
+                    codigo = self._norm(data.get("codigo"))
+                    lote = self._norm(data.get("lote"))
+                    cor = self._norm(data.get("cor"))
+                    placa = self._norm(data.get("veiculo_placa"))
+                    status_c = self._norm(data.get("status") or "EM_ESTOQUE")
+                    if len(codigo) < 2:
+                        messagebox.showwarning("ATENCAO", "CODIGO RASTREIO deve ter pelo menos 2 caracteres.")
+                        return
+                    if self._dup_exists(cur, "codigo", codigo, ignore_id=self.selected_id):
+                        messagebox.showerror("ERRO", f"JA EXISTE CAIXA COM ESTE CODIGO: {codigo}")
+                        return
+                    if placa:
+                        cur.execute("SELECT id FROM veiculos WHERE UPPER(TRIM(COALESCE(placa,'')))=UPPER(TRIM(?)) LIMIT 1", (placa,))
+                        if not cur.fetchone():
+                            messagebox.showwarning("ATENCAO", f"VEICULO NAO ENCONTRADO: {placa}")
+                            return
+                    if status_c not in {"EM_ESTOQUE", "VINCULADA", "EM_USO", "QUEBRADA", "BAIXADA"}:
+                        messagebox.showwarning("ATENCAO", "STATUS invalido para caixa.")
+                        return
+                    data["codigo"] = codigo
+                    data["lote"] = lote
+                    data["cor"] = cor
+                    data["veiculo_placa"] = placa
+                    data["status"] = status_c
+                    data["data_compra"] = str(data.get("data_compra") or "").strip()[:30]
+                    data["observacao"] = self._norm(data.get("observacao"))[:300]
+
+                # -------------------------
+                # PRODUTOS (catalogo usado pelo estoque fisico/fiscal)
+                # -------------------------
+                if self.table == "produtos":
+                    ok, f = self._require_fields(["codigo", "nome", "categoria", "unidade", "unidade_estoque", "status"])
+                    if not ok:
+                        messagebox.showwarning("ATENCAO", f"PREENCHA O CAMPO: {f.upper()}.")
+                        return
+
+                    codigo = self._norm(data.get("codigo"))
+                    nome = self._norm(data.get("nome"))
+                    categoria = self._norm(data.get("categoria") or "AVES")
+                    unidade = self._norm(data.get("unidade") or "KG")
+                    unidade_estoque = self._norm(data.get("unidade_estoque") or "KG")
+                    status_p = self._norm(data.get("status") or "ATIVO")
+                    if len(codigo) < 2:
+                        messagebox.showwarning("ATENCAO", "CODIGO do produto deve ter pelo menos 2 caracteres.")
+                        return
+                    if len(nome) < 2:
+                        messagebox.showwarning("ATENCAO", "NOME do produto deve ter pelo menos 2 caracteres.")
+                        return
+                    if categoria not in {"AVES", "INSUMOS", "EMBALAGENS", "SERVICOS", "OUTROS"}:
+                        messagebox.showwarning("ATENCAO", "CATEGORIA invalida para produto.")
+                        return
+                    if unidade not in {"KG", "CX", "UN", "PC", "LT"} or unidade_estoque not in {"KG", "CX", "UN", "PC", "LT"}:
+                        messagebox.showwarning("ATENCAO", "UNIDADE invalida para produto.")
+                        return
+                    if status_p not in {"ATIVO", "INATIVO"}:
+                        messagebox.showwarning("ATENCAO", "STATUS invalido para produto.")
+                        return
+                    if self._dup_exists(cur, "codigo", codigo, ignore_id=self.selected_id):
+                        messagebox.showerror("ERRO", f"JA EXISTE PRODUTO COM ESTE CODIGO: {codigo}")
+                        return
+                    if self._dup_exists(cur, "nome", nome, ignore_id=self.selected_id):
+                        messagebox.showerror("ERRO", f"JA EXISTE PRODUTO COM ESTE NOME: {nome}")
+                        return
+
+                    def decimal_non_negative(key):
+                        try:
+                            return max(float(str(data.get(key) or "0").replace(",", ".")), 0)
+                        except Exception:
+                            return 0.0
+
+                    data["codigo"] = codigo
+                    data["nome"] = nome
+                    data["categoria"] = categoria
+                    data["unidade"] = unidade
+                    data["unidade_estoque"] = unidade_estoque
+                    data["controla_estoque_fisico"] = 1 if str(data.get("controla_estoque_fisico") or "1") == "1" else 0
+                    data["controla_estoque_fiscal"] = 1 if str(data.get("controla_estoque_fiscal") or "1") == "1" else 0
+                    data["estoque_min_kg"] = decimal_non_negative("estoque_min_kg")
+                    data["estoque_min_caixas"] = max(safe_int(data.get("estoque_min_caixas"), 0), 0)
+                    data["custo_padrao"] = decimal_non_negative("custo_padrao")
+                    data["preco_padrao"] = decimal_non_negative("preco_padrao")
+                    data["ncm"] = "".join(ch for ch in str(data.get("ncm") or "") if ch.isdigit())
+                    data["cfop_entrada"] = "".join(ch for ch in str(data.get("cfop_entrada") or "") if ch.isdigit())
+                    data["cfop_saida"] = "".join(ch for ch in str(data.get("cfop_saida") or "") if ch.isdigit())
+                    data["status"] = status_p
 
                 # -------------------------
                 # SALVAR (UPDATE/INSERT)

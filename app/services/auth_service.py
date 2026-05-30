@@ -40,6 +40,7 @@ def autenticar_usuario(login: str, senha: str):
         has_cpf = "cpf" in cols
         has_telefone = "telefone" in cols
         has_senha = "senha" in cols
+        has_company_id = "company_id" in cols
 
         if not has_senha:
             return _service_result(ok=False, data=None, error="Base sem coluna de senha.", source="local")
@@ -49,6 +50,8 @@ def autenticar_usuario(login: str, senha: str):
         select_parts.append("permissoes" if has_permissoes else "'' as permissoes")
         select_parts.append("cpf" if has_cpf else "'' as cpf")
         select_parts.append("telefone" if has_telefone else "'' as telefone")
+        if has_company_id:
+            select_parts.append("company_id")
 
         cur.execute(
             f"""
@@ -70,6 +73,7 @@ def autenticar_usuario(login: str, senha: str):
         permissoes = row[3] if len(row) > 3 else ""
         cpf = row[4] if len(row) > 4 else ""
         telefone = row[5] if len(row) > 5 else ""
+        company_id = row[6] if has_company_id and len(row) > 6 else None
 
         # 1) Se já é hash, valida por hash
         if str(senha_db).startswith("pbkdf2_sha256$"):
@@ -98,6 +102,7 @@ def autenticar_usuario(login: str, senha: str):
             "permissoes": permissoes,
             "cpf": cpf,
             "telefone": telefone,
+            "company_id": company_id,
             "is_admin": is_admin,
         },
         source="local",

@@ -11,7 +11,7 @@ Cada empresa deve ter:
 
 Nunca reutilize o mesmo banco entre empresas.
 
-## 2) Servidor (Render) - empresa nova
+## 2) Servidor web/API (Render) - empresa nova
 
 ### 2.1 Environment Variables
 
@@ -19,22 +19,35 @@ Configure no servico Render da empresa:
 
 - Tipo: `Web Service`
 - Plano: `starter` ou superior
+- `ENVIRONMENT=production`
+- `DEBUG=false`
+- `ALLOWED_HOSTS=<dominio-render-ou-dominio-proprio>`
+- `CORS_ORIGINS=https://<dominio-render-ou-dominio-proprio>`
 - `ROTA_DB=/var/data/empresa_nome.db`
+- `DATABASE_URL=sqlite+aiosqlite:////var/data/empresa_nome.db`
+- `SECRET_KEY=<segredo_forte_unico>`
+- `JWT_SECRET_KEY=<outro_segredo_forte_unico>`
 - `ROTA_SECRET=<segredo_forte_unico>`
-- `ROTA_CORS_ORIGINS=https://app-da-empresa.com` (ou vazio se nao usar web)
+- `ROTA_ENABLE_LEGACY_MOBILE_API=1`
+- `ROTA_MOBILE_PHOTOS_DIR=/var/data/fotos_rotas`
 
 Observacao:
-- Se nao houver dominio web, voce pode manter `ROTA_CORS_ORIGINS` vazio.
 - Para persistencia real, o servico deve ter `Persistent Disk` montado em `/var/data`.
 - `Free web service` nao persiste SQLite local no Render. Em `restart`, `redeploy` ou `idle spin-down`, os dados locais podem ser perdidos.
-- Se quiser permanecer no plano free, a alternativa de persistencia no Render e usar `Render Postgres`, mas o projeto ainda nao esta migrado para isso.
+- Se usar PostgreSQL gerenciado, configure `DATABASE_URL` PostgreSQL e revise migracoes antes da entrega.
 
 ### 2.2 Start Command
 
-Use este comando para criar o banco automaticamente se nao existir:
+Use o backend web atual:
 
 ```bash
-python -c "import os,sqlite3; p=os.environ.get('ROTA_DB','rota_granja.db'); os.makedirs(os.path.dirname(p) or '.', exist_ok=True); sqlite3.connect(p).close()" && python -m uvicorn api_server:app --host 0.0.0.0 --port $PORT
+uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+```
+
+Build command:
+
+```bash
+pip install -r backend/requirements.txt
 ```
 
 ### 2.3 Validacao da API
@@ -42,12 +55,20 @@ python -c "import os,sqlite3; p=os.environ.get('ROTA_DB','rota_granja.db'); os.m
 Abra:
 
 ```text
-https://<url-da-api>/ping
+https://<url-da-api>/health
 ```
 
 Resultado esperado:
-- `"ok": true`
-- `"db": "/var/data/empresa_nome.db"` (ou caminho configurado no `ROTA_DB`)
+- `"status": "healthy"`
+- `https://<url-da-api>/ready` deve responder `"status": "ready"`
+- pagina publica em `https://<url-da-api>/public/index.html`
+- sistema operacional em `https://<url-da-api>/app/index.html`
+
+Antes de entregar, rode no ambiente com variaveis de producao:
+
+```bash
+python scripts/check_deploy_ready.py
+```
 
 ## 3) Gerar Desktop (.exe + setup)
 
@@ -123,12 +144,13 @@ Se o mesmo computador/celular foi usado em testes anteriores:
 ### API ativa e banco em uso
 
 ```text
-https://<url-da-api>/ping
+https://<url-da-api>/health
+https://<url-da-api>/ready
 ```
 
 ### Se aparecer dado antigo no Desktop
 
 1. Confirmar `API: ONLINE` e URL correta.
 2. Confirmar `ROTA_SERVER_URL` e `ROTA_SECRET` da estacao.
-3. Confirmar `/ping` aponta para o banco da empresa atual.
+3. Confirmar `/health` e `/ready` respondem, e que `ROTA_DB`/`DATABASE_URL` apontam para o banco da empresa atual.
 4. Limpar cache local do Desktop/celular e reabrir.

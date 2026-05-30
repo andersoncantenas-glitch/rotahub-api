@@ -1,7 +1,15 @@
 fastapi
 uvicorn[standard]
+sqlalchemy
+aiosqlite
+pydantic-settings
+python-dotenv
 httpx
 pydantic
 python-multipart
 pyjwt
 passlib[bcrypt]
+reportlab
+pandas
+openpyxl
+xlrd

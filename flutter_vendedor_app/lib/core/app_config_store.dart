@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/app_config.dart';
@@ -35,18 +36,23 @@ class AppConfigStore {
     final decoded = jsonDecode(raw);
     if (decoded is! Map) return null;
     final map = decoded.map((key, value) => MapEntry(key.toString(), value));
-    return AppConfig.fromJson(map);
+    final config = AppConfig.fromJson(map);
+    final migrated = _migrateAndroidEmulatorLoopback(config);
+    if (migrated.normalizedBaseUrl != config.normalizedBaseUrl) {
+      await prefs.setString(_kConfigKey, jsonEncode(migrated.toJson()));
+    }
+    return migrated;
   }
 
   static Future<void> save(AppConfig config) async {
     final prefs = await SharedPreferences.getInstance();
     final current = await load();
-    final next = config.copyWith(
+    final next = _migrateAndroidEmulatorLoopback(config.copyWith(
       baseUrl: config.normalizedBaseUrl,
       vendedorPadrao: config.vendedorPadrao.trim().toUpperCase(),
       vendedorLogin: config.vendedorLogin.trim(),
       cidadePadrao: config.cidadePadrao.trim().toUpperCase(),
-    );
+    ));
     final resetBootstrap = current == null ||
         current.normalizedBaseUrl != next.normalizedBaseUrl ||
         current.desktopSecret.trim() != next.desktopSecret.trim() ||
@@ -66,5 +72,17 @@ class AppConfigStore {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_kConfigKey);
     await _clearRuntimeCache(prefs);
+  }
+
+  static AppConfig _migrateAndroidEmulatorLoopback(AppConfig config) {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) {
+      return config;
+    }
+    final baseUrl = config.normalizedBaseUrl;
+    final migrated = baseUrl
+        .replaceFirst('://127.0.0.1:', '://10.0.2.2:')
+        .replaceFirst('://localhost:', '://10.0.2.2:');
+    if (migrated == baseUrl) return config;
+    return config.copyWith(baseUrl: migrated);
   }
 }

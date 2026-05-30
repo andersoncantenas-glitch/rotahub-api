@@ -1,0 +1,15 @@
+-- Phase 2 tenant retrofit.
+--
+-- The executable migration lives in db_bootstrap.ensure_tenant_columns()
+-- because the legacy SQLite schema is optional/dynamic and SQLite does not
+-- provide a portable idempotent "ALTER TABLE ADD COLUMN IF NOT EXISTS".
+--
+-- Tables covered:
+-- motoristas, vendedores, veiculos, ajudantes, clientes, equipes,
+-- programacoes, programacao_itens, programacao_itens_controle,
+-- programacao_itens_log, recebimentos, despesas, rota_gps_override_log,
+-- rota_gps_pings, rota_substituicoes, transferencias,
+-- transferencias_conversoes, vendas_importadas, programacoes_avulsas,
+-- programacoes_avulsas_itens, vendedor_rascunho_itens,
+-- vendedor_pre_programacoes, vendedor_pre_programacao_itens,
+-- mobile_sync_idempotency, usuarios.

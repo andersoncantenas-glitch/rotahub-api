@@ -8,7 +8,14 @@ try:
 except Exception:
     pd = None
 
-from app.repositories.cliente_repository import fetch_clientes_rows_local, upsert_clientes_local
+from app.repositories.cliente_repository import (
+    fetch_cliente_historico_local,
+    fetch_cliente_localizacoes_local,
+    fetch_clientes_dashboard_local,
+    fetch_clientes_lookup_local,
+    fetch_clientes_rows_local,
+    upsert_clientes_local,
+)
 from app.services.api_client import _call_api
 from app.utils.excel_helpers import excel_engine_for, guess_col, upper
 
@@ -154,6 +161,34 @@ def fetch_clientes_rows(*, is_desktop_api_sync_enabled):
         rows = fetch_clientes_rows_local(limit=5000)
         source = "local"
     return _service_result(ok=True, data=rows, source=source)
+
+
+def fetch_clientes_dashboard():
+    try:
+        return _service_result(ok=True, data=fetch_clientes_dashboard_local(), source="local")
+    except Exception as exc:
+        return _service_result(ok=False, data=None, error=_error_message(exc, "Falha ao carregar resumo de clientes."), source="local")
+
+
+def fetch_clientes_lookup(limit: int = 5000):
+    try:
+        return _service_result(ok=True, data=fetch_clientes_lookup_local(limit=limit), source="local")
+    except Exception as exc:
+        return _service_result(ok=False, data=None, error=_error_message(exc, "Falha ao carregar clientes."), source="local")
+
+
+def fetch_cliente_historico(cod_cliente: str, limit: int = 300):
+    try:
+        return _service_result(ok=True, data=fetch_cliente_historico_local(cod_cliente, limit=limit), source="local")
+    except Exception as exc:
+        return _service_result(ok=False, data=None, error=_error_message(exc, "Falha ao carregar historico do cliente."), source="local")
+
+
+def fetch_cliente_localizacoes(cod_cliente: str, limit: int = 200):
+    try:
+        return _service_result(ok=True, data=fetch_cliente_localizacoes_local(cod_cliente, limit=limit), source="local")
+    except Exception as exc:
+        return _service_result(ok=False, data=None, error=_error_message(exc, "Falha ao carregar localizacoes do cliente."), source="local")
 
 
 def _build_fail_detail(sync_falhas: int, falhas_refs):

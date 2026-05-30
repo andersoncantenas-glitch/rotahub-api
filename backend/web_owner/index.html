@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RotaHub Owner</title>
+  <link rel="icon" href="../../assets/app_icon.png">
+  <link rel="stylesheet" href="owner.css?v=20260530-owner-6">
+  <script defer src="owner.js?v=20260530-owner-6"></script>
+</head>
+<body>
+  <main id="loginView" class="login-view">
+    <form id="loginForm" class="login-card">
+      <div class="brand">
+        <img src="../../assets/app_icon.png" alt="">
+        <div>
+          <h1>RotaHub Owner</h1>
+          <p>Controle do dono do sistema</p>
+        </div>
+      </div>
+      <label>
+        Usuário proprietário
+        <input id="username" autocomplete="username" required autofocus>
+      </label>
+      <label>
+        Senha
+        <input id="password" type="password" autocomplete="current-password" required>
+      </label>
+      <button type="submit">Entrar</button>
+      <p id="loginError" class="error"></p>
+    </form>
+  </main>
+
+  <div id="ownerShell" class="owner-shell hidden">
+    <aside>
+      <div class="brand compact">
+        <img src="../../assets/app_icon.png" alt="">
+        <strong>Owner</strong>
+      </div>
+      <nav>
+        <button class="active" data-tab="dashboard">Empresas</button>
+        <button data-tab="leads">Cadastros <span id="leadNavCount" class="nav-count">0</span></button>
+        <button data-tab="planRequests">Planos <span id="planRequestNavCount" class="nav-count">0</span></button>
+        <button data-tab="payments">Cobranças</button>
+        <button data-tab="audit">Auditoria</button>
+        <a href="/app/index.html">Sistema cliente</a>
+      </nav>
+    </aside>
+    <section class="workspace">
+      <header>
+        <div>
+          <h1 id="title">Controle SaaS</h1>
+          <p id="subtitle">Administração de empresas, planos e cobranças.</p>
+        </div>
+        <div class="session">
+          <span id="currentUser">-</span>
+          <button id="refreshButton" type="button">Atualizar</button>
+          <button id="logoutButton" type="button">Sair</button>
+        </div>
+      </header>
+
+      <section id="metrics" class="metrics"></section>
+
+      <section id="dashboardTab" class="tab">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Empresas clientes</h2>
+            <p>Selecione uma empresa para ajustar status, plano e limites.</p>
+          </div>
+          <div class="panel-toolbar">
+            <label>
+              Buscar empresa
+              <input id="companySearch" placeholder="Nome, ID, plano ou status">
+            </label>
+            <label>
+              Status
+              <select id="companyStatusFilter">
+                <option value="">Todos</option>
+                <option value="active">Ativas</option>
+                <option value="suspended">Suspensas</option>
+                <option value="inactive">Inativas</option>
+                <option value="cancelled">Canceladas</option>
+              </select>
+            </label>
+            <strong id="companyCount">0 empresas</strong>
+          </div>
+          <div class="table-wrap table-scroll companies-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Empresa</th>
+                  <th>Status</th>
+                  <th>Plano</th>
+                  <th>Vencimento</th>
+                  <th>Ações</th>
+                </tr>
+              </thead>
+              <tbody id="companyRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Empresa selecionada</h2>
+            <p id="selectedCompanyInfo">Nenhuma empresa selecionada.</p>
+          </div>
+          <form id="planForm" class="form-row">
+            <label>
+              Novo plano
+              <select id="planSelect"></select>
+            </label>
+            <label>
+              Motivo
+              <input id="planReason" maxlength="240">
+            </label>
+            <button type="submit">Aplicar plano</button>
+          </form>
+          <div class="panel-actions">
+            <button id="adminAccessButton" type="button" class="secondary">Gerar acesso admin temporário</button>
+          </div>
+          <div id="usageGrid" class="info-grid"></div>
+          <div id="featuresGrid" class="info-grid"></div>
+        </section>
+      </section>
+
+      <section id="leadsTab" class="tab hidden">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Solicitações comerciais</h2>
+            <p>Cadastros enviados pela página pública aguardando análise e liberação.</p>
+          </div>
+          <div class="panel-toolbar">
+            <label>
+              Buscar solicitação
+              <input id="leadSearch" placeholder="Empresa, responsável, documento ou plano">
+            </label>
+            <label>
+              Situação
+              <select id="leadStatusFilter">
+                <option value="novo">Pendentes</option>
+                <option value="">Todas</option>
+                <option value="aprovado">Aprovadas</option>
+                <option value="recusado">Recusadas</option>
+              </select>
+            </label>
+            <strong id="leadCount">0 solicitações</strong>
+          </div>
+          <div class="table-wrap table-scroll leads-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>Recebida em</th>
+                  <th>Empresa</th>
+                  <th>Contato</th>
+                  <th>Documento</th>
+                  <th>Plano solicitado</th>
+                  <th>Demonstração</th>
+                  <th>Situação</th>
+                  <th>Ações</th>
+                </tr>
+              </thead>
+              <tbody id="leadRows"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="planRequestsTab" class="tab hidden">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Solicitações de plano</h2>
+            <p>Pedidos enviados pelos clientes dentro do sistema para upgrade, downgrade ou troca de pacote.</p>
+          </div>
+          <div class="panel-toolbar">
+            <label>
+              Buscar
+              <input id="planRequestSearch" placeholder="Empresa, plano ou observação">
+            </label>
+            <label>
+              Situação
+              <select id="planRequestStatusFilter">
+                <option value="pending">Pendentes</option>
+                <option value="">Todas</option>
+                <option value="approved">Aprovadas</option>
+                <option value="rejected">Recusadas</option>
+              </select>
+            </label>
+            <strong id="planRequestCount">0 solicitações</strong>
+          </div>
+          <div class="table-wrap table-scroll plan-requests-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>Data</th>
+                  <th>Empresa</th>
+                  <th>Tipo</th>
+                  <th>Plano atual</th>
+                  <th>Solicitado</th>
+                  <th>Uso atual</th>
+                  <th>Observação</th>
+                  <th>Situação</th>
+                  <th>Ações</th>
+                </tr>
+              </thead>
+              <tbody id="planRequestRows"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="paymentsTab" class="tab hidden">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Cobranças</h2>
+            <p id="paymentCompanyInfo">Selecione uma empresa para gerenciar cobranças.</p>
+          </div>
+          <form id="paymentForm" class="form-row">
+            <label>
+              Valor
+              <input id="paymentAmount" inputmode="decimal" required>
+            </label>
+            <label>
+              Vencimento
+              <input id="paymentDue" type="date">
+            </label>
+            <label>
+              Observação
+              <input id="paymentNotes" maxlength="500">
+            </label>
+            <button type="submit">Criar cobrança</button>
+          </form>
+          <div class="form-row compact-row">
+            <label>
+              Tolerância de atraso
+              <input id="overdueDays" type="number" min="0" max="365" value="0">
+            </label>
+            <button id="overdueButton" type="button">Verificar inadimplência</button>
+          </div>
+          <div class="table-wrap table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Status</th>
+                  <th>Valor</th>
+                  <th>Vencimento</th>
+                  <th>Pago em</th>
+                  <th>Referência</th>
+                  <th>Ações</th>
+                </tr>
+              </thead>
+              <tbody id="paymentRows"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="auditTab" class="tab hidden">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Auditoria SaaS</h2>
+            <p>Eventos administrativos fora do sistema operacional do cliente.</p>
+          </div>
+          <div class="table-wrap table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Ação</th>
+                  <th>Empresa</th>
+                  <th>Usuário</th>
+                  <th>Data</th>
+                  <th>Detalhes</th>
+                </tr>
+              </thead>
+              <tbody id="auditRows"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+    </section>
+  </div>
+
+  <div id="accessModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="accessModalTitle">
+    <section class="modal">
+      <div class="modal-head">
+        <div>
+          <h2 id="accessModalTitle">Acesso do cliente</h2>
+          <p>Mensagem pronta para encaminhar ao cliente.</p>
+        </div>
+        <button id="accessModalCloseTop" type="button" class="secondary">Fechar</button>
+      </div>
+      <label>
+        Dados para envio
+        <textarea id="accessMessage" rows="12" readonly></textarea>
+      </label>
+      <div class="modal-actions">
+        <button id="copyAccessMessage" type="button">Copiar mensagem</button>
+        <button id="accessModalClose" type="button" class="secondary">Concluir</button>
+      </div>
+      <p id="copyAccessStatus" class="copy-status" role="status"></p>
+    </section>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+</body>
+</html>

@@ -1,0 +1,3378 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RotaHub</title>
+  <link rel="icon" href="../../assets/app_icon.png">
+  <link rel="stylesheet" href="styles.css?v=20260530-planos2">
+  <link rel="stylesheet" href="interface.css?v=20260530-planos2">
+  <script defer src="app.js?v=20260530-planos2"></script>
+</head>
+<body>
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <main id="loginScreen" class="auth-screen">
+    <section class="auth-panel" aria-labelledby="loginTitle">
+      <div class="brand-block">
+        <img src="../../assets/app_icon.png" alt="" class="brand-logo">
+        <div>
+          <h1 id="loginTitle">RotaHub</h1>
+          <p>Console operacional</p>
+        </div>
+      </div>
+
+      <form id="loginForm" class="stack">
+        <label>
+          Usuario
+          <input id="loginUsername" name="username" autocomplete="username" required autofocus>
+        </label>
+        <label>
+          Senha
+          <input id="loginPassword" name="password" type="password" autocomplete="current-password" required>
+        </label>
+        <label class="check-row auth-remember">
+          <input id="loginRememberUser" name="remember_user" type="checkbox">
+          <span>Salvar usuario neste navegador</span>
+        </label>
+        <button id="loginButton" class="primary" type="submit">Entrar</button>
+        <p id="loginError" class="form-error hidden"></p>
+      </form>
+    </section>
+  </main>
+
+  <div id="appShell" class="shell hidden">
+    <aside class="sidebar">
+      <div class="brand-row">
+        <img src="../../assets/app_icon.png" alt="" class="sidebar-logo">
+        <strong>RotaHub</strong>
+      </div>
+
+      <nav class="nav-list" aria-label="Navegacao principal">
+        <div class="nav-group">
+          <button type="button" class="nav-item active" data-view="dashboard">Painel</button>
+        </div>
+
+        <details class="nav-group" open>
+          <summary>Operacao Logistica</summary>
+          <div class="nav-sublist">
+            <button type="button" class="nav-item" data-view="rotas">Rotas</button>
+            <button type="button" class="nav-item" data-view="escala">Escala Operacional</button>
+          </div>
+        </details>
+
+        <details class="nav-group" open>
+          <summary>Planejamento</summary>
+          <div class="nav-sublist">
+            <button type="button" class="nav-item" data-view="importarVendas">Importar Pedidos</button>
+            <button type="button" class="nav-item" data-view="programacao">Planejamento de Rota</button>
+          </div>
+        </details>
+
+        <details class="nav-group" open>
+          <summary>Fechamento Operacional</summary>
+          <div class="nav-sublist">
+            <button type="button" class="nav-item" data-view="recebimentos">Recebimentos</button>
+            <button type="button" class="nav-item" data-view="despesas">Custos e Despesas</button>
+            <button type="button" class="nav-item" data-view="mortalidade">Ocorrencias</button>
+            <button type="button" class="nav-item" data-view="centroCustos">Analise de Custos</button>
+            <button type="button" class="nav-item" data-view="compras">Entradas e Compras</button>
+            <button type="button" class="nav-item" data-view="relatorios">Relatorios Operacionais</button>
+          </div>
+        </details>
+
+        <details class="nav-group" open>
+          <summary>Cadastros e Perfis</summary>
+          <div class="nav-sublist">
+            <button type="button" class="nav-item" data-view="cadastros">Cadastros</button>
+            <button type="button" class="nav-item" data-view="users">Usuarios</button>
+            <button type="button" class="nav-item" data-view="permissoes">Permissoes</button>
+          </div>
+        </details>
+
+        <details class="nav-group" open>
+          <summary>Ferramentas</summary>
+          <div class="nav-sublist">
+            <button type="button" class="nav-item" data-view="backup">Backup / Exportar</button>
+            <button type="button" class="nav-item" data-view="ferramentas">Ferramentas</button>
+            <button type="button" class="nav-item" data-view="billing">Plano e Assinatura</button>
+            <button type="button" class="nav-item nav-download-item" data-action="download-installer">Baixar Instalador</button>
+            <button type="button" class="nav-item" data-view="audit">Auditoria</button>
+          </div>
+        </details>
+      </nav>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div>
+          <h1 id="viewTitle">Painel</h1>
+          <p id="viewSubtitle">Operacao e seguranca</p>
+        </div>
+        <div class="topbar-tools">
+          <div class="session-box">
+            <span id="currentUserName">-</span>
+            <button id="logoutButton" type="button" class="ghost">Sair</button>
+          </div>
+        </div>
+      </header>
+
+      <section id="dashboardView" class="view">
+        <section class="panel home-hero">
+          <div class="panel-header">
+            <div>
+              <h2>Painel Operacional</h2>
+              <p id="homeLastUpdate" class="panel-subtitle">Carregando indicadores da operacao.</p>
+            </div>
+            <button type="button" class="secondary" data-action="refresh-dashboard">Atualizar</button>
+          </div>
+          <div class="home-quick-actions" aria-label="Atalhos operacionais">
+            <button type="button" class="secondary" data-home-nav="programacao">Planejamento</button>
+            <button type="button" class="secondary" data-home-nav="recebimentos">Recebimentos</button>
+            <button type="button" class="secondary" data-home-nav="despesas">Custos</button>
+            <button type="button" class="secondary" data-home-nav="relatorios">Relatorios Operacionais</button>
+            <button type="button" class="secondary" data-home-nav="rotas">Rotas</button>
+            <button type="button" class="secondary" data-home-nav="cadastros">Cadastros</button>
+          </div>
+        </section>
+
+        <div id="homeMetricGrid" class="metric-grid home-metrics"></div>
+
+        <div class="home-layout">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Rotas Ativas</h2>
+                <p class="panel-subtitle">Mesma visao inicial usada para acompanhar planejamentos em aberto.</p>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table class="home-routes-table">
+                <thead>
+                  <tr>
+                    <th>COD</th>
+                    <th>MOTORISTA</th>
+                    <th>VEICULO</th>
+                    <th>ROTA</th>
+                    <th>DATA</th>
+                    <th>STATUS</th>
+                    <th>ACAO</th>
+                  </tr>
+                </thead>
+                <tbody id="homeRouteRows"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Pendencias do Dia</h2>
+                <p class="panel-subtitle">Contadores operacionais usados para priorizar fechamento.</p>
+              </div>
+            </div>
+            <div id="homePendingGrid" class="home-info-grid"></div>
+          </section>
+        </div>
+
+        <div class="home-layout">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Base e Sistema</h2>
+                <p class="panel-subtitle">Versao, banco e estado da API do navegador.</p>
+              </div>
+            </div>
+            <div id="homeSystemInfo" class="home-info-grid"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <h2>Ultimos eventos</h2>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Acao</th>
+                    <th>Entidade</th>
+                    <th>Usuario</th>
+                    <th>Data</th>
+                  </tr>
+                </thead>
+                <tbody id="dashboardAuditRows"></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section id="cadastrosView" class="view hidden">
+        <section class="panel importar-vendas-upload-panel">
+          <div class="panel-header">
+            <div>
+              <h2>Cadastros</h2>
+              <p class="panel-subtitle">Motoristas, vendedores, usuarios, veiculos, caixas, ajudantes, clientes, fornecedores e produtos</p>
+            </div>
+            <button type="button" class="secondary" data-action="refresh-cadastros">Atualizar</button>
+          </div>
+          <div id="cadastroTabs" class="tabs" role="tablist" aria-label="Cadastros"></div>
+          <div id="cadastroActionbar" class="cadastro-actionbar" aria-label="Acoes de cadastro">
+            <button id="newCadastroButton" type="button" class="secondary">NOVO</button>
+            <button id="changeCadastroButton" type="button" class="secondary">ALTERAR</button>
+            <button id="saveCadastroButton" type="button" class="primary">SALVAR</button>
+            <button id="liberarCadastroButton" type="button" class="primary">LIBERAR</button>
+            <button id="bloquearCadastroButton" type="button" class="danger">BLOQUEAR</button>
+            <button id="passwordCadastroButton" type="button" class="warning">ALTERAR SENHA</button>
+            <button id="perfilFornecedorButton" type="button" class="secondary hidden">NOVO PERFIL FORNECEDOR</button>
+            <button id="caixasBulkButton" type="button" class="secondary hidden">GERAR LOTE CAIXAS</button>
+            <button id="caixasMoveButton" type="button" class="secondary hidden">MOVIMENTAR CAIXAS</button>
+            <button id="caixasHistoricoButton" type="button" class="secondary hidden">HISTORICO CAIXA</button>
+            <button id="caixasExportButton" type="button" class="secondary hidden">EXPORTAR CAIXAS</button>
+            <button id="caixasLabelsButton" type="button" class="secondary hidden">ETIQUETAS</button>
+            <button id="deleteCadastroButton" type="button" class="danger">EXCLUIR</button>
+            <label id="cadastroStatusFilterWrap" class="status-filter hidden">
+              FILTRO STATUS
+              <select id="cadastroStatusFilter">
+                <option value="TODOS">TODOS</option>
+                <option value="ATIVO">ATIVO</option>
+                <option value="INATIVO">INATIVO</option>
+                <option value="DESATIVADO">DESATIVADO</option>
+              </select>
+            </label>
+          </div>
+          <div id="caixasResumoPanel" class="caixas-resumo-panel hidden"></div>
+        </section>
+
+        <section id="clientesHubPanel" class="panel hidden">
+          <div class="panel-header">
+            <div>
+              <h2>Clientes</h2>
+              <p id="clientesHubInfo" class="panel-subtitle">Base, historico operacional e localizacoes registradas pelo app motorista.</p>
+            </div>
+          </div>
+          <div class="client-hub-grid">
+            <button id="clientesOpenListButton" type="button" class="client-hub-card">
+              <span>Lista de clientes</span>
+              <strong id="clientesHubTotal">0 clientes</strong>
+              <small>Inserir manualmente, importar e manter a base do Wibi.</small>
+            </button>
+            <button id="clientesOpenHistoricoButton" type="button" class="client-hub-card">
+              <span>Historico</span>
+              <strong id="clientesHubHistorico">0 com historico</strong>
+              <small>Entregas, canceladas, alteradas, mortalidade e KG.</small>
+            </button>
+            <button id="clientesOpenLocalizacaoButton" type="button" class="client-hub-card">
+              <span>Localizacao</span>
+              <strong id="clientesHubLocalizacao">0 pontos</strong>
+              <small>Locais salvos quando o app motorista registra a entrega.</small>
+            </button>
+          </div>
+        </section>
+
+        <section id="clientesHistoricoPanel" class="panel hidden">
+          <div class="panel-header">
+            <div>
+              <h2>Historico do cliente</h2>
+              <p class="panel-subtitle">Dados consolidados por programacao vinculada ao cliente.</p>
+            </div>
+            <button type="button" class="secondary" data-clientes-section="hub">Voltar</button>
+          </div>
+          <div class="client-filter-row">
+            <label>
+              Cliente
+              <select id="clientesHistoricoSelect"></select>
+            </label>
+            <button id="clientesHistoricoLoadButton" type="button" class="secondary">ATUALIZAR</button>
+          </div>
+          <div id="clientesHistoricoResumo" class="client-kpi-grid"></div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>DATA</th>
+                  <th>PROGRAMACAO</th>
+                  <th>PEDIDO</th>
+                  <th>STATUS</th>
+                  <th>CX</th>
+                  <th>KG RECEB.</th>
+                  <th>KG DESC.</th>
+                  <th>MORT.</th>
+                  <th>VALOR REC.</th>
+                  <th>MOTORISTA</th>
+                </tr>
+              </thead>
+              <tbody id="clientesHistoricoRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="clientesLocalizacaoPanel" class="panel hidden">
+          <div class="panel-header">
+            <div>
+              <h2>Localizacao do cliente</h2>
+              <p id="clientesLocalizacaoInfo" class="panel-subtitle">Pontos registrados pelo app motorista.</p>
+            </div>
+            <button type="button" class="secondary" data-clientes-section="hub">Voltar</button>
+          </div>
+          <div class="client-filter-row">
+            <label>
+              Cliente
+              <select id="clientesLocalizacaoSelect"></select>
+            </label>
+            <button id="clientesLocalizacaoLoadButton" type="button" class="secondary">ATUALIZAR</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>REGISTRADO EM</th>
+                  <th>PROGRAMACAO</th>
+                  <th>PEDIDO</th>
+                  <th>STATUS</th>
+                  <th>LATITUDE</th>
+                  <th>LONGITUDE</th>
+                  <th>ENDERECO</th>
+                  <th>MOTORISTA</th>
+                  <th>ORIGEM</th>
+                </tr>
+              </thead>
+              <tbody id="clientesLocalizacaoRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="clientesImportPanel" class="panel hidden">
+          <div class="panel-header">
+            <div>
+              <h2>Clientes (Base do Wibi)</h2>
+              <p id="clientesImportInfo" class="panel-subtitle">Grade de clientes para importacao e manutencao em lote.</p>
+            </div>
+            <div class="actions">
+              <button id="clientesImportRefreshButton" type="button" class="secondary">ATUALIZAR</button>
+              <button id="clientesImportInsertButton" type="button" class="secondary">INSERIR LINHA</button>
+              <button id="clientesImportSaveButton" type="button" class="primary">SALVAR ALTERACOES</button>
+              <button type="button" class="secondary" data-clientes-section="hub">VOLTAR</button>
+            </div>
+          </div>
+          <form id="clientesImportUploadForm" class="upload-row">
+            <label class="wide-field">
+              Arquivo Excel/CSV
+              <input id="clientesImportFile" name="file" type="file" accept=".xls,.xlsx,.csv" required>
+            </label>
+            <button id="clientesImportTemplateButton" type="button" class="secondary">BAIXAR MODELO</button>
+            <button type="submit" class="warning">IMPORTAR CLIENTES (EXCEL)</button>
+          </form>
+          <div class="table-wrap">
+            <table class="editable-table clientes-import-table">
+              <thead>
+                <tr>
+                  <th>COD CLIENTE</th>
+                  <th>NOME CLIENTE</th>
+                  <th>ENDERECO</th>
+                  <th>TELEFONE</th>
+                  <th>VENDEDOR</th>
+                </tr>
+              </thead>
+              <tbody id="clientesImportRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="cadastroFormPanel" class="panel">
+          <div class="panel-header">
+            <div>
+              <h2 id="cadastroFormTitle">Novo cadastro</h2>
+              <p id="cadastroFormSubtitle" class="panel-subtitle">Preencha os campos obrigatorios.</p>
+            </div>
+            <button id="cancelCadastroEdit" type="button" class="secondary hidden">Cancelar edicao</button>
+          </div>
+          <form id="cadastroForm" class="form-grid"></form>
+        </section>
+
+        <section id="cadastroTablePanel" class="panel">
+          <div class="panel-header">
+            <h2 id="cadastroTableTitle">Registros</h2>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead id="cadastroTableHead"></thead>
+              <tbody id="cadastroRows"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="usersView" class="view hidden">
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Novo usuario</h2>
+            <button type="button" class="secondary" data-action="refresh-users">Atualizar</button>
+          </div>
+          <form id="createUserForm" class="form-grid">
+            <label>
+              Usuario
+              <input name="username" required maxlength="80">
+            </label>
+            <label>
+              Nome
+              <input name="nome" required maxlength="120">
+            </label>
+            <label>
+              Senha
+              <input name="password" type="password" required minlength="6" maxlength="128">
+            </label>
+            <label>
+              Perfil
+              <select name="permissoes">
+                <option value="OPERADOR">OPERADOR</option>
+                <option value="GERENTE">GERENTE</option>
+                <option value="VISUALIZADOR">VISUALIZADOR</option>
+                <option value="ADMIN">ADMIN</option>
+              </select>
+            </label>
+            <label>
+              CPF
+              <input name="cpf" maxlength="20">
+            </label>
+            <label>
+              Telefone
+              <input name="telefone" maxlength="30">
+            </label>
+            <label>
+              Idade
+              <input name="idade" type="number" min="0" max="130">
+            </label>
+            <label class="check-row">
+              <input name="is_active" type="checkbox" checked>
+              Ativo
+            </label>
+            <div class="form-actions">
+              <button type="submit" class="primary">Criar</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Usuarios</h2>
+            <label class="toggle-row">
+              <input id="includeInactive" type="checkbox">
+              Incluir inativos
+            </label>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Usuario</th>
+                  <th>Nome</th>
+                  <th>Perfil</th>
+                  <th>Status</th>
+                  <th>Contato</th>
+                  <th class="actions-col">Acoes</th>
+                </tr>
+              </thead>
+              <tbody id="usersRows"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="rotasView" class="view hidden">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Monitoramento de Rotas</h2>
+              <p id="rotasInfo" class="panel-subtitle">0 rotas carregadas</p>
+            </div>
+            <div class="actions">
+              <button id="rotasMapAllButton" type="button" class="primary">MAPA DE TODAS</button>
+              <button id="rotasMapSelectedButton" type="button" class="primary">MAPA SELECIONADO</button>
+              <button id="rotasRefreshButton" type="button" class="secondary">ATUALIZAR</button>
+            </div>
+          </div>
+          <div class="vinculo-row">
+            <label>
+              Atualizacao automatica
+              <select id="rotasRefreshInterval">
+                <option value="5000">5s</option>
+                <option value="10000" selected>10s</option>
+                <option value="30000">30s</option>
+              </select>
+            </label>
+            <button type="button" class="secondary" data-action="refresh-rotas">Recarregar agora</button>
+          </div>
+          <div class="table-wrap">
+            <table class="wide-table rotas-table">
+              <thead>
+                <tr>
+                  <th>CODIGO</th>
+                  <th>MOTORISTA</th>
+                  <th>VEICULO</th>
+                  <th>STATUS</th>
+                  <th>ULT GPS</th>
+                  <th>LAT</th>
+                  <th>LON</th>
+                  <th>VEL</th>
+                  <th>PRECISAO</th>
+                  <th class="actions-col">ACOES</th>
+                </tr>
+              </thead>
+              <tbody id="rotasRows"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="importarVendasView" class="view hidden">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Importar Pedidos</h2>
+              <p class="panel-subtitle">Excel, selecao de pedidos livres e vinculo com planejamento ativo</p>
+            </div>
+            <div class="actions">
+              <button id="importarVendasRefreshButton" type="button" class="secondary">ATUALIZAR</button>
+              <button id="importarVendasClearButton" type="button" class="danger">LIMPAR TUDO</button>
+            </div>
+          </div>
+          <form id="importarVendasUploadForm" class="upload-row importar-vendas-upload-row">
+            <label class="wide-field">
+              Arquivo Excel
+              <input id="importarVendasFile" name="file" type="file" accept=".xls,.xlsx,.csv" required>
+            </label>
+            <button type="submit" class="primary">IMPORTAR EXCEL</button>
+          </form>
+        </section>
+
+        <section class="panel programacao-rankings-panel importar-vendas-rankings-panel">
+          <div class="panel-header">
+            <div>
+              <h2>Recomendacoes da equipe</h2>
+              <p id="progRankingInfo" class="panel-subtitle">Ranking operacional usado para apoiar a montagem da equipe.</p>
+            </div>
+            <div class="actions">
+              <label class="compact-field">
+                Periodo
+                <select id="progRankingPeriodo">
+                  <option value="7">7 dias</option>
+                  <option value="15">15 dias</option>
+                  <option value="30" selected>30 dias</option>
+                  <option value="60">60 dias</option>
+                  <option value="90">90 dias</option>
+                  <option value="180">180 dias</option>
+                </select>
+              </label>
+              <button id="progRankingRefreshButton" type="button" class="secondary">ATUALIZAR RANKING</button>
+            </div>
+          </div>
+          <div class="programacao-rankings-grid">
+            <div class="programacao-ranking-block">
+              <h3>Motoristas</h3>
+              <p id="progMotoristaRankingSummary" class="panel-subtitle">-</p>
+              <div class="table-wrap">
+                <table class="compact-table">
+                  <thead>
+                    <tr>
+                      <th>#</th>
+                      <th>Nome</th>
+                      <th>Score</th>
+                      <th>Viagens</th>
+                      <th>Horas</th>
+                      <th>Descanso</th>
+                      <th>Motivo</th>
+                    </tr>
+                  </thead>
+                  <tbody id="progMotoristaRankingRows"></tbody>
+                </table>
+              </div>
+            </div>
+            <div class="programacao-ranking-block">
+              <h3>Ajudantes</h3>
+              <p id="progAjudanteRankingSummary" class="panel-subtitle">-</p>
+              <div class="table-wrap">
+                <table class="compact-table">
+                  <thead>
+                    <tr>
+                      <th>#</th>
+                      <th>Nome</th>
+                      <th>Score</th>
+                      <th>Viagens</th>
+                      <th>Horas</th>
+                      <th>Descanso</th>
+                      <th>Motivo</th>
+                    </tr>
+                  </thead>
+                  <tbody id="progAjudanteRankingRows"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel importar-vendas-orders-panel">
+          <div class="panel-header">
+            <div>
+              <h2>Pedidos livres</h2>
+              <p id="importarVendasInfo" class="panel-subtitle">0 registros carregados</p>
+            </div>
+            <button type="button" class="secondary" data-action="refresh-importar-vendas">Atualizar lista</button>
+          </div>
+          <div class="metric-grid compact-metrics importar-vendas-metrics">
+            <article class="metric">
+              <span>Pedidos livres</span>
+              <strong id="importarVendasTotalPedidos">0</strong>
+            </article>
+            <article class="metric">
+              <span>Pedidos selecionados</span>
+              <strong id="importarVendasSelectedPedidos">0</strong>
+            </article>
+            <article class="metric">
+              <span data-logistica-label="total-embalagem">Total de caixas</span>
+              <strong id="importarVendasTotalCaixas">0</strong>
+            </article>
+            <article class="metric">
+              <span data-logistica-label="selecionadas-embalagem">Caixas selecionadas</span>
+              <strong id="importarVendasSelectedCaixas">0</strong>
+            </article>
+          </div>
+          <form id="importarVendasSearchForm" class="filter-row importar-vendas-filter">
+            <label class="importar-vendas-search-field">
+              Buscar
+              <input id="importarVendasBusca" name="busca" autocomplete="off" placeholder="pedido, cliente, cidade, vendedor">
+            </label>
+            <div class="importar-vendas-action-group">
+              <button type="submit" class="secondary">FILTRAR</button>
+              <button id="importarVendasMarkButton" type="button" class="primary">MARCAR</button>
+              <button id="importarVendasMarkAllButton" type="button" class="warning">MARCAR TODOS</button>
+              <button id="importarVendasUnmarkAllButton" type="button" class="secondary">DESMARCAR TODOS</button>
+              <button id="importarVendasDeleteButton" type="button" class="danger">EXCLUIR SELECIONADAS</button>
+            </div>
+          </form>
+          <div class="vinculo-row">
+            <label>
+              Planejamento ativo
+              <select id="importarVendasProgramacao"></select>
+            </label>
+            <button id="importarVendasLinkButton" type="button" class="primary">VINCULAR AO PLANEJAMENTO</button>
+          </div>
+          <div class="table-wrap importar-vendas-table-wrap">
+            <table class="wide-table importar-vendas-table">
+              <thead>
+                <tr>
+                  <th></th>
+                  <th>ID</th>
+                  <th>SEL</th>
+                  <th>PEDIDO</th>
+                  <th>DATA</th>
+                  <th>CLIENTE</th>
+                  <th>NOME COMPLETO</th>
+                  <th>PRODUTO</th>
+                  <th>VR TOTAL</th>
+                  <th>QNT</th>
+                  <th>CAIXAS</th>
+                  <th>CIDADE</th>
+                  <th>VENDEDOR</th>
+                  <th class="actions-col">ACOES</th>
+                </tr>
+              </thead>
+              <tbody id="importarVendasRows"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="programacaoView" class="view hidden">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Planejamento de Rota</h2>
+              <p class="panel-subtitle">Montagem de rota, equipe, estimativa, carregamento e itens</p>
+            </div>
+            <div class="actions">
+              <button id="progRefreshOptions" type="button" class="secondary">EDITAR PLANEJAMENTO</button>
+              <button id="progNewButton" type="button" class="secondary">NOVA</button>
+              <button id="progSaveButton" type="submit" form="programacaoForm" class="primary">SALVAR PLANEJAMENTO</button>
+              <button id="progRomaneiosButton" type="button" class="warning" disabled>IMPRIMIR ROMANEIOS</button>
+              <button id="progDeleteButton" type="button" class="danger">EXCLUIR PLANEJAMENTO</button>
+            </div>
+          </div>
+          <form id="programacaoForm" class="form-grid programacao-form-grid">
+            <label class="programacao-code-field">
+              Codigo
+              <input id="progCodigo" name="codigo_programacao" readonly>
+            </label>
+            <label class="programacao-driver-field">
+              Motorista
+              <select id="progMotorista" name="motorista" required></select>
+            </label>
+            <label class="programacao-vehicle-field">
+              Veiculo
+              <select id="progVeiculo" name="veiculo" required></select>
+            </label>
+            <label class="programacao-route-field">
+              Local da Rota
+              <select id="progLocalRota" name="local_rota" required>
+                <option value="">Selecione</option>
+                <option value="SERRA">SERRA</option>
+                <option value="SERTAO">SERTAO</option>
+              </select>
+            </label>
+            <label class="programacao-estimate-field">
+              Estimativa
+              <div class="inline-fields">
+                <select id="progTipoEstimativa" name="tipo_estimativa">
+                  <option value="KG">KG</option>
+                  <option value="CX">CX</option>
+                </select>
+                <input id="progEstimativa" name="estimativa" inputmode="decimal" required>
+              </div>
+            </label>
+            <label class="programacao-load-field">
+              Carregamento
+              <input id="progCarregamento" name="local_carregamento" required maxlength="160">
+            </label>
+            <label id="progTransbordoModalidadeField" class="programacao-transbordo-field">
+              Tipo de frete
+              <select id="progTransbordoModalidade" name="transbordo_modalidade">
+                <option value="CIF">CIF</option>
+                <option value="EMPRESA_BUSCA">EMPRESA BUSCA</option>
+              </select>
+            </label>
+            <label class="programacao-money-field">
+              Adiantamento (R$)
+              <input id="progAdiantamento" name="adiantamento" inputmode="decimal" value="0,00">
+            </label>
+            <label class="programacao-origin-field">
+              Origem do Valor
+              <input id="progAdiantamentoOrigem" name="adiantamento_origem" maxlength="160">
+            </label>
+            <label id="progTransbordoObsField" class="programacao-transbordo-obs-field hidden">
+              Observacao transbordo
+              <input id="progTransbordoObs" name="transbordo_observacao" maxlength="300">
+            </label>
+            <div class="programacao-ajudantes-field">
+              <span>Ajudantes</span>
+              <select id="progAjudantes" name="ajudantes" multiple class="hidden" aria-hidden="true"></select>
+              <button id="progAjudantesButton" type="button" class="secondary">Escolher ajudantes</button>
+              <strong id="progAjudantesResumo">Nenhum ajudante selecionado</strong>
+            </div>
+            <div class="status-box">
+              <span>Status atual</span>
+              <strong id="progStatusBadge">-</strong>
+            </div>
+          </form>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Itens do planejamento</h2>
+              <p class="panel-subtitle">Edite Endereco, quantidade, preco, vendedor, pedido e obs antes de salvar</p>
+            </div>
+            <div class="actions">
+              <button id="progLoadVendasButton" type="button" class="warning">CARREGAR PEDIDOS</button>
+              <button id="progSuggestButton" type="button" class="primary">SUGERIR ROTA</button>
+              <button id="progAddItemButton" type="button" class="secondary">INSERIR LINHA</button>
+              <button id="progRemoveItemButton" type="button" class="danger">REMOVER LINHA</button>
+              <button id="progClearItemsButton" type="button" class="danger">LIMPAR ITENS</button>
+            </div>
+          </div>
+          <div id="progSugestaoResumo" class="programacao-suggestion hidden"></div>
+          <div class="metric-grid compact-metrics">
+            <article class="metric">
+              <span data-logistica-label="total-embalagem">Total de caixas</span>
+              <strong id="progTotalCaixas">0</strong>
+            </article>
+            <article class="metric">
+              <span>Total de clientes</span>
+              <strong id="progTotalClientes">0</strong>
+            </article>
+          </div>
+          <div class="table-wrap">
+            <table class="editable-table">
+              <thead>
+                <tr>
+                  <th></th>
+                  <th>COD CLIENTE</th>
+                  <th>NOME CLIENTE</th>
+                  <th>PRODUTO</th>
+                  <th>ENDERECO</th>
+                  <th data-logistica-label="embalagem-upper">CAIXAS</th>
+                  <th data-logistica-label="unidade-upper">KG</th>
+                  <th>PRECO</th>
+                  <th>VENDEDOR</th>
+                  <th>PEDIDO</th>
+                  <th>OBS</th>
+                </tr>
+              </thead>
+              <tbody id="progItemsRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Programacoes salvas</h2>
+            <button type="button" class="secondary" data-action="refresh-programacao">Atualizar</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Codigo</th>
+                  <th>Motorista</th>
+                  <th>Veiculo</th>
+                  <th>Local</th>
+                  <th>Status</th>
+                  <th data-logistica-label="embalagem">Caixas</th>
+                  <th data-logistica-label="unidade">KG</th>
+                  <th class="actions-col">Acoes</th>
+                </tr>
+              </thead>
+              <tbody id="progProgramacoesRows"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="recebimentosView" class="view hidden">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Recebimentos</h2>
+              <p id="recebimentosInfo" class="panel-subtitle">Selecione um planejamento.</p>
+            </div>
+            <div class="actions">
+              <button id="recebimentosRefreshButton" type="button" class="secondary">ATUALIZAR</button>
+              <button id="recebimentosPrintButton" type="button" class="warning">IMPRIMIR</button>
+              <button id="recebimentosDespesasButton" type="button" class="primary">IR PARA CUSTOS</button>
+            </div>
+          </div>
+          <div class="recebimentos-load-row">
+            <label>
+              Planejamento
+              <select id="recebimentosProgramacaoSelect">
+                <option value="">Selecione</option>
+              </select>
+            </label>
+            <button id="recebimentosLoadButton" type="button" class="primary">CARREGAR</button>
+            <button type="button" class="secondary" data-action="refresh-recebimentos">RECARREGAR DADOS</button>
+          </div>
+          <div class="recebimentos-info-grid">
+            <div id="recebimentosMotorista">Motorista: -</div>
+            <div id="recebimentosVeiculo">Veiculo: -</div>
+            <div id="recebimentosEquipe">Equipe: -</div>
+            <div id="recebimentosRota">Rota: -</div>
+          </div>
+          <form id="recebimentosCabecalhoForm" class="recebimentos-header-form">
+            <label>
+              Diaria Motorista (R$)
+              <input id="recebimentosDiariaMotorista" inputmode="decimal" placeholder="0,00">
+            </label>
+            <label>
+              Saida data
+              <input id="recebimentosDataSaida" placeholder="2026-05-07">
+            </label>
+            <label>
+              Saida hora
+              <input id="recebimentosHoraSaida" placeholder="07:30:00">
+            </label>
+            <label>
+              Chegada data
+              <input id="recebimentosDataChegada" placeholder="2026-05-07">
+            </label>
+            <label>
+              Chegada hora
+              <input id="recebimentosHoraChegada" placeholder="16:30:00">
+            </label>
+            <button type="submit" class="primary">SALVAR CABECALHO</button>
+          </form>
+        </section>
+
+        <section id="recebimentosDiarias" class="metric-grid recebimentos-diarias"></section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Clientes e recebimentos</h2>
+            <strong id="recebimentosTotal">TOTAL RECEBIDO: R$ 0,00</strong>
+          </div>
+          <div class="table-wrap">
+            <table class="wide-table recebimentos-table">
+              <thead>
+                <tr>
+                  <th>COD</th>
+                  <th>CLIENTE</th>
+                  <th>VALOR</th>
+                  <th>FORMA</th>
+                  <th>OBS</th>
+                  <th>DATA REGISTRO</th>
+                </tr>
+              </thead>
+              <tbody id="recebimentosRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Lancar recebimento</h2>
+          </div>
+          <form id="recebimentoForm" class="recebimento-form">
+            <label>
+              Cod Cliente
+              <input id="recebimentoCodCliente" list="recebimentoClientesCodigos" required maxlength="80">
+            </label>
+            <label>
+              Nome
+              <input id="recebimentoNomeCliente" list="recebimentoClientesNomes" required maxlength="180">
+            </label>
+            <datalist id="recebimentoClientesCodigos"></datalist>
+            <datalist id="recebimentoClientesNomes"></datalist>
+            <label>
+              Valor
+              <input id="recebimentoValor" inputmode="decimal" required>
+            </label>
+            <label>
+              Forma
+              <select id="recebimentoForma">
+                <option value="DINHEIRO">DINHEIRO</option>
+                <option value="PIX">PIX</option>
+                <option value="CARTAO">CARTAO</option>
+                <option value="BOLETO">BOLETO</option>
+                <option value="OUTRO">OUTRO</option>
+              </select>
+            </label>
+            <label class="wide-field">
+              Observacao
+              <input id="recebimentoObs" maxlength="300">
+            </label>
+            <div class="actions recebimento-actions">
+              <button type="submit" class="primary">SALVAR RECEBIMENTO</button>
+              <button id="recebimentoZerarButton" type="button" class="danger">ZERAR RECEBIMENTO</button>
+            </div>
+          </form>
+        </section>
+      </section>
+
+      <section id="despesasView" class="view hidden">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Custos e Despesas</h2>
+              <p id="despesasInfo" class="panel-subtitle">Selecione um planejamento.</p>
+            </div>
+            <div class="actions">
+              <button id="despesasRefreshButton" type="button" class="secondary">ATUALIZAR</button>
+              <button id="despesasAppMotoristaButton" type="button" class="secondary" disabled>DADOS DO APP</button>
+              <button id="despesasBackButton" type="button" class="secondary">VOLTAR RECEBIMENTOS</button>
+              <button id="despesasFinalizarButton" type="button" class="danger">FINALIZAR</button>
+            </div>
+          </div>
+          <div class="despesas-load-row">
+            <label>
+              Planejamento
+              <select id="despesasProgramacaoSelect">
+                <option value="">Selecione</option>
+              </select>
+            </label>
+            <button id="despesasLoadButton" type="button" class="primary">CARREGAR</button>
+            <button type="button" class="secondary" data-action="refresh-despesas">RECARREGAR DADOS</button>
+          </div>
+          <div class="despesas-info-grid">
+            <div id="despesasMotorista">Motorista: -</div>
+            <div id="despesasVeiculo">Veiculo: -</div>
+            <div id="despesasEquipe">Equipe: -</div>
+            <div id="despesasRota">Rota: -</div>
+          </div>
+        </section>
+
+        <section id="despesasMetrics" class="metric-grid despesas-metrics"></section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Custos e despesas registrados</h2>
+              <p id="despesasTotalLabel" class="panel-subtitle">Custos: 0 | Total: R$ 0,00</p>
+            </div>
+            <button id="despesaNovaButton" type="button" class="secondary">NOVO REGISTRO</button>
+          </div>
+          <div class="table-wrap">
+            <table class="wide-table despesas-table">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>DESCRICAO</th>
+                  <th>VALOR</th>
+                  <th>DATA</th>
+                  <th>TIPO</th>
+                  <th>CATEGORIA</th>
+                  <th>OBSERVACAO</th>
+                </tr>
+              </thead>
+              <tbody id="despesasRows"></tbody>
+            </table>
+          </div>
+          <form id="despesaForm" class="despesa-form">
+            <input id="despesaId" type="hidden">
+            <label>
+              Descricao
+              <input id="despesaDescricao" required maxlength="220">
+            </label>
+            <label>
+              Valor
+              <input id="despesaValor" inputmode="decimal" required>
+            </label>
+            <label>
+              Tipo de controle
+              <input id="despesaTipo" list="despesaTipoSugestoes" maxlength="40" placeholder="Ex: DIARIA, PEDAGIO, LAVAGEM">
+              <datalist id="despesaTipoSugestoes">
+                <option value="DIARIAS"></option>
+                <option value="BANHOS"></option>
+                <option value="GUARDAS"></option>
+                <option value="PEDAGIO"></option>
+                <option value="ESTACIONAMENTO"></option>
+                <option value="ALIMENTACAO"></option>
+                <option value="OUTRAS"></option>
+              </datalist>
+            </label>
+            <label>
+              Categoria
+              <select id="despesaCategoria">
+                <option value="ROTA">ROTA</option>
+                <option value="COMBUSTIVEL">COMBUSTIVEL</option>
+                <option value="MANUTENCAO">MANUTENCAO</option>
+                <option value="PEDAGIO">PEDAGIO</option>
+                <option value="ALIMENTACAO">ALIMENTACAO</option>
+                <option value="OUTRA">OUTRA</option>
+              </select>
+            </label>
+            <label class="wide-field">
+              Observacao
+              <input id="despesaObservacao" maxlength="300">
+            </label>
+            <div class="actions despesa-actions">
+              <button type="submit" class="primary">SALVAR</button>
+              <button id="despesaDeleteButton" type="button" class="danger">EXCLUIR</button>
+            </div>
+          </form>
+        </section>
+
+        <dialog id="despesasAppMotoristaDialog" class="modal wide-modal app-driver-dialog">
+          <div class="stack app-driver-dialog-body">
+          <div class="panel-header">
+            <div>
+              <h2>Dados do app motorista</h2>
+              <p class="panel-subtitle">Registros sincronizados de despesas, fotos, entregas, localização e ajudantes.</p>
+            </div>
+          </div>
+          <div id="despesasAppResumo" class="metric-grid despesas-metrics"></div>
+          <div class="despesas-split">
+            <section class="subpanel">
+              <h3>Entregas e localização</h3>
+              <div class="table-wrap">
+                <table class="wide-table">
+                  <thead>
+                    <tr>
+                      <th>CLIENTE</th>
+                      <th>PEDIDO</th>
+                      <th>STATUS</th>
+                      <th>CX</th>
+                      <th>MEDIA CARREG.</th>
+                      <th>MEDIA ENTREG.</th>
+                      <th>KG CARREG.</th>
+                      <th>KG ENTREG.</th>
+                      <th>MORT.</th>
+                      <th>RECEBIDO</th>
+                      <th>LAT/LON</th>
+                      <th>DATA</th>
+                    </tr>
+                  </thead>
+                  <tbody id="despesasAppEntregasRows"></tbody>
+                </table>
+              </div>
+            </section>
+            <section class="subpanel">
+              <h3>Fotos registradas</h3>
+              <div class="table-wrap">
+                <table class="wide-table">
+                  <thead>
+                    <tr>
+                      <th>CATEGORIA</th>
+                      <th>TIPO</th>
+                      <th>CLIENTE/VINCULO</th>
+                      <th>ARQUIVO</th>
+                      <th>DATA</th>
+                    </tr>
+                  </thead>
+                  <tbody id="despesasAppFotosRows"></tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+          <div class="despesas-split">
+            <section class="subpanel">
+              <h3>Custos do app</h3>
+              <div class="table-wrap">
+                <table class="wide-table">
+                  <thead>
+                    <tr>
+                      <th>TIPO</th>
+                      <th>VALOR</th>
+                      <th>ESTABELEC.</th>
+                      <th>COMB.</th>
+                      <th>LAT/LON</th>
+                      <th>COMPROVANTE</th>
+                    </tr>
+                  </thead>
+                  <tbody id="despesasAppDespesasRows"></tbody>
+                </table>
+              </div>
+            </section>
+            <section class="subpanel">
+              <h3>Alteração de ajudantes</h3>
+              <div id="despesasAppAjudantesRows" class="stack"></div>
+            </section>
+          </div>
+          <div class="modal-actions">
+            <button type="button" class="secondary" data-action="close-despesas-app-dialog">Fechar</button>
+          </div>
+          </div>
+        </dialog>
+
+        <section class="despesas-split">
+          <section class="panel">
+            <div class="panel-header">
+              <h2>Dados da rota</h2>
+            </div>
+            <form id="despesasRotaForm" class="despesas-route-form">
+              <label>
+                KM Inicial
+                <input id="despKmInicial" inputmode="decimal">
+              </label>
+              <label>
+                KM Final
+                <input id="despKmFinal" inputmode="decimal">
+              </label>
+              <label>
+                Litros
+                <input id="despLitros" inputmode="decimal">
+              </label>
+              <label>
+                KM Rodado
+                <input id="despKmRodado" readonly>
+              </label>
+              <label>
+                Media (KM/L)
+                <input id="despMediaKmL" readonly>
+              </label>
+              <label>
+                Custo p/KM
+                <input id="despCustoKm" readonly>
+              </label>
+              <label class="wide-field">
+                Observacao
+                <input id="despRotaObs" maxlength="1000">
+              </label>
+              <button type="submit" class="primary">SALVAR ROTA</button>
+            </form>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <h2>Contagem + resumo</h2>
+            </div>
+            <form id="despesasFinanceiroForm" class="despesas-financeiro-form">
+              <label>
+                Adiantamento
+                <input id="despAdiantamento" inputmode="decimal">
+              </label>
+              <label>
+                PIX Motorista
+                <input id="despPixMotorista" inputmode="decimal">
+              </label>
+              <label>
+                Cedula 200
+                <input id="despCed200" inputmode="numeric">
+              </label>
+              <label>
+                Cedula 100
+                <input id="despCed100" inputmode="numeric">
+              </label>
+              <label>
+                Cedula 50
+                <input id="despCed50" inputmode="numeric">
+              </label>
+              <label>
+                Cedula 20
+                <input id="despCed20" inputmode="numeric">
+              </label>
+              <label>
+                Cedula 10
+                <input id="despCed10" inputmode="numeric">
+              </label>
+              <label>
+                Cedula 5
+                <input id="despCed5" inputmode="numeric">
+              </label>
+              <label>
+                Cedula 2
+                <input id="despCed2" inputmode="numeric">
+              </label>
+              <button type="submit" class="primary">SALVAR RESUMO</button>
+              <div id="despesasCedulasResumo" class="cedulas-live-summary" aria-live="polite">
+                Total cedulas: R$ 0,00
+              </div>
+            </form>
+            <div id="despesasFinanceiroResumo" class="despesas-summary-grid"></div>
+          </section>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Nota fiscal</h2>
+          </div>
+          <form id="despesasNfForm" class="despesas-nf-form">
+            <label>
+              Numero NF
+              <input id="despNfNumero" maxlength="80">
+            </label>
+            <label>
+              <span data-logistica-label="unidade">KG</span> Nota Fiscal
+              <input id="despNfKg" inputmode="decimal">
+            </label>
+            <label>
+              Preco NF (R$/<span data-logistica-label="unidade">KG</span>)
+              <input id="despNfPreco" inputmode="decimal">
+            </label>
+            <label>
+              <span data-logistica-label="embalagem">Caixas</span>
+              <input id="despNfCaixas" inputmode="numeric">
+            </label>
+            <label>
+              <span data-logistica-label="unidade">KG</span> Carregado
+              <input id="despNfKgCarregado" inputmode="decimal">
+            </label>
+            <label>
+              <span data-logistica-label="unidade">KG</span> Vendido
+              <input id="despNfKgVendido" inputmode="decimal">
+            </label>
+            <label>
+              Saldo (<span data-logistica-label="unidade">KG</span>)
+              <input id="despNfSaldo" inputmode="decimal">
+            </label>
+            <label>
+              Media carregada
+              <input id="despNfMedia" inputmode="decimal">
+            </label>
+            <label>
+              Caixa final
+              <input id="despNfCaixaFinal" inputmode="numeric">
+            </label>
+            <label>
+              <span data-logistica-label="perda">Ocorrências operacionais</span> - unidades
+              <input id="despMortAves" inputmode="numeric">
+            </label>
+            <label>
+              <span data-logistica-label="perda">Ocorrências operacionais</span> <span data-logistica-label="unidade">KG</span>
+              <input id="despMortKg" inputmode="decimal">
+            </label>
+            <label class="wide-field">
+              Obs transbordo
+              <input id="despObsTransbordo" maxlength="500">
+            </label>
+            <button type="submit" class="primary">SALVAR NF</button>
+          </form>
+          <div id="despesasNfResumo" class="despesas-summary-grid"></div>
+        </section>
+      </section>
+
+      <section id="centroCustosView" class="view hidden">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Analise de Custos</h2>
+              <p id="centroCustosInfo" class="panel-subtitle">Filtros por periodo, veiculo e metrica.</p>
+            </div>
+            <button id="centroCustosRefreshButton" type="button" class="secondary">ATUALIZAR</button>
+          </div>
+          <div class="centro-custos-filter">
+            <label>
+              Periodo (dias)
+              <select id="centroCustosPeriodo">
+                <option value="7">7</option>
+                <option value="15">15</option>
+                <option value="30" selected>30</option>
+                <option value="60">60</option>
+                <option value="90">90</option>
+                <option value="180">180</option>
+                <option value="TODAS">TODAS</option>
+              </select>
+            </label>
+            <label>
+              Veiculo
+              <select id="centroCustosVeiculo">
+                <option value="TODOS">TODOS</option>
+              </select>
+            </label>
+            <label>
+              Metrica do grafico
+              <select id="centroCustosMetric">
+                <option value="CUSTO_KM">CUSTO_KM</option>
+                <option value="CUSTO_KG">CUSTO_KG</option>
+                <option value="DESPESA_TOTAL">DESPESA_TOTAL</option>
+              </select>
+            </label>
+            <button type="button" class="secondary" data-action="refresh-centro-custos">RECARREGAR</button>
+          </div>
+        </section>
+
+        <section class="panel centro-custos-frota-panel">
+          <div class="panel-header">
+            <div>
+              <h2>Frota cadastrada</h2>
+              <p class="panel-subtitle">Cada veiculo cadastrado gera um bloco de analise de custos. Clique para abrir o historico individual.</p>
+            </div>
+          </div>
+          <section id="centroCustosVeiculosGrid" class="centro-custos-veiculos-grid"></section>
+        </section>
+
+        <dialog id="centroCustosVeiculoDetalhe" class="modal wide-modal centro-custos-veiculo-modal">
+          <div class="modal-header">
+            <div>
+              <h2 id="centroVeiculoTitulo">Veiculo</h2>
+              <p id="centroVeiculoSubtitulo" class="panel-subtitle">Analise individual de custos.</p>
+            </div>
+            <button type="button" class="secondary" data-action="close-centro-veiculo-dialog">Fechar</button>
+          </div>
+          <section id="centroVeiculoKpis" class="metric-grid centro-custos-veiculo-kpis"></section>
+          <section id="centroVeiculoAlertas" class="centro-custos-alertas"></section>
+          <section class="centro-custos-detalhe-grid">
+            <section>
+              <h3>Controle de pecas e reparos</h3>
+              <div id="centroVeiculoPecas" class="centro-custos-chart"></div>
+            </section>
+            <section>
+              <h3>Motoristas do periodo</h3>
+              <div id="centroVeiculoMotoristas" class="centro-custos-tags"></div>
+            </section>
+          </section>
+          <section class="centro-custos-detalhe-grid">
+            <section>
+              <h3>Planejamentos vinculados</h3>
+              <div class="table-wrap compact-table-wrap">
+                <table class="wide-table">
+                  <thead>
+                    <tr>
+                      <th>PROG.</th>
+                      <th>DATA</th>
+                      <th>MOTORISTA</th>
+                      <th>ROTA</th>
+                      <th>KM</th>
+                      <th>LITROS</th>
+                      <th>MEDIA</th>
+                      <th>DESPESAS</th>
+                    </tr>
+                  </thead>
+                  <tbody id="centroVeiculoProgramacoesRows"></tbody>
+                </table>
+              </div>
+            </section>
+            <section>
+              <h3>Custos do veiculo</h3>
+              <div class="table-wrap compact-table-wrap">
+                <table class="wide-table">
+                  <thead>
+                    <tr>
+                      <th>DATA</th>
+                      <th>GRUPO</th>
+                      <th>DESCRICAO</th>
+                      <th>CONTROLE</th>
+                      <th>VENC.</th>
+                      <th>KM LIM.</th>
+                      <th>DOC.</th>
+                      <th>VALOR</th>
+                    </tr>
+                  </thead>
+                  <tbody id="centroVeiculoDespesasRows"></tbody>
+                </table>
+              </div>
+            </section>
+          </section>
+        </dialog>
+
+        <section class="panel centro-custos-executive centro-custos-support">
+          <div class="panel-header">
+            <div>
+              <h2>Leitura inteligente</h2>
+              <p class="panel-subtitle">Resumo direto do periodo para identificar lucro, prejuizo, custo e pontos de atencao.</p>
+            </div>
+          </div>
+          <section id="centroCustosAnalise" class="centro-custos-analise-grid"></section>
+          <section class="centro-custos-kpi-lanes">
+            <div>
+              <h3>Operacao</h3>
+              <section id="centroCustosMetrics" class="metric-grid centro-custos-metrics centro-custos-support"></section>
+            </div>
+            <div>
+              <h3>Financeiro</h3>
+              <section id="centroCustosFinanceiroMetrics" class="metric-grid centro-custos-financeiro-metrics centro-custos-support"></section>
+            </div>
+          </section>
+        </section>
+
+        <section class="centro-custos-financeiro-grid centro-custos-support">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Resultado financeiro</h2>
+                <p id="centroCustosFinanceiroResumo" class="panel-subtitle">Compra, venda, despesas e lucro liquido.</p>
+              </div>
+            </div>
+            <div id="centroCustosResultadoChart" class="centro-custos-chart"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Composicao das despesas</h2>
+                <p class="panel-subtitle">Separacao entre caminhao/veiculo, rota e diarias.</p>
+              </div>
+            </div>
+            <div id="centroCustosDespesaChart" class="centro-custos-chart"></div>
+          </section>
+        </section>
+
+        <section class="panel centro-custos-route-expenses">
+          <div class="panel-header">
+            <div>
+              <h2>Despesas por rota</h2>
+              <p id="centroCustosDespesasRotaResumo" class="panel-subtitle">Despesas vindas do app do motorista e da prestacao de contas.</p>
+            </div>
+            <button id="centroCustosDespesasRotaExportButton" type="button" class="secondary">EXPORTAR CSV</button>
+          </div>
+          <section id="centroCustosDespesasRotaMetrics" class="centro-custos-rota-summary"></section>
+          <div id="centroCustosDespesasRotaTipoCards" class="centro-custos-rota-type-cards" aria-label="Totais por tipo de despesa"></div>
+          <div class="centro-custos-rota-filters">
+            <label>
+              Despesa
+              <select id="centroCustosDespesasRotaFiltroTipo">
+                <option value="TODAS">Todos</option>
+              </select>
+            </label>
+            <label>
+              Mes
+              <input id="centroCustosDespesasRotaMes" type="month">
+            </label>
+            <label>
+              Buscar
+              <input id="centroCustosDespesasRotaBusca" type="search" placeholder="Programacao, motorista ou veiculo">
+            </label>
+            <button id="centroCustosDespesasRotaLimparButton" type="button" class="secondary">LIMPAR</button>
+          </div>
+          <details class="centro-custos-rota-advanced">
+            <summary>Filtros avancados</summary>
+            <div class="centro-custos-rota-advanced-grid">
+            <label>
+              Rota
+              <select id="centroCustosDespesasRotaFiltroRota">
+                <option value="TODAS">Todas</option>
+              </select>
+            </label>
+            <label>
+              De
+              <input id="centroCustosDespesasRotaDataIni" type="date">
+            </label>
+            <label>
+              Ate
+              <input id="centroCustosDespesasRotaDataFim" type="date">
+            </label>
+            <label>
+              Minimo
+              <input id="centroCustosDespesasRotaValorMin" type="number" min="0" step="0.01" placeholder="R$">
+            </label>
+            <label>
+              Maximo
+              <input id="centroCustosDespesasRotaValorMax" type="number" min="0" step="0.01" placeholder="R$">
+            </label>
+            <label>
+              Ordenar
+              <select id="centroCustosDespesasRotaOrdenacao">
+                <option value="TOTAL_DESC">Maior total</option>
+                <option value="TOTAL_ASC">Menor total</option>
+                <option value="DATA_DESC">Data mais recente</option>
+                <option value="PROGRAMACAO_ASC">Programacao</option>
+              </select>
+            </label>
+            </div>
+          </details>
+          <div class="centro-custos-rota-shortcuts" role="group" aria-label="Filtros rapidos de despesas por rota">
+            <button type="button" data-rota-quick="ACIMA_MEDIA">Acima da media</button>
+          </div>
+          <div class="centro-custos-rota-tabs" role="tablist" aria-label="Visualizacao das despesas por rota">
+            <button id="centroCustosDespesasRotaTabProgramacoes" type="button" class="active" data-rota-tab="programacoes">Programacoes</button>
+            <button id="centroCustosDespesasRotaTabLancamentos" type="button" data-rota-tab="lancamentos">Lancamentos</button>
+          </div>
+          <div id="centroCustosDespesasRotaProgramacoesPanel" class="table-wrap centro-custos-rota-table-scroll">
+            <table class="wide-table centro-custos-despesas-rota-table">
+              <thead>
+                <tr>
+                  <th>PROG.</th>
+                  <th>DATA</th>
+                  <th>VEICULO</th>
+                  <th>MOTORISTA</th>
+                  <th>ROTA</th>
+                  <th id="centroCustosDespesasRotaValorHeader">VALOR</th>
+                  <th>TOTAL ROTA</th>
+                  <th>QTD.</th>
+                  <th>MAIOR DESPESA</th>
+                  <th>ACOES</th>
+                </tr>
+              </thead>
+              <tbody id="centroCustosDespesasRotaRows"></tbody>
+            </table>
+          </div>
+          <div id="centroCustosDespesasRotaLancamentosPanel" class="hidden">
+          <div class="centro-custos-lancamentos-header">
+            <div>
+              <h3>Lancamentos da despesa selecionada</h3>
+              <p id="centroCustosDespesasRotaLancamentosResumo">Registros individuais que formam o total acima.</p>
+            </div>
+          </div>
+          <div class="table-wrap centro-custos-rota-table-scroll">
+            <table class="wide-table centro-custos-lancamentos-table">
+              <thead>
+                <tr>
+                  <th>PROG.</th>
+                  <th>DATA</th>
+                  <th>TIPO</th>
+                  <th>MOTORISTA</th>
+                  <th>VEICULO</th>
+                  <th>DESCRICAO</th>
+                  <th>CATEGORIA</th>
+                  <th>VALOR</th>
+                  <th>OBSERVACAO</th>
+                </tr>
+              </thead>
+              <tbody id="centroCustosDespesasRotaLancamentosRows"></tbody>
+            </table>
+          </div>
+          </div>
+        </section>
+
+        <dialog id="centroCustosDespesasRotaDialog" class="modal wide-modal">
+          <div class="stack">
+            <div class="panel-header">
+              <div>
+                <h2 id="centroCustosDespesasRotaDialogTitle">Detalhes da rota</h2>
+                <p id="centroCustosDespesasRotaDialogSubtitle" class="panel-subtitle">Lancamentos da prestacao de contas.</p>
+              </div>
+              <button type="button" class="icon-button" data-action="close-centro-despesas-rota-dialog" aria-label="Fechar">x</button>
+            </div>
+            <div class="table-wrap">
+              <table class="wide-table">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>DATA</th>
+                    <th>TIPO</th>
+                    <th>CATEGORIA</th>
+                    <th>DESCRICAO</th>
+                    <th>VALOR</th>
+                    <th>OBSERVACAO</th>
+                  </tr>
+                </thead>
+                <tbody id="centroCustosDespesasRotaDialogRows"></tbody>
+              </table>
+            </div>
+            <div class="actions">
+              <button id="centroCustosDespesasRotaDialogOpenButton" type="button" class="primary">ABRIR PRESTACAO</button>
+              <button type="button" class="secondary" data-action="close-centro-despesas-rota-dialog">FECHAR</button>
+            </div>
+          </div>
+        </dialog>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Lancar despesa por veiculo</h2>
+              <p class="panel-subtitle">Cupom fiscal, nota fiscal ou descricao manual entram no custo da empresa.</p>
+            </div>
+          </div>
+          <form id="centroCustosDespesaVeiculoForm" class="centro-custos-despesa-form">
+            <label>
+              Veiculo
+              <select id="centroDespesaVeiculo" required>
+                <option value="">Selecione</option>
+              </select>
+            </label>
+            <label>
+              Documento
+              <select id="centroDespesaDocumentoTipo">
+                <option value="CUPOM FISCAL">Cupom fiscal</option>
+                <option value="NOTA FISCAL">Nota fiscal</option>
+                <option value="MANUAL">Descricao manual</option>
+              </select>
+            </label>
+            <label>
+              Perfil
+              <select id="centroDespesaPerfil">
+                <option value="OUTROS">Outros</option>
+              </select>
+            </label>
+            <label>
+              Numero
+              <input id="centroDespesaDocumentoNumero" maxlength="80" placeholder="Opcional">
+            </label>
+            <label>
+              Data
+              <input id="centroDespesaData" type="date">
+            </label>
+            <label>
+              Valor
+              <input id="centroDespesaValor" inputmode="decimal" required>
+            </label>
+            <label>
+              Fornecedor
+              <input id="centroDespesaFornecedor" maxlength="120" placeholder="Posto, oficina, fornecedor">
+            </label>
+            <label>
+              Controle
+              <select id="centroDespesaControleTipo">
+                <option value="SEM_CONTROLE">Sem controle</option>
+                <option value="DATA">Vencimento por data</option>
+                <option value="KM">Vencimento por KM</option>
+                <option value="DATA_KM">Data e KM</option>
+              </select>
+            </label>
+            <label>
+              Vence em
+              <input id="centroDespesaDataVencimento" type="date">
+            </label>
+            <label>
+              KM limite
+              <input id="centroDespesaKmVencimento" inputmode="decimal" placeholder="Ex.: 125000">
+            </label>
+            <label>
+              Odometro
+              <input id="centroDespesaOdometro" inputmode="decimal" placeholder="KM atual">
+            </label>
+            <label>
+              Prioridade
+              <select id="centroDespesaPrioridade">
+                <option value="NORMAL">Normal</option>
+                <option value="BAIXA">Baixa</option>
+                <option value="ALTA">Alta</option>
+                <option value="CRITICA">Critica</option>
+              </select>
+            </label>
+            <label class="wide-field">
+              Descricao
+              <input id="centroDespesaDescricao" maxlength="220" required placeholder="Ex.: combustivel, pneu, manutencao">
+            </label>
+            <label class="wide-field">
+              Observacao
+              <input id="centroDespesaObservacao" maxlength="300" placeholder="Detalhe interno opcional">
+            </label>
+            <button type="submit" class="primary">SALVAR DESPESA</button>
+            <button id="centroDespesaLimparButton" type="button" class="secondary">LIMPAR</button>
+          </form>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2 id="centroCustosChartTitle">Custo por Veiculo</h2>
+              <p id="centroCustosResumo" class="panel-subtitle">-</p>
+            </div>
+          </div>
+          <div id="centroCustosChart" class="centro-custos-chart"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Resumo por veiculo</h2>
+          </div>
+          <div class="table-wrap">
+            <table class="wide-table centro-custos-table">
+              <thead>
+                <tr>
+                  <th>VEICULO</th>
+                  <th>ROTAS</th>
+                  <th>KM RODADO</th>
+                  <th><span data-logistica-label="unidade-upper">KG</span> CARREGADO</th>
+                  <th>DESPESAS</th>
+                  <th>COMPRA</th>
+                  <th>VENDA</th>
+                  <th>LUCRO LIQ.</th>
+                  <th>CUSTO/KM</th>
+                  <th>CUSTO/<span data-logistica-label="unidade-upper">KG</span></th>
+                  <th>TICKET/ROTA</th>
+                </tr>
+              </thead>
+              <tbody id="centroCustosRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Resultado por planejamento</h2>
+          </div>
+          <div class="table-wrap">
+            <table class="wide-table centro-custos-financeiro-table">
+              <thead>
+                <tr>
+                  <th>PROG.</th>
+                  <th>DATA</th>
+                  <th>VEICULO</th>
+                  <th>MOTORISTA</th>
+                  <th>ROTA</th>
+                  <th>KM</th>
+                  <th data-logistica-label="unidade-upper">KG</th>
+                  <th>COMPRA</th>
+                  <th>VENDA</th>
+                  <th>DESP. VEIC.</th>
+                  <th>DESP. ROTA</th>
+                  <th>DIARIAS</th>
+                  <th>DESP. TOTAL</th>
+                  <th>LUCRO BRUTO</th>
+                  <th>LUCRO LIQ.</th>
+                  <th>MARGEM</th>
+                  <th>CUSTO/KM</th>
+                  <th>LUCRO/KM</th>
+                  <th>FONTE</th>
+                  <th>CONF.</th>
+                  <th>ALERTAS</th>
+                </tr>
+              </thead>
+              <tbody id="centroCustosFinanceiroRows"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="escalaView" class="view hidden">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Escala</h2>
+              <p id="escalaInfo" class="panel-subtitle">0 rotas carregadas</p>
+            </div>
+            <div class="actions">
+              <button id="escalaRefreshButton" type="button" class="secondary">ATUALIZAR</button>
+              <button id="escalaPdfButton" type="button" class="warning">GERAR PDF</button>
+            </div>
+          </div>
+          <div class="filter-row escala-filter">
+            <label>
+              Periodo
+              <select id="escalaPeriodo">
+                <option value="7">7 dias</option>
+                <option value="15">15 dias</option>
+                <option value="30" selected>30 dias</option>
+                <option value="60">60 dias</option>
+                <option value="90">90 dias</option>
+                <option value="180">180 dias</option>
+                <option value="TODAS">Todas</option>
+              </select>
+            </label>
+            <label>
+              Status
+              <select id="escalaStatus">
+                <option value="ATIVAS" selected>ATIVAS</option>
+                <option value="TODOS">TODOS</option>
+                <option value="ATIVA">ATIVA</option>
+                <option value="EM_ROTA">EM ROTA</option>
+                <option value="CARREGADA">CARREGADA</option>
+                <option value="FINALIZADA">FINALIZADA</option>
+                <option value="CANCELADA">CANCELADA</option>
+              </select>
+            </label>
+            <button type="button" class="secondary" data-action="refresh-escala">Recarregar</button>
+          </div>
+          <div class="filter-row escala-folga-filter">
+            <label>
+              Tipo de folga
+              <select id="escalaFolgaTipo">
+                <option value="MOTORISTA" selected>Motorista</option>
+                <option value="AJUDANTE">Ajudante</option>
+              </select>
+            </label>
+            <label>
+              Pessoa
+              <select id="escalaFolgaPessoa"></select>
+            </label>
+            <label>
+              Inicio
+              <input id="escalaFolgaInicio" type="date">
+            </label>
+            <label>
+              Fim
+              <input id="escalaFolgaFim" type="date">
+            </label>
+            <label>
+              Motivo
+              <input id="escalaFolgaMotivo" type="text" placeholder="Opcional">
+            </label>
+            <button id="escalaFolgaAplicarButton" type="button" class="primary">Aplicar folga</button>
+          </div>
+          <div id="escalaFolgasAtivas" class="escala-folgas-list"></div>
+        </section>
+
+        <section id="escalaKpis" class="metric-grid escala-kpi-grid"></section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Resumo de Distribuicao</h2>
+          </div>
+          <div class="escala-summary-grid">
+            <article>
+              <strong>Resumo Operacional</strong>
+              <p id="escalaResumoText">-</p>
+            </article>
+            <article>
+              <strong>Recomendacoes</strong>
+              <p id="escalaRecomendacoesText">-</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Carga de horas por motorista</h2>
+          </div>
+          <div id="escalaChart" class="escala-chart"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2 id="escalaTableTitle">Motoristas</h2>
+            <div class="tabs escala-tabs">
+              <button type="button" class="tab-button active" data-escala-tab="motoristas">Motoristas</button>
+              <button type="button" class="tab-button" data-escala-tab="ajudantes">Ajudantes</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="wide-table escala-table">
+              <thead>
+                <tr>
+                  <th>NOME</th>
+                  <th>ROTAS</th>
+                  <th>EM ROTA</th>
+                  <th>ATIVAS</th>
+                  <th>FINALIZADAS</th>
+                  <th>CANCELADAS</th>
+                  <th>LOCAL</th>
+                  <th>KM RODADO</th>
+                  <th>HORAS</th>
+                  <th>CARGA</th>
+                </tr>
+              </thead>
+              <tbody id="escalaRows"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="comprasView" class="view hidden">
+        <section class="panel compras-recebimento-panel">
+          <div class="panel-header">
+            <div>
+              <h2>Recebimento de mercadoria</h2>
+              <p id="comprasInfo" class="panel-subtitle">Manifestador, XML e compras recebidas dos fornecedores.</p>
+            </div>
+            <button id="comprasRefreshButton" type="button" class="secondary">CARREGAR</button>
+          </div>
+
+          <div class="compras-toolbar">
+            <label class="wide-field">
+              Natureza da Operacao
+              <select id="comprasNatureza">
+                <option value="TODAS">TODAS</option>
+                <option value="COMPRA/AQUISICAO">COMPRA/AQUISICAO</option>
+                <option value="COMPRAS USO E CONSUMO">COMPRAS USO E CONSUMO</option>
+                <option value="BONIFICACAO DE ENTRADA">BONIFICACAO DE ENTRADA</option>
+                <option value="COMPRAS DE ATIVO IMOBILIZADO">COMPRAS DE ATIVO IMOBILIZADO</option>
+                <option value="OUTRAS ENTRADAS">OUTRAS ENTRADAS</option>
+                <option value="OUTRAS ENTRADAS - REMESSA PALLET">OUTRAS ENTRADAS - REMESSA PALLET</option>
+              </select>
+            </label>
+            <label>
+              Estoque
+              <input id="comprasEstoqueCodigo" value="1">
+            </label>
+            <label>
+              Local
+              <input id="comprasEstoqueNome" value="BRASIL">
+            </label>
+            <label>
+              No Pedido Compra
+              <input id="comprasPedidoCompra" inputmode="numeric" value="0">
+            </label>
+            <label>
+              KG entrada
+              <input id="comprasEntradaKg" inputmode="decimal" placeholder="Do XML ou manual">
+            </label>
+            <label>
+              Volumes entrada
+              <input id="comprasEntradaCaixas" inputmode="numeric" placeholder="Opcional">
+            </label>
+            <label class="check-row compras-check">
+              <input id="comprasSemMovFisica" type="checkbox">
+              <span>Sem mov. fisica</span>
+            </label>
+            <label class="check-row compras-check">
+              <input id="comprasSemMovContabil" type="checkbox">
+              <span>Sem mov. contabil</span>
+            </label>
+            <label class="check-row compras-check">
+              <input id="comprasNaoAtualizaCusto" type="checkbox">
+              <span>Nao atualiza custo</span>
+            </label>
+          </div>
+
+          <div class="compras-tabs" aria-label="Opcoes de recebimento">
+            <button id="comprasManualButton" type="button" class="secondary">Manual</button>
+            <button id="comprasImportXmlButton" type="button" class="secondary">Importar XML</button>
+            <input id="comprasXmlFile" type="file" accept=".xml,application/xml,text/xml" class="hidden">
+            <button id="comprasManifestadorButton" type="button" class="secondary">Manifestador</button>
+            <button id="comprasCertificadoButton" type="button" class="warning">Certificado A1</button>
+            <button id="comprasPorChaveButton" type="button" class="secondary">Por Chave</button>
+          </div>
+
+          <div class="compras-search-row">
+            <label>
+              Busca rapida
+              <input id="comprasBusca" placeholder="chave, numero, fornecedor, CNPJ/CPF">
+            </label>
+            <div id="comprasResumo" class="compras-summary">Total de Notas: 0 | Valor: R$ 0,00</div>
+          </div>
+
+          <section class="compras-estoque-grid" aria-label="Resumo do estoque">
+            <article>
+              <span>Estoque fiscal</span>
+              <strong id="comprasFiscalSaldo">0 KG</strong>
+              <em id="comprasFiscalDetalhe">Entradas 0 KG | Saidas 0 KG</em>
+            </article>
+            <article>
+              <span>Estoque fisico</span>
+              <strong id="comprasFisicoSaldo">0 KG</strong>
+              <em id="comprasFisicoDetalhe">Entradas 0 KG | Saidas 0 KG</em>
+            </article>
+            <article>
+              <span>Pendencias</span>
+              <strong id="comprasEstoquePendencias">0</strong>
+              <em id="comprasEstoquePendenciasDetalhe">Notas e saidas fiscais</em>
+            </article>
+          </section>
+
+          <section class="compras-maintenance-panel" aria-label="Manutencao do estoque fisico">
+            <div class="panel-header compact-header">
+              <div>
+                <h2>Manutencao do estoque fisico</h2>
+                <p class="panel-subtitle">Ajustes manuais entram como movimentacao auditada, sem apagar historico.</p>
+              </div>
+              <button id="comprasZerarFisicoButton" type="button" class="danger">ZERAR FISICO</button>
+            </div>
+            <div class="compras-maintenance-row">
+              <label>
+                Produto
+                <select id="comprasAjusteProduto">
+                  <option value="">CARGA</option>
+                </select>
+              </label>
+              <label>
+                Movimento
+                <select id="comprasAjusteMovimento">
+                  <option value="ENTRADA">ENTRADA</option>
+                  <option value="SAIDA">SAIDA</option>
+                </select>
+              </label>
+              <label>
+                KG ajuste
+                <input id="comprasAjusteKg" inputmode="decimal" placeholder="0,00">
+              </label>
+              <label>
+                Caixas
+                <input id="comprasAjusteCaixas" inputmode="numeric" placeholder="0">
+              </label>
+              <label>
+                Observacao
+                <input id="comprasAjusteObs" maxlength="180" placeholder="Motivo do ajuste">
+              </label>
+              <button id="comprasAjusteButton" type="button" class="primary">APLICAR AJUSTE</button>
+            </div>
+          </section>
+
+          <section class="compras-produtos-panel" aria-label="Estoque por produto">
+            <div class="table-wrap compras-produtos-wrap">
+              <table class="compras-table">
+                <thead>
+                  <tr>
+                    <th>Produto</th>
+                    <th data-logistica-label="fiscal-saldo-unidade">Fiscal saldo KG</th>
+                    <th data-logistica-label="fisico-saldo-unidade">Fisico saldo KG</th>
+                    <th>Entradas fiscais</th>
+                    <th>Saidas fiscais</th>
+                  </tr>
+                </thead>
+                <tbody id="comprasEstoqueProdutosRows"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <div class="table-wrap compras-table-wrap">
+            <table class="compras-table">
+              <thead>
+                <tr>
+                  <th></th>
+                  <th>Chave de acesso</th>
+                  <th>Serie</th>
+                  <th>Numero</th>
+                  <th>CNPJ/CPF</th>
+                  <th>Razao Social</th>
+                  <th>Produto</th>
+                  <th>Emissao</th>
+                  <th>Valor Total</th>
+                  <th>Sit. NFe</th>
+                  <th>NSU</th>
+                  <th>Est. fiscal</th>
+                  <th>Est. fisico</th>
+                  <th data-logistica-label="saldo-unidade">Saldo KG</th>
+                </tr>
+              </thead>
+              <tbody id="comprasNfeRows"></tbody>
+            </table>
+          </div>
+
+          <div class="compras-footer">
+            <button id="comprasCarregarButton" type="button" class="secondary">Carregar</button>
+            <button id="comprasAcoesButton" type="button" class="secondary">Acoes</button>
+            <button id="comprasDownloadXmlButton" type="button" class="secondary">Download XML</button>
+            <button id="comprasDownloadPdfButton" type="button" class="secondary">Download PDF</button>
+            <button id="comprasSyncProgramacoesButton" type="button" class="secondary">Sincronizar Saidas</button>
+            <button id="comprasConfigNfeButton" type="button" class="secondary">Config. NFe</button>
+            <span class="spacer"></span>
+            <button id="comprasConfirmarButton" type="button" class="primary">Confirmar</button>
+            <button id="comprasVoltarButton" type="button" class="secondary">Voltar</button>
+          </div>
+        </section>
+
+        <dialog id="fornecedorCertificadoDialog" class="modal">
+          <div class="modal-header">
+            <div>
+              <h2>Certificado do manifestador</h2>
+              <p id="fornecedorCertificadoInfo" class="panel-subtitle">Instale certificado A1 para consulta e manifestacao de NF-e.</p>
+            </div>
+            <button id="fornecedorCertificadoCloseButton" type="button" class="secondary">Fechar</button>
+          </div>
+          <form id="fornecedorCertificadoForm" class="form-grid">
+            <label class="wide-field">
+              Fornecedor/emitente vinculado
+              <select id="fornecedorCertificadoFornecedor" name="fornecedor_id" required></select>
+            </label>
+            <label class="wide-field">
+              Arquivo A1 (.pfx ou .p12)
+              <input id="fornecedorCertificadoFile" name="certificado" type="file" accept=".pfx,.p12" required>
+            </label>
+            <label>
+              Apelido
+              <input id="fornecedorCertificadoApelido" name="apelido" maxlength="120" placeholder="Ex.: certificado matriz">
+            </label>
+            <p class="wide-field panel-subtitle">A senha do certificado nao sera armazenada nesta etapa. Ela sera solicitada novamente quando a consulta fiscal real for ativada.</p>
+            <button type="submit" class="primary">INSTALAR CERTIFICADO</button>
+          </form>
+        </dialog>
+      </section>
+
+      <section id="mortalidadeView" class="view hidden">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Ocorrências operacionais</h2>
+              <p id="mortalidadeInfo" class="panel-subtitle">Fotos e registros separados por rota, cliente e tipo de ocorrência.</p>
+            </div>
+            <div class="actions mortalidade-header-actions">
+              <button id="mortalidadeManualOpenButton" type="button" class="primary">REGISTRAR OCORRÊNCIA</button>
+              <button id="mortalidadeRefreshButton" type="button" class="secondary">ATUALIZAR</button>
+            </div>
+          </div>
+          <form id="mortalidadeFilterForm" class="relatorios-filter mortalidade-filter-grid">
+            <label class="mortalidade-filter-periodo">
+              Periodo
+              <select id="mortalidadePeriodo">
+                <option value="TODAS">Todas</option>
+                <option value="7">7 dias</option>
+                <option value="15">15 dias</option>
+                <option value="30" selected>30 dias</option>
+                <option value="60">60 dias</option>
+                <option value="90">90 dias</option>
+                <option value="180">180 dias</option>
+              </select>
+            </label>
+            <label class="mortalidade-filter-data">
+              Inicio
+              <input id="mortalidadeDataInicio" type="date">
+            </label>
+            <label class="mortalidade-filter-data">
+              Fim
+              <input id="mortalidadeDataFim" type="date">
+            </label>
+            <label class="mortalidade-filter-programacao">
+              Planejamento
+              <input id="mortalidadeProgramacao" placeholder="PG202603">
+            </label>
+            <label class="mortalidade-filter-motorista">
+              Motorista
+              <input id="mortalidadeMotorista" placeholder="ANDERSON">
+            </label>
+            <label class="mortalidade-filter-nf">
+              Nota fiscal
+              <input id="mortalidadeNf" placeholder="NF">
+            </label>
+            <label class="mortalidade-filter-tipo">
+              Tipo
+              <select id="mortalidadeTipo">
+                <option value="TODOS">Todos</option>
+                <option value="DOA">Operacao / Transbordo</option>
+                <option value="CLIENTE">Cliente</option>
+              </select>
+            </label>
+            <label class="mortalidade-filter-busca">
+              Busca
+              <input id="mortalidadeBusca" placeholder="cliente, pedido, foto, obs">
+            </label>
+            <label class="mortalidade-filter-limite">
+              Limite
+              <input id="mortalidadeLimit" type="number" min="1" max="1000" step="1" value="500">
+            </label>
+            <div class="mortalidade-filter-actions">
+              <button type="submit" class="primary">FILTRAR</button>
+              <button id="mortalidadeClearFiltersButton" type="button" class="secondary">LIMPAR</button>
+            </div>
+          </form>
+          <dialog id="mortalidadeManualDialog" class="modal wide-modal mortalidade-manual-dialog">
+          <form id="mortalidadeManualForm" class="mortalidade-manual-form">
+            <div class="manual-form-heading">
+              <h3>Ocorrência manual</h3>
+              <span id="mortalidadeManualPreview">KG 0,00 | Desconto R$ 0,00</span>
+            </div>
+            <label>
+              Planejamento
+              <input id="manualMortProgramacao" name="codigo_programacao" placeholder="PG202603" required>
+            </label>
+            <label>
+              Nota fiscal
+              <input id="manualMortNf" name="nota_fiscal" placeholder="NF">
+            </label>
+            <label>
+              Pedido
+              <input id="manualMortPedido" name="pedido" placeholder="Numero do pedido">
+            </label>
+            <label class="wide-field">
+              Cliente
+              <input id="manualMortCliente" name="cliente" placeholder="Nome do cliente" required>
+            </label>
+            <label>
+              Vendedor
+              <input id="manualMortVendedor" name="vendedor" placeholder="Vendedor">
+            </label>
+            <label>
+              Preco cliente
+              <input id="manualMortPreco" name="preco_cliente" inputmode="decimal" placeholder="0,00">
+            </label>
+            <label>
+              Media
+              <input id="manualMortMedia" name="media" inputmode="decimal" placeholder="0,00">
+            </label>
+            <label>
+              Ocorrências (unidades)
+              <input id="manualMortAves" name="mortalidade_aves" type="number" min="1" step="1" required>
+            </label>
+            <label>
+              Data pedido
+              <input id="manualMortDataPedido" name="data_pedido" type="date">
+            </label>
+            <label class="wide-field">
+              Motivo da ocorrência
+              <input id="manualMortMotivo" name="motivo" placeholder="Ex.: avaria, falta, quebra ou divergência na entrega" required>
+            </label>
+            <label class="wide-field">
+              Foto
+              <input id="manualMortFoto" name="foto" type="file" accept="image/*">
+            </label>
+            <button id="mortalidadeManualSaveButton" type="submit" class="primary">REGISTRAR OCORRÊNCIA</button>
+            <button id="mortalidadeManualClearButton" type="button" class="secondary">LIMPAR</button>
+            <button id="mortalidadeManualCloseButton" type="button" class="secondary">FECHAR</button>
+          </form>
+          </dialog>
+          <dialog id="mortalidadeDoaDetailDialog" class="modal wide-modal mortalidade-detail-dialog">
+            <div class="modal-header">
+              <div>
+                <h2 id="mortalidadeDoaDetailTitle">Operacao / Transbordo</h2>
+                <p id="mortalidadeDoaDetailSubtitle" class="panel-subtitle">Detalhes da ocorrencia operacional.</p>
+              </div>
+              <button type="button" class="secondary" data-action="close-mortalidade-doa-detail">Fechar</button>
+            </div>
+            <section id="mortalidadeDoaDetailBody" class="mortalidade-detail-dialog-body"></section>
+          </dialog>
+          <div id="mortalidadeKpis" class="metric-grid mortalidade-metrics"></div>
+        </section>
+
+        <section class="mortalidade-dashboard-grid">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Impacto por tipo</h2>
+                <p class="panel-subtitle">Comparativo entre ocorrências no cliente e na operação.</p>
+              </div>
+            </div>
+            <div id="mortalidadeTipoChart" class="mortalidade-chart"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Ranking por planejamento</h2>
+                <p class="panel-subtitle">Rotas com maior <span data-logistica-label="unidade">KG</span> afetado no filtro atual.</p>
+              </div>
+            </div>
+            <div id="mortalidadeProgramacaoChart" class="mortalidade-chart"></div>
+          </section>
+
+          <section class="panel mortalidade-insights-panel">
+            <div class="panel-header">
+              <div>
+                <h2>Leitura rapida</h2>
+                <p class="panel-subtitle">Pontos de atencao do periodo.</p>
+              </div>
+            </div>
+            <div id="mortalidadeInsights" class="mortalidade-insights"></div>
+          </section>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Resumo por planejamento</h2>
+          </div>
+          <div class="table-wrap mortalidade-table-scroll mortalidade-resumo-scroll">
+            <table class="wide-table mortalidade-resumo-table">
+              <thead>
+                <tr>
+                  <th>PLANEJAMENTO</th>
+                  <th>NF</th>
+                  <th>MOTORISTA</th>
+                  <th><span data-logistica-label="perda-upper">MORT.</span> CLIENTE</th>
+                  <th><span data-logistica-label="unidade-upper">KG</span> CLIENTE</th>
+                  <th>OPER. UNID.</th>
+                  <th>OPER. <span data-logistica-label="unidade-upper">KG</span></th>
+                  <th><span data-logistica-label="unidade-upper">KG</span> AFETADO</th>
+                  <th>VALOR AFETADO</th>
+                  <th>FOTOS</th>
+                </tr>
+              </thead>
+              <tbody id="mortalidadeResumoRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="despesas-split">
+          <section class="panel">
+            <div class="panel-header">
+              <h2>Operação / Transbordo</h2>
+            </div>
+            <div class="table-wrap mortalidade-table-scroll mortalidade-detail-scroll">
+              <table class="wide-table mortalidade-detail-table">
+                <thead>
+                  <tr>
+                    <th>PROG.</th>
+                    <th>NF</th>
+                    <th>MOTORISTA</th>
+                    <th>DATA</th>
+                    <th>HORA</th>
+                    <th>UNID.</th>
+                    <th>MEDIA</th>
+                    <th><span data-logistica-label="unidade-upper">KG</span> AFETADO</th>
+                    <th>PRECO COMPRA</th>
+                    <th>VALOR</th>
+                    <th>OBS</th>
+                    <th>FOTO</th>
+                  </tr>
+                </thead>
+                <tbody id="mortalidadeDoaRows"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <h2><span data-logistica-label="perda">Ocorrências operacionais</span> por cliente</h2>
+            </div>
+            <div class="table-wrap mortalidade-table-scroll mortalidade-detail-scroll">
+              <table class="wide-table mortalidade-detail-table">
+                <thead>
+                  <tr>
+                    <th>PROG.</th>
+                    <th>NF</th>
+                    <th>MOTORISTA</th>
+                    <th>DATA</th>
+                    <th>HORA</th>
+                    <th>CLIENTE</th>
+                    <th>PEDIDO</th>
+                    <th>VENDEDOR</th>
+                    <th>UNID.</th>
+                    <th>MEDIA</th>
+                    <th><span data-logistica-label="unidade-upper">KG</span> AFETADO</th>
+                    <th>PRECO CLIENTE</th>
+                    <th>VALOR</th>
+                    <th>DATA PEDIDO</th>
+                    <th>MOTIVO</th>
+                    <th>GPS</th>
+                    <th>FOTO</th>
+                  </tr>
+                </thead>
+                <tbody id="mortalidadeClienteRows"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+      </section>
+
+      <section id="relatoriosView" class="view hidden">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Relatorios Operacionais</h2>
+              <p id="relatoriosInfo" class="panel-subtitle">Selecione filtros e gere o resumo.</p>
+            </div>
+            <button id="relatoriosRefreshButton" type="button" class="secondary">ATUALIZAR</button>
+          </div>
+          <section id="relatoriosModeCards" class="relatorios-mode-cards" aria-label="Modos de relatorio"></section>
+          <form id="relatoriosFilterForm" class="relatorios-filter">
+            <div class="relatorios-filter-heading">
+              <strong>Filtros de consulta</strong>
+              <span>Use NF para consolidar transbordos ou combine codigo, motorista e data.</span>
+            </div>
+            <label>
+              Tipo de Relatorio
+              <select id="relatoriosTipo" name="tipo">
+                <option value="Nota Fiscal / Transbordo">Nota Fiscal / Transbordo</option>
+                <option value="Detalhe Completo da Rota">Detalhe Completo da Rota</option>
+                <option value="Programacoes">Planejamentos</option>
+                <option value="Prestacao de Contas">Fechamento Operacional</option>
+                <option value="Mortalidades">Mortalidades</option>
+                <option value="Ocorrencias por Motorista">Ocorrências por Motorista</option>
+                <option value="Rotina Motorista/Ajudantes">Rotina Motorista/Ajudantes</option>
+                <option value="KM de Veiculos">KM de Veiculos</option>
+                <option value="Abastecimentos">Abastecimentos</option>
+                <option value="Banhos">Banhos</option>
+                <option value="Despesas">Custos e Despesas</option>
+              </select>
+            </label>
+            <label>
+              Codigo
+              <input id="relatoriosCodigo" name="codigo" maxlength="40">
+            </label>
+            <label>
+              Nota Fiscal
+              <input id="relatoriosNf" name="nf" maxlength="40">
+            </label>
+            <label>
+              Motorista
+              <input id="relatoriosMotorista" name="motorista" maxlength="180">
+            </label>
+            <label>
+              Data
+              <input id="relatoriosData" name="data" placeholder="2026-05-08" maxlength="20">
+            </label>
+            <button type="submit" class="primary">BUSCAR</button>
+            <button id="relatoriosClearButton" type="button" class="secondary">LIMPAR</button>
+          </form>
+
+          <div class="relatorios-actions">
+            <label>
+              Planejamento
+              <select id="relatoriosProgramacaoSelect">
+                <option value="">Selecione</option>
+              </select>
+            </label>
+            <button id="relatoriosResumoButton" type="button" class="primary">GERAR RESUMO</button>
+            <button id="relatoriosExcelButton" type="button" class="warning">EXPORTAR EXCEL</button>
+            <button id="relatoriosPdfButton" type="button" class="primary">GERAR PDF</button>
+            <button id="relatoriosPrintProgramacaoButton" type="button" class="secondary">REIMPRIMIR PROGRAMAÇÃO</button>
+            <button id="relatoriosPrintPrestacaoButton" type="button" class="secondary">REIMPRIMIR PRESTAÇÃO</button>
+            <button id="relatoriosPrintRomaneiosButton" type="button" class="secondary">REIMPRIMIR ROMANEIOS</button>
+            <button id="relatoriosFinalizarButton" type="button" class="danger">FINALIZAR ROTA</button>
+            <button id="relatoriosReabrirButton" type="button" class="warning">REABRIR ROTA</button>
+          </div>
+
+          <div class="relatorios-options">
+            <label class="toggle-row">
+              <input id="relatoriosShowRecebimentos" type="checkbox" checked>
+              Recebimentos detalhados
+            </label>
+            <label class="toggle-row">
+              <input id="relatoriosShowDespesas" type="checkbox" checked>
+              Custos detalhados
+            </label>
+          </div>
+          <section id="relatoriosContextPanel" class="relatorios-context-panel"></section>
+        </section>
+
+        <section class="relatorios-dashboard-grid">
+          <section class="panel relatorios-kpi-panel">
+            <div class="panel-header">
+              <div>
+                <h2>Indicadores calculados</h2>
+                <p id="relatoriosStatus" class="panel-subtitle">-</p>
+              </div>
+            </div>
+            <section id="relatoriosMetrics" class="metric-grid relatorios-metrics"></section>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2 id="relatoriosChartTitle">Distribuicao visual</h2>
+                <p class="panel-subtitle">Compra, venda, despesas e resultado</p>
+              </div>
+            </div>
+            <div id="relatoriosChart" class="relatorios-chart"></div>
+          </section>
+        </section>
+
+        <section class="panel relatorios-data-panel">
+          <div class="panel-header">
+            <div>
+              <h2>Dados calculados</h2>
+              <p id="relatoriosTableInfo" class="panel-subtitle">Nenhum relatorio carregado.</p>
+            </div>
+            <label class="relatorios-table-search">
+              Filtrar tabela
+              <input id="relatoriosTableSearch" maxlength="80" placeholder="Digite para filtrar">
+            </label>
+          </div>
+          <div class="table-wrap">
+            <table class="wide-table relatorios-table">
+              <thead id="relatoriosTableHead"></thead>
+              <tbody id="relatoriosRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="relatoriosSectionsPanel" class="relatorios-sections"></section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Memorial do calculo</h2>
+          </div>
+          <div class="relatorios-text-wrap">
+            <pre id="relatoriosText" class="relatorios-text">Gere um resumo para visualizar.</pre>
+          </div>
+        </section>
+      </section>
+
+      <section id="backupView" class="view hidden">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Backup / Exportar</h2>
+              <p id="backupInfo" class="panel-subtitle">Backup do banco, restauracao e exportacao de pedidos.</p>
+            </div>
+            <button id="backupRefreshButton" type="button" class="secondary">ATUALIZAR</button>
+          </div>
+          <div class="backup-actions">
+            <button id="backupCreateButton" type="button" class="primary">FAZER BACKUP DO BANCO</button>
+            <button id="backupExportVendasButton" type="button" class="warning">EXPORTAR PEDIDOS IMPORTADOS</button>
+          </div>
+          <form id="backupRestoreForm" class="backup-restore-form">
+            <label>
+              Restaurar banco (.db)
+              <input id="backupRestoreFile" name="file" type="file" accept=".db">
+            </label>
+            <label class="toggle-row backup-confirm-row">
+              <input id="backupRestoreConfirm" type="checkbox">
+              Confirmo que a restauracao substitui o banco atual
+            </label>
+            <button type="submit" class="danger">RESTAURAR BANCO</button>
+          </form>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Backups disponiveis</h2>
+          </div>
+          <div class="table-wrap">
+            <table class="wide-table backup-table">
+              <thead>
+                <tr>
+                  <th>ARQUIVO</th>
+                  <th>TAMANHO KB</th>
+                  <th>DATA</th>
+                  <th>ACOES</th>
+                </tr>
+              </thead>
+              <tbody id="backupRows"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="ferramentasView" class="view hidden">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Ferramentas do Sistema</h2>
+              <p id="ferramentasInfo" class="panel-subtitle">Diagnostico, logs e integridade do banco.</p>
+            </div>
+            <button id="ferramentasRefreshButton" type="button" class="secondary">ATUALIZAR</button>
+          </div>
+          <div class="ferramentas-actions">
+            <button id="ferramentasBackupButton" type="button" class="primary">CRIAR BACKUP AGORA</button>
+            <button id="ferramentasIntegrityButton" type="button" class="primary">VERIFICAR INTEGRIDADE</button>
+            <label>
+              Limpar logs com mais de
+              <input id="ferramentasLogDays" type="number" min="1" max="3650" value="30">
+            </label>
+            <button id="ferramentasClearLogsButton" type="button" class="danger">LIMPAR LOGS</button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Valores de diarias</h2>
+              <p class="panel-subtitle">Padrao por rota usado quando o planejamento nao tiver valor manual preenchido.</p>
+            </div>
+          </div>
+          <form id="diariasConfigForm" class="diarias-config-form">
+            <label>
+              Serra - motorista
+              <input id="diariaSerraMotorista" inputmode="decimal" placeholder="0,00">
+            </label>
+            <label>
+              Serra - ajudante
+              <input id="diariaSerraAjudante" inputmode="decimal" placeholder="0,00">
+            </label>
+            <label>
+              Sertao - motorista
+              <input id="diariaSertaoMotorista" inputmode="decimal" placeholder="0,00">
+            </label>
+            <label>
+              Sertao - ajudante
+              <input id="diariaSertaoAjudante" inputmode="decimal" placeholder="0,00">
+            </label>
+            <button id="diariasConfigSaveButton" type="submit" class="primary">SALVAR DIARIAS</button>
+          </form>
+        </section>
+
+        <section id="logisticaConfigPanel" class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Perfil logistico da empresa</h2>
+              <p id="logisticaConfigInfo" class="panel-subtitle">Configure termos operacionais para carga, volumes, unidades, ocorrências e controles logísticos.</p>
+            </div>
+            <div class="actions">
+              <button id="logisticaNovoPerfilButton" type="button" class="secondary">NOVO PERFIL</button>
+              <button id="logisticaNovaUnidadeButton" type="button" class="secondary">NOVA UNIDADE</button>
+              <button id="logisticaNovaOcorrenciaButton" type="button" class="secondary">NOVA OCORRENCIA</button>
+              <button id="logisticaConfigSaveButton" type="button" class="primary">SALVAR PERFIL</button>
+            </div>
+          </div>
+          <form id="logisticaConfigForm" class="form-grid">
+            <label>
+              Perfil operacional
+              <select id="logisticaPerfilCodigo" name="perfil_codigo"></select>
+            </label>
+            <label>
+              Produto padrao
+              <input id="logisticaProdutoPadrao" name="produto_padrao" maxlength="120">
+            </label>
+            <label>
+              Unidade padrao
+              <select id="logisticaUnidadePadrao" name="unidade_padrao"></select>
+            </label>
+            <label>
+              Nome da embalagem
+              <input id="logisticaEmbalagemLabel" name="embalagem_label" maxlength="80">
+            </label>
+            <label>
+              Nome das ocorrências operacionais
+              <input id="logisticaPerdaLabel" name="perda_label" maxlength="80">
+            </label>
+            <label>
+              Qtd. por embalagem
+              <input id="logisticaQtdEmbalagemLabel" name="quantidade_embalagem_label" maxlength="80">
+            </label>
+            <label>
+              Usa ocorrências operacionais
+              <select id="logisticaUsaMortalidade" name="usa_mortalidade">
+                <option value="1">SIM</option>
+                <option value="0">NAO</option>
+              </select>
+            </label>
+            <label>
+              Usa qtd. por volume/embalagem
+              <select id="logisticaUsaAvesPorCaixa" name="usa_aves_por_caixa">
+                <option value="1">SIM</option>
+                <option value="0">NAO</option>
+              </select>
+            </label>
+            <label>
+              NF no app motorista
+              <select id="logisticaUsaNfMotorista" name="usa_nota_fiscal_motorista">
+                <option value="1">SIM</option>
+                <option value="0">NAO</option>
+              </select>
+            </label>
+            <label>
+              Estoque fisico
+              <select id="logisticaUsaEstoqueFisico" name="usa_estoque_fisico">
+                <option value="1">SIM</option>
+                <option value="0">NAO</option>
+              </select>
+            </label>
+            <label>
+              Estoque fiscal
+              <select id="logisticaUsaEstoqueFiscal" name="usa_estoque_fiscal">
+                <option value="1">SIM</option>
+                <option value="0">NAO</option>
+              </select>
+            </label>
+          </form>
+        </section>
+
+        <section id="ferramentasMetrics" class="metric-grid ferramentas-metrics"></section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Informacoes do sistema</h2>
+          </div>
+          <div id="ferramentasSystemInfo" class="ferramentas-info-grid"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Ultimas acoes</h2>
+          </div>
+          <div class="table-wrap">
+            <table class="wide-table ferramentas-log-table">
+              <thead>
+                <tr>
+                  <th>DESCRICAO</th>
+                  <th>TIPO</th>
+                  <th>USUARIO</th>
+                  <th>STATUS</th>
+                  <th>DATA/HORA</th>
+                  <th>RESULTADO</th>
+                </tr>
+              </thead>
+              <tbody id="ferramentasLogRows"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="permissoesView" class="view hidden">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Gerenciar Permissoes</h2>
+              <p id="permissoesInfo" class="panel-subtitle">Controle fino de acesso por usuario e modulo.</p>
+            </div>
+            <button id="permissoesRefreshButton" type="button" class="secondary">ATUALIZAR</button>
+          </div>
+          <div class="permissions-toolbar">
+            <label>
+              Modulo
+              <select id="permissoesModuloFilter">
+                <option value="">TODOS</option>
+              </select>
+            </label>
+            <label>
+              Perfil
+              <select id="permissoesPerfilSelect">
+                <option value="OPERADOR">OPERADOR</option>
+                <option value="GERENTE">GERENTE</option>
+                <option value="VISUALIZADOR">VISUALIZADOR</option>
+                <option value="ADMIN">ADMIN</option>
+              </select>
+            </label>
+            <button id="permissoesApplyPerfilButton" type="button" class="warning">APLICAR PERFIL</button>
+          </div>
+        </section>
+
+        <section class="permissions-layout">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Usuarios</h2>
+                <p id="permissoesSelectedUser" class="panel-subtitle">Selecione um usuario.</p>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table class="permissions-user-table">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>USUARIO</th>
+                    <th>PERFIL</th>
+                    <th>STATUS</th>
+                    <th>PERMISSOES</th>
+                    <th>ACAO</th>
+                  </tr>
+                </thead>
+                <tbody id="permissoesUserRows"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Disponiveis</h2>
+                <p class="panel-subtitle">Conceda permissao ao usuario selecionado.</p>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table class="permissions-table">
+                <thead>
+                  <tr>
+                    <th>MODULO</th>
+                    <th>PERMISSAO</th>
+                    <th>DESCRICAO</th>
+                    <th>STATUS</th>
+                    <th>ACAO</th>
+                  </tr>
+                </thead>
+                <tbody id="permissoesAvailableRows"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Permissoes concedidas</h2>
+              <p class="panel-subtitle">Permissoes atuais do usuario selecionado.</p>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="wide-table permissions-granted-table">
+              <thead>
+                <tr>
+                  <th>MODULO</th>
+                  <th>PERMISSAO</th>
+                  <th>DESCRICAO</th>
+                  <th>CONCEDIDA EM</th>
+                  <th>CONCEDIDA POR</th>
+                  <th>ACAO</th>
+                </tr>
+              </thead>
+              <tbody id="permissoesGrantedRows"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="billingView" class="view hidden">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Plano e Assinatura</h2>
+              <p id="billingInfo" class="panel-subtitle">Consulte o pacote atual e solicite alteração quando precisar ampliar ou reduzir a frota.</p>
+            </div>
+            <button id="billingRefreshButton" type="button" class="secondary">ATUALIZAR</button>
+          </div>
+          <div id="billingSummary" class="metric-grid billing-summary"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Pacotes disponíveis</h2>
+              <p class="panel-subtitle">A troca passa por aprovação do administrador RotaHub antes de alterar limites e módulos.</p>
+            </div>
+          </div>
+          <div id="billingPlans" class="billing-plans"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Solicitações enviadas</h2>
+              <p class="panel-subtitle">Acompanhe pedidos de upgrade, downgrade ou troca de pacote.</p>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="wide-table">
+              <thead>
+                <tr>
+                  <th>DATA</th>
+                  <th>TIPO</th>
+                  <th>PLANO ATUAL</th>
+                  <th>SOLICITADO</th>
+                  <th>STATUS</th>
+                  <th>OBSERVAÇÃO</th>
+                </tr>
+              </thead>
+              <tbody id="billingRequestRows"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="saasAdminView" class="view hidden">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Admin SaaS</h2>
+              <p id="saasAdminInfo" class="panel-subtitle">Empresas, planos, cobrancas e auditoria.</p>
+            </div>
+            <button id="saasAdminRefreshButton" type="button" class="secondary">ATUALIZAR</button>
+          </div>
+          <div class="saas-admin-toolbar">
+            <label>
+              Empresa
+              <select id="saasAdminCompanySelect"></select>
+            </label>
+            <button id="saasAdminStatusActiveButton" type="button" class="primary">ATIVAR</button>
+            <button id="saasAdminStatusSuspendedButton" type="button" class="warning">SUSPENDER</button>
+          </div>
+        </section>
+
+        <section id="saasAdminMetrics" class="metric-grid saas-admin-metrics"></section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Matriz de planos</h2>
+              <p class="panel-subtitle">Comparativo comercial por limite de frota, usuarios e modulos liberados.</p>
+            </div>
+          </div>
+          <div id="saasAdminPlanMatrix" class="saas-plan-matrix"></div>
+        </section>
+
+        <section class="saas-admin-layout">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Empresa e Plano</h2>
+                <p class="panel-subtitle">Alteracao de plano com as mesmas travas de limite.</p>
+              </div>
+            </div>
+            <form id="saasAdminPlanForm" class="saas-admin-plan-form">
+              <label>
+                Novo plano
+                <select id="saasAdminPlanSelect" name="plan_code"></select>
+              </label>
+              <label>
+                Motivo
+                <input id="saasAdminPlanReason" name="reason" maxlength="240">
+              </label>
+              <button type="submit" class="primary">APLICAR PLANO</button>
+            </form>
+            <div class="table-wrap">
+              <table class="saas-admin-usage-table">
+                <thead>
+                  <tr>
+                    <th>INDICADOR</th>
+                    <th>VALOR</th>
+                  </tr>
+                </thead>
+                <tbody id="saasAdminUsageRows"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Recursos do Plano</h2>
+                <p class="panel-subtitle">Flags habilitadas para a assinatura atual.</p>
+              </div>
+            </div>
+            <div id="saasAdminFeatures" class="saas-admin-features"></div>
+          </section>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Pagamentos</h2>
+              <p class="panel-subtitle">Criar cobranca e registrar pagamento manual.</p>
+            </div>
+            <div class="saas-admin-overdue">
+              <label>
+                Tolerancia
+                <input id="saasAdminOverdueDays" type="number" min="0" max="365" value="0">
+              </label>
+              <button id="saasAdminOverdueButton" type="button" class="warning">RODAR SUSPENSAO</button>
+            </div>
+          </div>
+          <form id="saasAdminPaymentForm" class="saas-admin-payment-form">
+            <label>
+              Valor
+              <input id="saasAdminPaymentAmount" name="amount" inputmode="decimal" required>
+            </label>
+            <label>
+              Vencimento
+              <input id="saasAdminPaymentDue" name="due_date" type="date">
+            </label>
+            <label>
+              Obs
+              <input id="saasAdminPaymentNotes" name="notes" maxlength="500">
+            </label>
+            <button type="submit" class="primary">CRIAR COBRANCA</button>
+          </form>
+          <div class="table-wrap">
+            <table class="wide-table saas-admin-payment-table">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>STATUS</th>
+                  <th>VALOR</th>
+                  <th>VENCIMENTO</th>
+                  <th>PAGO EM</th>
+                  <th>REFERENCIA</th>
+                  <th>OBS</th>
+                  <th>ACAO</th>
+                </tr>
+              </thead>
+              <tbody id="saasAdminPaymentRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Auditoria SaaS</h2>
+              <p class="panel-subtitle">Eventos administrativos da empresa selecionada.</p>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="wide-table saas-admin-audit-table">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>ACAO</th>
+                  <th>SEVERIDADE</th>
+                  <th>ENTIDADE</th>
+                  <th>DATA</th>
+                  <th>METADATA</th>
+                </tr>
+              </thead>
+              <tbody id="saasAdminAuditRows"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="moduleView" class="view hidden">
+        <section class="panel module-panel">
+          <div class="panel-header">
+            <div>
+              <h2 id="moduleTitle">Modulo</h2>
+              <p id="moduleStatus" class="panel-subtitle">Em migracao para web</p>
+            </div>
+          </div>
+          <div class="module-body">
+            <div class="module-note">
+              <strong>Funcao original do desktop</strong>
+              <p id="moduleDescription"></p>
+            </div>
+            <div class="module-note">
+              <strong>Status na web</strong>
+              <p id="moduleMigration"></p>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Funcoes desta rotina</h2>
+          </div>
+          <div id="moduleFeatureGrid" class="feature-grid"></div>
+        </section>
+      </section>
+
+      <section id="auditView" class="view hidden">
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Auditoria</h2>
+            <button type="button" class="secondary" data-action="refresh-audit">Atualizar</button>
+          </div>
+          <form id="auditFilterForm" class="filter-row">
+            <label>
+              Acao
+              <input name="action" placeholder="usuario_criado">
+            </label>
+            <label>
+              Entidade
+              <input name="entity_type" placeholder="user">
+            </label>
+            <label>
+              ID
+              <input name="entity_id" inputmode="numeric">
+            </label>
+            <button type="submit" class="primary">Filtrar</button>
+          </form>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Acao</th>
+                  <th>Severidade</th>
+                  <th>Entidade</th>
+                  <th>Autor</th>
+                  <th>IP</th>
+                  <th>Data</th>
+                  <th>Metadata</th>
+                </tr>
+              </thead>
+              <tbody id="auditRows"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="homeRouteDialog" class="modal wide-modal">
+    <div class="stack home-route-dialog-body">
+      <div class="modal-header">
+        <div>
+          <h2 id="homeRouteDialogTitle">Previa da rota</h2>
+          <p id="homeRouteDialogSubtitle" class="panel-subtitle">-</p>
+        </div>
+        <button type="button" class="icon-button" data-action="close-home-route-dialog" aria-label="Fechar">x</button>
+      </div>
+      <div id="homeRouteHeader" class="home-route-header"></div>
+      <div id="homeRouteSummary" class="home-info-grid"></div>
+      <div class="table-wrap">
+        <table class="wide-table">
+          <thead>
+            <tr>
+              <th>COD</th>
+              <th>CLIENTE</th>
+              <th>PEDIDO</th>
+              <th>CAIXAS</th>
+              <th>KG</th>
+              <th>PRECO</th>
+              <th>STATUS</th>
+              <th>GPS</th>
+              <th>RECEBIDO</th>
+              <th>RASTRO</th>
+            </tr>
+          </thead>
+          <tbody id="homeRoutePreviewRows"></tbody>
+        </table>
+      </div>
+      <div class="home-route-finance">
+        <section>
+          <strong>Recebimentos</strong>
+          <div id="homeRouteRecebimentos"></div>
+        </section>
+        <section>
+          <strong>Custos</strong>
+          <div id="homeRouteDespesas"></div>
+        </section>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="secondary" data-action="close-home-route-dialog">Fechar</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="progAjudantesDialog" class="modal">
+    <form method="dialog" class="stack">
+      <div class="modal-header">
+        <div>
+          <h2>Escolher ajudantes</h2>
+          <p id="progAjudantesDialogInfo" class="panel-subtitle">Selecione exatamente 2 ajudantes.</p>
+        </div>
+        <button type="button" class="icon-button" data-action="close-prog-ajudantes-dialog" aria-label="Fechar">x</button>
+      </div>
+      <div id="progAjudantesDialogList" class="ajudantes-picker-list"></div>
+      <div class="modal-actions">
+        <button type="button" class="secondary" data-action="close-prog-ajudantes-dialog">Cancelar</button>
+        <button id="progAjudantesApplyButton" type="button" class="primary">Aplicar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="homeTraceDialog" class="modal wide-modal">
+    <div class="stack home-trace-dialog-body">
+      <div class="modal-header">
+        <div>
+          <h2 id="homeTraceDialogTitle">Rastreabilidade do pedido</h2>
+          <p id="homeTraceDialogSubtitle" class="panel-subtitle">-</p>
+        </div>
+        <button type="button" class="icon-button" data-action="close-home-trace-dialog" aria-label="Fechar">x</button>
+      </div>
+      <div id="homeTraceSummary" class="home-info-grid"></div>
+      <div class="home-trace-grid">
+        <section class="home-trace-section">
+          <h3>Entrega / Comercial</h3>
+          <div id="homeTraceDelivery"></div>
+        </section>
+        <section class="home-trace-section">
+          <h3>Rastreabilidade</h3>
+          <div id="homeTraceTracking"></div>
+        </section>
+        <section class="home-trace-section">
+          <h3>Localizacao do cliente</h3>
+          <div id="homeTraceLocation"></div>
+        </section>
+        <section class="home-trace-section">
+          <h3>Checklist APP / Sincronia</h3>
+          <div id="homeTraceChecklist"></div>
+        </section>
+      </div>
+      <section class="home-trace-map-section">
+        <div class="home-trace-map-head">
+          <strong>Previa de localizacao da entrega</strong>
+          <a id="homeTraceMapLink" class="secondary home-trace-map-link hidden" href="#" target="_blank" rel="noopener">Abrir mapa</a>
+        </div>
+        <div id="homeTraceMapCard" class="home-trace-map-card"></div>
+      </section>
+      <div class="modal-actions">
+        <button type="button" class="secondary" data-action="close-home-trace-dialog">Fechar</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="userDialog" class="modal">
+    <form id="editUserForm" method="dialog" class="stack">
+      <div class="modal-header">
+        <h2>Editar usuario</h2>
+        <button type="button" class="icon-button" data-action="close-user-dialog" aria-label="Fechar">x</button>
+      </div>
+      <input name="id" type="hidden">
+      <label>
+        Usuario
+        <input name="username" required maxlength="80">
+      </label>
+      <label>
+        Nome
+        <input name="nome" required maxlength="120">
+      </label>
+      <label>
+        Nova senha
+        <input name="password" type="password" minlength="6" maxlength="128">
+      </label>
+      <label>
+        Perfil
+        <select name="permissoes">
+          <option value="OPERADOR">OPERADOR</option>
+          <option value="GERENTE">GERENTE</option>
+          <option value="VISUALIZADOR">VISUALIZADOR</option>
+          <option value="ADMIN">ADMIN</option>
+        </select>
+      </label>
+      <label>
+        CPF
+        <input name="cpf" maxlength="20">
+      </label>
+      <label>
+        Telefone
+        <input name="telefone" maxlength="30">
+      </label>
+      <label>
+        Idade
+        <input name="idade" type="number" min="0" max="130">
+      </label>
+      <label class="check-row">
+        <input name="is_active" type="checkbox">
+        Ativo
+      </label>
+      <div class="modal-actions">
+        <button type="button" class="secondary" data-action="close-user-dialog">Cancelar</button>
+        <button type="submit" class="primary">Salvar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="passwordDialog" class="modal">
+    <form id="passwordCadastroForm" method="dialog" class="stack">
+      <div class="modal-header">
+        <div>
+          <h2>Alterar senha</h2>
+          <p id="passwordCadastroLabel" class="panel-subtitle">-</p>
+        </div>
+        <button type="button" class="icon-button" data-action="close-password-dialog" aria-label="Fechar">x</button>
+      </div>
+      <label>
+        Nova senha
+        <input name="newPassword" type="password" autocomplete="new-password" required maxlength="128">
+      </label>
+      <label>
+        Confirmar
+        <input name="confirmPassword" type="password" autocomplete="new-password" required maxlength="128">
+      </label>
+      <div class="modal-actions">
+        <button type="button" class="secondary" data-action="close-password-dialog">Cancelar</button>
+        <button type="submit" class="primary">Salvar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="caixasBulkDialog" class="modal">
+    <form id="caixasBulkForm" method="dialog" class="stack">
+      <div class="modal-header">
+        <div>
+          <h2>Gerar lote de caixas</h2>
+          <p class="panel-subtitle">Cria caixas numeradas em sequencia para rastreio.</p>
+        </div>
+        <button type="button" class="icon-button" data-action="close-caixas-bulk-dialog" aria-label="Fechar">x</button>
+      </div>
+      <label>
+        Lote
+        <input name="lote" required maxlength="80" placeholder="LOTE-2026-05">
+      </label>
+      <label>
+        Cor
+        <input name="cor" required maxlength="60" placeholder="AZUL">
+      </label>
+      <label>
+        Quantidade
+        <input name="quantidade" type="number" min="1" max="5000" step="1" required value="100">
+      </label>
+      <label>
+        Prefixo
+        <input name="prefixo" required maxlength="40" value="CX">
+      </label>
+      <label>
+        Numero inicial
+        <input name="numero_inicial" type="number" min="1" step="1" required value="1">
+      </label>
+      <label>
+        Digitos
+        <input name="digitos" type="number" min="1" max="8" step="1" required value="4">
+      </label>
+      <label>
+        Veiculo vinculado
+        <input name="veiculo_placa" maxlength="20" placeholder="Opcional">
+      </label>
+      <label>
+        Status
+        <select name="status">
+          <option value="EM_ESTOQUE">EM_ESTOQUE</option>
+          <option value="VINCULADA">VINCULADA</option>
+          <option value="EM_USO">EM_USO</option>
+        </select>
+      </label>
+      <label>
+        Data compra
+        <input name="data_compra" type="date">
+      </label>
+      <label>
+        Observacao
+        <input name="observacao" maxlength="300" value="CRIACAO EM LOTE">
+      </label>
+      <div class="modal-actions">
+        <button type="button" class="secondary" data-action="close-caixas-bulk-dialog">Cancelar</button>
+        <button type="submit" class="primary">Gerar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="caixasMoveDialog" class="modal">
+    <form id="caixasMoveForm" method="dialog" class="stack">
+      <div class="modal-header">
+        <div>
+          <h2>Movimentar caixas</h2>
+          <p class="panel-subtitle">Transfere, devolve ao estoque, baixa ou marca caixas quebradas em lote.</p>
+        </div>
+        <button type="button" class="icon-button" data-action="close-caixas-move-dialog" aria-label="Fechar">x</button>
+      </div>
+      <label>
+        Quantidade
+        <input name="quantidade" type="number" min="1" max="5000" step="1" required value="1">
+      </label>
+      <label>
+        Lote
+        <input name="lote" maxlength="80" placeholder="Opcional">
+      </label>
+      <label>
+        Cor
+        <input name="cor" maxlength="60" placeholder="Opcional">
+      </label>
+      <label>
+        Veiculo origem
+        <input name="veiculo_origem" maxlength="20" placeholder="Opcional">
+      </label>
+      <label>
+        Status origem
+        <select name="status_origem">
+          <option value="TODOS">TODOS</option>
+          <option value="EM_ESTOQUE">EM_ESTOQUE</option>
+          <option value="VINCULADA">VINCULADA</option>
+          <option value="EM_USO">EM_USO</option>
+          <option value="QUEBRADA">QUEBRADA</option>
+          <option value="BAIXADA">BAIXADA</option>
+        </select>
+      </label>
+      <label>
+        Veiculo destino
+        <input name="veiculo_destino" maxlength="20" placeholder="Obrigatorio para VINCULADA/EM_USO">
+      </label>
+      <label>
+        Status destino
+        <select name="status_destino">
+          <option value="VINCULADA">VINCULADA</option>
+          <option value="EM_USO">EM_USO</option>
+          <option value="EM_ESTOQUE">EM_ESTOQUE</option>
+          <option value="QUEBRADA">QUEBRADA</option>
+          <option value="BAIXADA">BAIXADA</option>
+        </select>
+      </label>
+      <label>
+        Observacao
+        <input name="observacao" maxlength="300" placeholder="Ex.: transferencia, quebra, baixa">
+      </label>
+      <div class="modal-actions">
+        <button type="button" class="secondary" data-action="close-caixas-move-dialog">Cancelar</button>
+        <button type="submit" class="primary">Movimentar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="caixasHistoricoDialog" class="modal wide-modal">
+    <div class="modal-header">
+      <div>
+        <h2 id="caixasHistoricoTitle">Historico da caixa</h2>
+        <p id="caixasHistoricoSubtitle" class="panel-subtitle">-</p>
+      </div>
+      <button type="button" class="icon-button" data-action="close-caixas-historico-dialog" aria-label="Fechar">x</button>
+    </div>
+    <div class="caixas-historico-body">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>DATA/HORA</th>
+              <th>MOVIMENTO</th>
+              <th>VEICULO ORIGEM</th>
+              <th>VEICULO DESTINO</th>
+              <th>STATUS ORIGEM</th>
+              <th>STATUS DESTINO</th>
+              <th>OBSERVACAO</th>
+            </tr>
+          </thead>
+          <tbody id="caixasHistoricoRows"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="secondary" data-action="close-caixas-historico-dialog">Fechar</button>
+    </div>
+  </dialog>
+</body>
+</html>

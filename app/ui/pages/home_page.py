@@ -2240,7 +2240,7 @@ class HomePage(PageBase):
             ttk.Label(head, text=f"Pedido: {pedido or '-'}", font=("Segoe UI", 10, "bold")).grid(row=0, column=2, sticky="w")
             ttk.Label(head, text=f"Status: {status_pedido or '-'}", font=("Segoe UI", 10, "bold")).grid(row=0, column=3, sticky="w")
 
-            ttk.Label(head, text=f"Programação: {codigo}").grid(row=1, column=0, sticky="w")
+            ttk.Label(head, text=f"Planejamento: {codigo}").grid(row=1, column=0, sticky="w")
             ttk.Label(head, text=f"NF: {cabecalho_ctx.get('nf_numero') or '-'}").grid(row=1, column=1, sticky="w")
             ttk.Label(head, text=f"Motorista: {cabecalho_ctx.get('motorista') or '-'}").grid(row=1, column=2, sticky="w")
             ttk.Label(head, text=f"Veiculo: {cabecalho_ctx.get('veiculo') or '-'}").grid(row=1, column=3, sticky="w")
@@ -2278,7 +2278,7 @@ class HomePage(PageBase):
                 f"Valor origem: {_fmt_money(valor_orig)}",
                 f"Valor atual: {_fmt_money(valor_atual)}",
                 f"Recebido: {_fmt_money(recebido_valor)} | Forma: {forma_receb or '-'}",
-                f"Mortalidade (aves): {mortalidade}",
+                f"Ocorrencias (unid.): {mortalidade}",
             ]
             for i, t in enumerate(l_ent):
                 ttk.Label(grp_ent, text=t).grid(row=i, column=0, sticky="w", pady=1)

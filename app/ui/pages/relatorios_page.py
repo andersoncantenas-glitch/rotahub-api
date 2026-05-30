@@ -24,6 +24,7 @@ from app.db.connection import get_db
 from app.services.api_client import _call_api
 from app.context import AppContext
 from app.ui.components.page_base import PageBase
+from app.ui.components.tree_helpers import enable_treeview_sorting, tree_insert_aligned
 from app.utils.excel_helpers import (
     _require_openpyxl as require_openpyxl,
     require_pandas,
@@ -127,17 +128,18 @@ class RelatoriosPage(PageBase):
             filters_wrap,
             state="readonly",
             values=[
-                "Programacoes",
-                "Prestacao de Contas",
-                "Mortalidade Motorista",
+                "Detalhe Completo da Rota",
+                "Planejamentos",
+                "Fechamento Operacional",
+                "Ocorrencias por Motorista",
                 "Rotina Motorista/Ajudantes",
                 "KM de Veiculos",
-                "Despesas",
+                "Custos e Despesas",
             ],
             width=28,
         )
         self.cb_tipo_rel.grid(row=2, column=0, sticky="ew", padx=(0, 8))
-        self.cb_tipo_rel.set("Programacoes")
+        self.cb_tipo_rel.set("Detalhe Completo da Rota")
 
         ttk.Label(filters_wrap, text="Codigo", style="CardLabel.TLabel").grid(row=1, column=1, sticky="w", pady=(8, 0))
         self.ent_filtro_codigo = ttk.Entry(filters_wrap, style="Field.TEntry", width=16)
@@ -167,7 +169,7 @@ class RelatoriosPage(PageBase):
         ttk.Label(actions_wrap, text="Saida e controle", style="InsetTitle.TLabel").grid(
             row=0, column=0, columnspan=4, sticky="w"
         )
-        ttk.Label(actions_wrap, text="Programacao", style="CardLabel.TLabel").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(actions_wrap, text="Planejamento", style="CardLabel.TLabel").grid(row=1, column=0, sticky="w", pady=(8, 0))
         self.cb_prog = ttk.Combobox(actions_wrap, state="readonly")
         self.cb_prog.grid(row=2, column=0, sticky="ew", padx=(0, 8))
 
@@ -205,7 +207,7 @@ class RelatoriosPage(PageBase):
         ).pack(side="left", padx=(0, 10))
         ttk.Checkbutton(
             details_frame,
-            text="Despesas detalhadas",
+            text="Custos detalhados",
             variable=self.var_show_desp_detalhe,
             command=self._refresh_resumo_if_ready,
         ).pack(side="left")
@@ -266,8 +268,19 @@ class RelatoriosPage(PageBase):
         output_wrap.grid_columnconfigure(0, weight=1)
         output_wrap.grid_rowconfigure(0, weight=1)
 
+        self.nb_rel_output = ttk.Notebook(output_wrap)
+        self.nb_rel_output.grid(row=0, column=0, sticky="nsew")
+
+        self.tab_summary = ttk.Frame(self.nb_rel_output)
+        self.tab_details = ttk.Frame(self.nb_rel_output)
+        self.nb_rel_output.add(self.tab_summary, text="Resumo")
+        self.nb_rel_output.add(self.tab_details, text="Detalhes")
+
+        self.tab_summary.grid_columnconfigure(0, weight=1)
+        self.tab_summary.grid_rowconfigure(0, weight=1)
+
         self.txt = tk.Text(
-            output_wrap,
+            self.tab_summary,
             height=18,
             wrap="none",
             font=("Consolas", 10),
@@ -278,11 +291,166 @@ class RelatoriosPage(PageBase):
             pady=8,
         )
         self.txt.grid(row=0, column=0, sticky="nsew")
-        txt_vsb = ttk.Scrollbar(output_wrap, orient="vertical", command=self.txt.yview)
+        txt_vsb = ttk.Scrollbar(self.tab_summary, orient="vertical", command=self.txt.yview)
         txt_vsb.grid(row=0, column=1, sticky="ns")
-        txt_hsb = ttk.Scrollbar(output_wrap, orient="horizontal", command=self.txt.xview)
+        txt_hsb = ttk.Scrollbar(self.tab_summary, orient="horizontal", command=self.txt.xview)
         txt_hsb.grid(row=1, column=0, sticky="ew")
         self.txt.configure(yscrollcommand=txt_vsb.set, xscrollcommand=txt_hsb.set)
+
+        self.tab_details.grid_columnconfigure(0, weight=1)
+        self.tab_details.grid_rowconfigure(1, weight=1)
+
+        details_header = ttk.Frame(self.tab_details, style="CardInset.TFrame", padding=(10, 10))
+        details_header.grid(row=0, column=0, sticky="ew")
+        for idx in range(4):
+            details_header.grid_columnconfigure(idx, weight=1)
+
+        self.lbl_detail_clients = ttk.Label(details_header, text="Clientes: -", style="InsetStrong.TLabel")
+        self.lbl_detail_clients.grid(row=0, column=0, sticky="w")
+        self.lbl_detail_total = ttk.Label(details_header, text="Total estimado: R$ 0,00", style="InsetStrong.TLabel")
+        self.lbl_detail_total.grid(row=0, column=1, sticky="w")
+        self.lbl_detail_receb = ttk.Label(details_header, text="Recebimentos: R$ 0,00", style="InsetStrong.TLabel")
+        self.lbl_detail_receb.grid(row=0, column=2, sticky="w")
+        self.lbl_detail_desp = ttk.Label(details_header, text="Despesas: R$ 0,00", style="InsetStrong.TLabel")
+        self.lbl_detail_desp.grid(row=0, column=3, sticky="w")
+
+        details_notebook = ttk.Notebook(self.tab_details)
+        details_notebook.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+        details_notebook.grid_columnconfigure(0, weight=1)
+        details_notebook.grid_rowconfigure(0, weight=1)
+
+        clientes_tab = ttk.Frame(details_notebook)
+        recebimentos_tab = ttk.Frame(details_notebook)
+        despesas_tab = ttk.Frame(details_notebook)
+        resultados_tab = ttk.Frame(details_notebook)
+        operacional_tab = ttk.Frame(details_notebook)
+
+        details_notebook.add(clientes_tab, text="Clientes")
+        details_notebook.add(recebimentos_tab, text="Recebimentos")
+        details_notebook.add(despesas_tab, text="Despesas")
+        details_notebook.add(resultados_tab, text="Resultados")
+        details_notebook.add(operacional_tab, text="Operacional")
+
+        for tab in (clientes_tab, recebimentos_tab, despesas_tab, resultados_tab, operacional_tab):
+            tab.grid_columnconfigure(0, weight=1)
+            tab.grid_rowconfigure(0, weight=1)
+
+        self.tree_clientes = ttk.Treeview(
+            clientes_tab,
+            columns=("codigo", "cliente", "caixas", "kg", "preco", "vendedor", "pedido", "status", "mortalidade"),
+            show="headings",
+            height=10,
+        )
+        for col, title in [
+            ("codigo", "Codigo"),
+            ("cliente", "Cliente"),
+            ("caixas", "QTD CX"),
+            ("kg", "KG"),
+            ("preco", "Preco"),
+            ("vendedor", "Vendedor"),
+            ("pedido", "Pedido"),
+            ("status", "Status"),
+            ("mortalidade", "Mort."),
+        ]:
+            self.tree_clientes.heading(col, text=title)
+            self.tree_clientes.column(col, width=100, anchor="w")
+        self.tree_clientes.grid(row=0, column=0, sticky="nsew")
+        self._tree_clientes_vsb = ttk.Scrollbar(clientes_tab, orient="vertical", command=self.tree_clientes.yview)
+        self._tree_clientes_vsb.grid(row=0, column=1, sticky="ns")
+        self._tree_clientes_hsb = ttk.Scrollbar(clientes_tab, orient="horizontal", command=self.tree_clientes.xview)
+        self._tree_clientes_hsb.grid(row=1, column=0, sticky="ew")
+        self.tree_clientes.configure(yscrollcommand=self._tree_clientes_vsb.set, xscrollcommand=self._tree_clientes_hsb.set)
+
+        self.tree_recebimentos = ttk.Treeview(recebimentos_tab, columns=("data", "codigo", "cliente", "valor", "forma", "obs"), show="headings", height=10)
+        for col, title in [
+            ("data", "Data"),
+            ("codigo", "Codigo"),
+            ("cliente", "Cliente"),
+            ("valor", "Valor"),
+            ("forma", "Forma"),
+            ("obs", "Observacao"),
+        ]:
+            self.tree_recebimentos.heading(col, text=title)
+            self.tree_recebimentos.column(col, width=120, anchor="w")
+        self.tree_recebimentos.grid(row=0, column=0, sticky="nsew")
+        self._tree_receb_vsb = ttk.Scrollbar(recebimentos_tab, orient="vertical", command=self.tree_recebimentos.yview)
+        self._tree_receb_vsb.grid(row=0, column=1, sticky="ns")
+        self._tree_receb_hsb = ttk.Scrollbar(recebimentos_tab, orient="horizontal", command=self.tree_recebimentos.xview)
+        self._tree_receb_hsb.grid(row=1, column=0, sticky="ew")
+        self.tree_recebimentos.configure(yscrollcommand=self._tree_receb_vsb.set, xscrollcommand=self._tree_receb_hsb.set)
+
+        self.tree_despesas = ttk.Treeview(despesas_tab, columns=("data", "categoria", "descricao", "valor", "obs"), show="headings", height=10)
+        for col, title in [
+            ("data", "Data"),
+            ("categoria", "Categoria"),
+            ("descricao", "Descricao"),
+            ("valor", "Valor"),
+            ("obs", "Observacao"),
+        ]:
+            self.tree_despesas.heading(col, text=title)
+            self.tree_despesas.column(col, width=120, anchor="w")
+        self.tree_despesas.grid(row=0, column=0, sticky="nsew")
+        self._tree_desp_vsb = ttk.Scrollbar(despesas_tab, orient="vertical", command=self.tree_despesas.yview)
+        self._tree_desp_vsb.grid(row=0, column=1, sticky="ns")
+        self._tree_desp_hsb = ttk.Scrollbar(despesas_tab, orient="horizontal", command=self.tree_despesas.xview)
+        self._tree_desp_hsb.grid(row=1, column=0, sticky="ew")
+        self.tree_despesas.configure(yscrollcommand=self._tree_desp_vsb.set, xscrollcommand=self._tree_desp_hsb.set)
+
+        self.tree_resultados = ttk.Treeview(resultados_tab, columns=("grupo", "indicador", "valor", "observacao"), show="headings", height=10)
+        for col, title in [
+            ("grupo", "Grupo"),
+            ("indicador", "Indicador"),
+            ("valor", "Valor"),
+            ("observacao", "Observacao"),
+        ]:
+            self.tree_resultados.heading(col, text=title)
+            self.tree_resultados.column(col, width=160 if col != "observacao" else 260, anchor="w")
+        self.tree_resultados.grid(row=0, column=0, sticky="nsew")
+        self._tree_res_vsb = ttk.Scrollbar(resultados_tab, orient="vertical", command=self.tree_resultados.yview)
+        self._tree_res_vsb.grid(row=0, column=1, sticky="ns")
+        self._tree_res_hsb = ttk.Scrollbar(resultados_tab, orient="horizontal", command=self.tree_resultados.xview)
+        self._tree_res_hsb.grid(row=1, column=0, sticky="ew")
+        self.tree_resultados.configure(yscrollcommand=self._tree_res_vsb.set, xscrollcommand=self._tree_res_hsb.set)
+
+        operacional_scroll = ttk.Frame(operacional_tab)
+        operacional_scroll.grid(row=0, column=0, sticky="nsew")
+        operacional_scroll.grid_columnconfigure(0, weight=1)
+        operacional_scroll.grid_rowconfigure(0, weight=1)
+        self.operacional_text = tk.Text(
+            operacional_scroll,
+            wrap="word",
+            font=("Segoe UI", 10),
+            background="white",
+            relief="flat",
+            bd=0,
+            padx=8,
+            pady=8,
+            state="disabled",
+        )
+        self.operacional_text.grid(row=0, column=0, sticky="nsew")
+        operativo_vsb = ttk.Scrollbar(operacional_scroll, orient="vertical", command=self.operacional_text.yview)
+        operativo_vsb.grid(row=0, column=1, sticky="ns")
+        self.operacional_text.configure(yscrollcommand=operativo_vsb.set)
+
+        enable_treeview_sorting(
+            self.tree_clientes,
+            numeric_cols=("caixas", "kg", "preco"),
+            money_cols=("preco",),
+        )
+        enable_treeview_sorting(
+            self.tree_recebimentos,
+            money_cols=("valor",),
+            date_cols=("data",),
+        )
+        enable_treeview_sorting(
+            self.tree_despesas,
+            money_cols=("valor",),
+            date_cols=("data",),
+        )
+        enable_treeview_sorting(
+            self.tree_resultados,
+            money_cols=("valor",),
+        )
 
         self.cb_tipo_rel.bind("<<ComboboxSelected>>", lambda _e: self._buscar_programacoes_relatorio())
         self.cb_prog.bind("<<ComboboxSelected>>", lambda _e: self._refresh_resumo_if_ready())
@@ -368,13 +536,13 @@ class RelatoriosPage(PageBase):
 
     def _tipo_exige_programacao(self) -> bool:
         tipo = upper(self.cb_tipo_rel.get().strip())
-        return tipo in ("PROGRAMACOES", "PRESTACAO DE CONTAS")
+        return tipo in ("PROGRAMACOES", "PLANEJAMENTOS", "PRESTACAO DE CONTAS", "FECHAMENTO OPERACIONAL", "DETALHE COMPLETO DA ROTA")
 
     def refresh_comboboxes(self):
         self._buscar_programacoes_relatorio()
 
     def _limpar_filtros_relatorio(self):
-        self.cb_tipo_rel.set("Programacoes")
+        self.cb_tipo_rel.set("Detalhe Completo da Rota")
         self.ent_filtro_codigo.delete(0, "end")
         self.ent_filtro_motorista.delete(0, "end")
         self.ent_filtro_data.delete(0, "end")
@@ -398,7 +566,7 @@ class RelatoriosPage(PageBase):
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
         if desktop_secret and self.is_desktop_api_sync_enabled():
             try:
-                modo = "finalizadas_prestacao" if "PRESTACAO" in tipo_rel else "todas"
+                modo = "finalizadas_prestacao" if ("PRESTACAO" in tipo_rel or "FECHAMENTO" in tipo_rel) else "todas"
                 resp = _call_api(
                     "GET",
                     f"desktop/programacoes?modo={urllib.parse.quote(modo)}&limit=400",
@@ -427,7 +595,7 @@ class RelatoriosPage(PageBase):
                 self.cb_prog["values"] = encontrados
                 if atual not in encontrados:
                     self.cb_prog.set("")
-                self.set_status(f"STATUS: {len(encontrados)} programacoes encontradas para {self.cb_tipo_rel.get()}.")
+                self.set_status(f"STATUS: {len(encontrados)} planejamentos encontrados para {self.cb_tipo_rel.get()}.")
                 return
             except Exception:
                 logging.debug("Falha ao buscar programacoes de relatorio via API", exc_info=True)
@@ -459,7 +627,7 @@ class RelatoriosPage(PageBase):
                                 params.append(f"%{pat}%")
                         sql += " AND (" + " OR ".join(clauses) + ")"
 
-                if "PRESTACAO" in tipo_rel:
+                if "PRESTACAO" in tipo_rel or "FECHAMENTO" in tipo_rel:
                     if "prestacao_status" in cols:
                         sql += " AND (UPPER(COALESCE(prestacao_status,'')) IN ('PENDENTE','FECHADA') OR UPPER(COALESCE(status,''))='FINALIZADA')"
                     elif "status" in cols:
@@ -490,7 +658,7 @@ class RelatoriosPage(PageBase):
             if atual not in encontrados:
                 self.cb_prog.set("")
 
-        self.set_status(f"STATUS: {len(encontrados)} programacoes encontradas para {self.cb_tipo_rel.get()}.")
+        self.set_status(f"STATUS: {len(encontrados)} planejamentos encontrados para {self.cb_tipo_rel.get()}.")
 
     def _refresh_resumo_if_ready(self):
         try:
@@ -519,6 +687,7 @@ class RelatoriosPage(PageBase):
             clientes = resp.get("clientes") if isinstance(resp, dict) else []
             receb = resp.get("recebimentos") if isinstance(resp, dict) else []
             desp = resp.get("despesas") if isinstance(resp, dict) else []
+            logistica = resp.get("logistica") if isinstance(resp, dict) else {}
             if not isinstance(rota, dict):
                 self._last_bundle_api_state = "not_found"
                 return None
@@ -528,6 +697,7 @@ class RelatoriosPage(PageBase):
                 "clientes": clientes if isinstance(clientes, list) else [],
                 "recebimentos": receb if isinstance(receb, list) else [],
                 "despesas": desp if isinstance(desp, list) else [],
+                "logistica": logistica if isinstance(logistica, dict) else {},
             }
         except Exception:
             self._last_bundle_api_state = "failed"
@@ -684,6 +854,94 @@ class RelatoriosPage(PageBase):
         self.lbl_kpi_4.config(text=k4)
         self._draw_chart(labels or [], values or [], color=color)
 
+    def _format_money_detail(self, value):
+        return f"R$ {safe_float(value, 0.0):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+    def _clear_relatorio_details(self):
+        try:
+            for tree in (self.tree_clientes, self.tree_recebimentos, self.tree_despesas, self.tree_resultados):
+                for iid in tree.get_children(""):
+                    tree.delete(iid)
+        except Exception:
+            logging.debug("Falha ao limpar detalhes de relatorio", exc_info=True)
+        self.lbl_detail_clients.config(text="Clientes: -")
+        self.lbl_detail_total.config(text="Total estimado: R$ 0,00")
+        self.lbl_detail_receb.config(text="Recebimentos: R$ 0,00")
+        self.lbl_detail_desp.config(text="Despesas: R$ 0,00")
+        self.operacional_text.configure(state="normal")
+        self.operacional_text.delete("1.0", "end")
+        self.operacional_text.insert("end", "Nenhum dado operacional disponível. Gere o relatório para ver os detalhes.")
+        self.operacional_text.configure(state="disabled")
+
+    def _populate_relatorio_details(self, clientes, recebimentos, despesas, metrics, operacional_text, resultados=None):
+        self._clear_relatorio_details()
+        self.lbl_detail_clients.config(text=f"Clientes: {metrics.get('clientes', 0)}")
+        self.lbl_detail_total.config(text=f"Total estimado: {self._format_money_detail(metrics.get('total_estimado', 0.0))}")
+        self.lbl_detail_receb.config(text=f"Recebimentos: {self._format_money_detail(metrics.get('recebimentos', 0.0))}")
+        self.lbl_detail_desp.config(text=f"Despesas: {self._format_money_detail(metrics.get('despesas', 0.0))}")
+
+        try:
+            for row in clientes:
+                cod_cli, nome_cli, caixas, kg, preco, vendedor, pedido, status, *extra = tuple(row)
+                mortalidade = extra[0] if extra else ""
+                tree_insert_aligned(
+                    self.tree_clientes,
+                    "",
+                    "end",
+                    (
+                        cod_cli,
+                        nome_cli,
+                        str(caixas or ""),
+                        f"{safe_float(kg, 0.0):.2f}" if kg not in (None, "") else "",
+                        self._format_money_detail(preco),
+                        vendedor,
+                        pedido,
+                        status,
+                        str(mortalidade or ""),
+                    ),
+                )
+        except Exception:
+            logging.debug("Falha ao popular tabela de clientes", exc_info=True)
+
+        try:
+            for data_reg, cod_cli, nome_cli, valor, forma, obs in recebimentos:
+                tree_insert_aligned(
+                    self.tree_recebimentos,
+                    "",
+                    "end",
+                    (data_reg or "", cod_cli or "", nome_cli or "", self._format_money_detail(valor), forma or "", obs or ""),
+                )
+        except Exception:
+            logging.debug("Falha ao popular tabela de recebimentos", exc_info=True)
+
+        try:
+            for data_reg, categoria, descricao, valor, obs in despesas:
+                tree_insert_aligned(
+                    self.tree_despesas,
+                    "",
+                    "end",
+                    (data_reg or "", categoria or "OUTROS", descricao or "", self._format_money_detail(valor), obs or ""),
+                )
+        except Exception:
+            logging.debug("Falha ao popular tabela de despesas", exc_info=True)
+
+        try:
+            for grupo, indicador, valor, obs in (resultados or []):
+                valor_txt = self._format_money_detail(valor) if isinstance(valor, (int, float)) else str(valor or "")
+                tree_insert_aligned(
+                    self.tree_resultados,
+                    "",
+                    "end",
+                    (grupo or "", indicador or "", valor_txt, obs or ""),
+                )
+        except Exception:
+            logging.debug("Falha ao popular tabela de resultados", exc_info=True)
+
+        self.operacional_text.configure(state="normal")
+        self.operacional_text.delete("1.0", "end")
+        self.operacional_text.insert("end", operacional_text or "Nenhum dado operacional disponível.")
+        self.operacional_text.configure(state="disabled")
+
     def _bind_date_mask_relatorio(self, ent: tk.Entry):
         digits_state = {"value": ""}
 
@@ -745,15 +1003,102 @@ class RelatoriosPage(PageBase):
         ent.bind("<KeyRelease>", lambda _e: _apply_mask())
         ent.bind("<FocusOut>", lambda _e: (_apply_mask(), _on_focus_out()))
 
+    def _rel_dict_val(self, row, *names, default=""):
+        if not isinstance(row, dict):
+            return default
+        for name in names:
+            if name in row and row.get(name) not in (None, ""):
+                return row.get(name)
+        return default
+
+    def _rel_item_caixas(self, row):
+        return safe_float(self._rel_dict_val(row, "caixas_atual", "qnt_caixas", "caixas", default=0), 0.0)
+
+    def _rel_item_preco(self, row):
+        value = self._rel_dict_val(row, "preco_atual", "preco", "valor_unitario", default=0)
+        vv = safe_float(value, 0.0)
+        if abs(vv) >= 100 and abs(vv - round(vv)) < 1e-9:
+            return vv / 100.0
+        return vv
+
+    def _rel_item_valor_total(self, row):
+        preco = self._rel_item_preco(row)
+        caixas = self._rel_item_caixas(row)
+        kg = safe_float(self._rel_dict_val(row, "kg", "peso_previsto", default=0), 0.0)
+        if caixas > 0 and 0 < preco < 1000:
+            return caixas * preco
+        if kg > 0 and 0 < preco < 1000:
+            return kg * preco
+        return preco
+
+    def _classificar_despesa_rota(self, categoria, descricao):
+        txt = upper(f"{categoria or ''} {descricao or ''}")
+        veiculo_tokens = (
+            "COMBUST", "DIESEL", "GASOL", "ALCOOL", "ETANOL", "ARLA",
+            "OLEO", "PNEU", "BORRACH", "MECAN", "MANUT", "OFICINA",
+            "LAVAGEM", "ESTACION", "PEDAGIO", "IPVA", "MULTA",
+        )
+        if any(t in txt for t in veiculo_tokens):
+            return "VEICULO"
+        return "ROTA"
+
+    def _format_quant(self, value, suffix=""):
+        vv = safe_float(value, 0.0)
+        if abs(vv - round(vv)) < 0.000001:
+            return f"{int(round(vv))}{suffix}"
+        return f"{vv:.2f}{suffix}"
+
+    def _fetch_vendas_importadas_relatorio(self, prog: str):
+        prog = upper(str(prog or "").strip())
+        if not prog:
+            return []
+        desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
+        if desktop_secret and self.is_desktop_api_sync_enabled():
+            try:
+                resp = _call_api(
+                    "GET",
+                    f"desktop/vendas-importadas?codigo_programacao={urllib.parse.quote(prog)}&limit=20000",
+                    extra_headers={"X-Desktop-Secret": desktop_secret},
+                )
+                rows = resp.get("rows") if isinstance(resp, dict) else []
+                return [dict(r) for r in rows if isinstance(r, dict)]
+            except Exception:
+                logging.debug("Falha ao buscar vendas importadas vinculadas via API", exc_info=True)
+        try:
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='vendas_importadas'")
+                if not cur.fetchone():
+                    return []
+                cols = {str(c[1]).lower() for c in (cur.execute("PRAGMA table_info(vendas_importadas)").fetchall() or [])}
+                wanted = [
+                    c for c in (
+                        "pedido", "data_venda", "cliente", "nome_cliente", "vendedor", "produto",
+                        "vr_total", "qnt", "cidade", "valor_unitario", "observacao", "codigo_programacao",
+                    )
+                    if c in cols
+                ]
+                if not wanted or "codigo_programacao" not in cols:
+                    return []
+                cur.execute(
+                    f"SELECT {', '.join(wanted)} FROM vendas_importadas WHERE UPPER(COALESCE(codigo_programacao,''))=UPPER(?) ORDER BY id DESC",
+                    (prog,),
+                )
+                fetched = cur.fetchall() or []
+                return [dict(zip(wanted, r)) for r in fetched]
+        except Exception:
+            logging.debug("Falha ao buscar vendas importadas vinculadas localmente", exc_info=True)
+            return []
+
     def on_show(self):
         self.refresh_comboboxes()
         self.set_status("STATUS: Relatórios e exportação.")
 
-    def abrir_previsualizacao_relatorio(self):
+    def abrir_previsualizacao_relatorio(self, on_close=None):
         tipo_rel = upper(self.cb_tipo_rel.get().strip())
         prog = upper(self.cb_prog.get().strip())
         if self._tipo_exige_programacao() and not prog:
-            messagebox.showwarning("ATENCAO", "Selecione uma programacao para visualizar.")
+            messagebox.showwarning("ATENCAO", "Selecione um planejamento para visualizar.")
             return
         self.gerar_resumo()
         txt = self.txt.get("1.0", "end").strip()
@@ -761,6 +1106,23 @@ class RelatoriosPage(PageBase):
         top.title(f"Pré-visualização - {self.cb_tipo_rel.get()}")
         top.geometry("1180x760")
         top.minsize(900, 600)
+        close_state = {"done": False}
+
+        def _close_preview():
+            if close_state["done"]:
+                return
+            close_state["done"] = True
+            try:
+                top.destroy()
+            except Exception:
+                logging.debug("Falha ignorada")
+            if callable(on_close):
+                try:
+                    self.after(80, on_close)
+                except Exception:
+                    logging.debug("Falha ao executar callback da pre-visualizacao", exc_info=True)
+
+        top.protocol("WM_DELETE_WINDOW", _close_preview)
         toolbar = ttk.Frame(top, padding=(8, 8, 8, 0))
         toolbar.pack(fill="x")
         nb = ttk.Notebook(top)
@@ -798,12 +1160,12 @@ class RelatoriosPage(PageBase):
         cb_zoom.bind("<<ComboboxSelected>>", lambda _e: _set_zoom(cb_zoom.get()))
         ttk.Button(toolbar, text="+", width=3, command=lambda: _set_zoom(preview_zoom.get() + 10)).pack(side="left")
         ttk.Label(toolbar, text="%", style="CardLabel.TLabel").pack(side="left", padx=(2, 0))
-        ttk.Button(toolbar, text="Fechar", style="Ghost.TButton", command=top.destroy).pack(side="right")
+        ttk.Button(toolbar, text="Fechar", style="Ghost.TButton", command=_close_preview).pack(side="right")
 
-        if "PROGRAMACOES" in tipo_rel and prog:
+        if ("PROGRAMACOES" in tipo_rel or "PLANEJAMENTOS" in tipo_rel) and prog:
             self._create_programacao_canvas_preview_tab(nb, prog, preview_zoom, preview_mode)
 
-        if "PRESTACAO" in tipo_rel and prog:
+        if ("PRESTACAO" in tipo_rel or "FECHAMENTO" in tipo_rel) and prog:
             self._create_a4_preview_tab(nb, "Folha Prestação", self._build_preview_folha_prestacao(prog))
             self._create_a4_preview_tab(nb, "Folha Retorno", self.build_folha_retorno_operacional(prog))
 
@@ -814,7 +1176,7 @@ class RelatoriosPage(PageBase):
         t.insert("1.0", txt)
         t.configure(state="disabled")
 
-        if "PRESTACAO" in tipo_rel and prog:
+        if ("PRESTACAO" in tipo_rel or "FECHAMENTO" in tipo_rel) and prog:
             desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
             api_enabled = bool(desktop_secret and self.is_desktop_api_sync_enabled())
             bundle = self._api_bundle_relatorio(prog)
@@ -953,6 +1315,11 @@ class RelatoriosPage(PageBase):
         programacao_page = None
         if hasattr(self, "app") and hasattr(self.app, "pages"):
             programacao_page = self.app.pages.get("Programacao")
+            if programacao_page is None and hasattr(self.app, "_create_page_if_needed"):
+                try:
+                    programacao_page = self.app._create_page_if_needed("Programacao")
+                except Exception:
+                    logging.debug("Falha ao criar pagina Programacao para reimpressao.", exc_info=True)
 
         meta = {}
         if programacao_page and hasattr(programacao_page, "_buscar_meta_programacao"):
@@ -972,7 +1339,9 @@ class RelatoriosPage(PageBase):
                     "nome_cliente": upper(item.get("nome_cliente", "")),
                     "endereco": upper(item.get("endereco", "")),
                     "qnt_caixas": safe_int(item.get("caixas_atual"), safe_int(item.get("qnt_caixas"), 0)),
+                    "kg": safe_float(item.get("kg"), 0.0),
                     "preco": safe_float(item.get("preco_atual"), safe_float(item.get("preco"), 0.0)),
+                    "produto": upper(item.get("produto", "")),
                     "vendedor": upper(item.get("vendedor", "")),
                     "pedido": upper(item.get("pedido", "")),
                     "obs": str(item.get("obs") or item.get("alteracao_detalhe") or "").strip(),
@@ -1012,6 +1381,9 @@ class RelatoriosPage(PageBase):
         usuario_criacao = upper(meta.get("usuario_criacao") or "-")
         usuario_edicao = upper(meta.get("usuario_ultima_edicao") or "-")
         tipo_estimativa = upper(meta.get("tipo_estimativa") or "KG")
+        operacao_tipo = upper(meta.get("operacao_tipo") or ("TRANSBORDO" if tipo_estimativa == "CX" else "VENDA"))
+        transbordo_modalidade = upper(meta.get("transbordo_modalidade") or "")
+        transbordo_grupo = upper(meta.get("transbordo_grupo") or "")
         kg_estimado = safe_float(meta.get("kg_estimado"), 0.0)
         caixas_estimado = safe_int(meta.get("caixas_estimado"), 0)
         local_rota = _format_local_rota_display(meta.get("local_rota") or meta.get("tipo_rota") or meta.get("local") or "")
@@ -1107,16 +1479,22 @@ class RelatoriosPage(PageBase):
                 anchor="w",
                 font=("Segoe UI", 11),
             )
-            canvas.create_text(px(0.10), py(0.21), text=estimado_txt, anchor="w", font=("Segoe UI", 11))
+            op_txt = f"Operacao: {operacao_tipo or '-'}"
+            if transbordo_modalidade:
+                op_txt += f"  |  Modalidade: {transbordo_modalidade}"
+            if transbordo_grupo:
+                op_txt += f"  |  Grupo: {transbordo_grupo}"
+            canvas.create_text(px(0.10), py(0.21), text=op_txt, anchor="w", font=("Segoe UI", 11))
+            canvas.create_text(px(0.10), py(0.24), text=estimado_txt, anchor="w", font=("Segoe UI", 11))
             canvas.create_text(
                 px(0.10),
-                py(0.24),
+                py(0.27),
                 text=f"Criado por: {usuario_criacao}  |  Ultima edicao: {usuario_edicao}",
                 anchor="w",
                 font=("Segoe UI", 11),
             )
 
-            header_y = py(0.30)
+            header_y = py(0.32)
             x_cliente = ppdf(left_margin)
             x_cx = ppdf(col_cx_pdf)
             x_preco = ppdf(col_preco_pdf)
@@ -1129,10 +1507,10 @@ class RelatoriosPage(PageBase):
             canvas.create_text(ppdf(470), header_y, text="VENDEDOR", anchor="center", font=("Segoe UI", 10, "bold"))
             canvas.create_text(ppdf(548), header_y, text="PEDIDO", anchor="center", font=("Segoe UI", 10, "bold"))
 
-            line_y = py(0.315)
+            line_y = py(0.335)
             canvas.create_line(ppdf(40), line_y, ppdf(555), line_y, fill="#222")
 
-            y = py(0.345)
+            y = py(0.365)
             row_gap = page_h * 0.060
             max_rows = 10
             for idx, item in enumerate(itens[:max_rows]):
@@ -1178,7 +1556,7 @@ class RelatoriosPage(PageBase):
         if not self.require_reportlab():
             return
         if not prog:
-            messagebox.showwarning("ATENCAO", "Selecione uma programacao.")
+            messagebox.showwarning("ATENCAO", "Selecione um planejamento.")
             return
 
         page, meta, itens = self._collect_programacao_payload(prog)
@@ -1196,11 +1574,6 @@ class RelatoriosPage(PageBase):
             return
 
         try:
-            c = canvas.Canvas(path, pagesize=A4)
-            w, h = A4
-            y = h - 60
-            to_txt = lambda v: fix_mojibake_text(str(v or ""))
-
             motorista = upper(meta.get("motorista") or "")
             veiculo = upper(meta.get("veiculo") or "")
             equipe_raw = str(meta.get("equipe") or "")
@@ -1226,6 +1599,46 @@ class RelatoriosPage(PageBase):
             )
             usuario_criacao = upper(meta.get("usuario_criacao") or "")
             usuario_edicao = upper(meta.get("usuario_ultima_edicao") or "")
+            reprint_info = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+            if page and hasattr(page, "_gerar_pdf_programacao_salva_em_path"):
+                itens_override = [
+                    (
+                        item.get("cod_cliente", ""),
+                        item.get("nome_cliente", ""),
+                        item.get("produto", ""),
+                        item.get("endereco", ""),
+                        item.get("qnt_caixas", 0),
+                        item.get("kg", 0.0),
+                        item.get("preco", 0.0),
+                        item.get("vendedor", ""),
+                        item.get("pedido", ""),
+                        item.get("obs", ""),
+                    )
+                    for item in itens
+                ]
+                page._gerar_pdf_programacao_salva_em_path(
+                    path,
+                    prog,
+                    motorista,
+                    veiculo,
+                    equipe_raw,
+                    kg_estimado,
+                    tipo_estimativa,
+                    caixas_estimado,
+                    usuario_criacao,
+                    itens_override=itens_override,
+                    usuario_edicao_override=usuario_edicao,
+                    reimpressao=True,
+                    reimpressao_info=reprint_info,
+                )
+                messagebox.showinfo("OK", "PDF de reimpressao gerado com sucesso! (A4 pronto para impressao)")
+                return
+
+            c = canvas.Canvas(path, pagesize=A4)
+            w, h = A4
+            y = h - 60
+            to_txt = lambda v: fix_mojibake_text(str(v or ""))
 
             c.setFont("Helvetica-Bold", 14)
             c.drawString(40, y, f"PROGRAMACAO: {to_txt(prog)}")
@@ -1234,6 +1647,10 @@ class RelatoriosPage(PageBase):
             c.setFont("Helvetica", 10)
             c.drawString(40, y, f"Data: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
             y -= 16
+            c.setFont("Helvetica-Bold", 9)
+            c.drawString(40, y, f"REIMPRESSAO - gerada em {reprint_info}")
+            y -= 14
+            c.setFont("Helvetica", 10)
             c.drawString(40, y, f"Motorista: {to_txt(motorista)}  |  Veiculo: {to_txt(veiculo)}  |  Equipe: {to_txt(equipe_txt)}")
             y -= 16
             c.drawString(40, y, f"Local da Rota: {to_txt(local_rota or '-')}  |  Carregamento: {to_txt(local_carregamento or '-')}")
@@ -1420,6 +1837,17 @@ class RelatoriosPage(PageBase):
                 kg_expr = "COALESCE(kg_estimado,0)" if "kg_estimado" in cols_p else "0"
                 status_expr = "COALESCE(status,'')" if "status" in cols_p else "''"
                 tipo_estim_expr = "COALESCE(tipo_estimativa,'KG')" if "tipo_estimativa" in cols_p else "'KG'"
+                operacao_expr = (
+                    "COALESCE(operacao_tipo, CASE WHEN UPPER(COALESCE(tipo_estimativa,''))='CX' THEN 'TRANSBORDO' ELSE 'VENDA' END)"
+                    if "operacao_tipo" in cols_p and "tipo_estimativa" in cols_p
+                    else (
+                        "COALESCE(operacao_tipo,'VENDA')"
+                        if "operacao_tipo" in cols_p
+                        else ("CASE WHEN UPPER(COALESCE(tipo_estimativa,''))='CX' THEN 'TRANSBORDO' ELSE 'VENDA' END" if "tipo_estimativa" in cols_p else "'VENDA'")
+                    )
+                )
+                transb_modal_expr = "COALESCE(transbordo_modalidade,'')" if "transbordo_modalidade" in cols_p else "''"
+                transb_grupo_expr = "COALESCE(transbordo_grupo,'')" if "transbordo_grupo" in cols_p else "''"
                 caixas_estim_expr = "COALESCE(caixas_estimado,0)" if "caixas_estimado" in cols_p else "0"
                 user_criacao_expr = "COALESCE(usuario_criacao,'')" if "usuario_criacao" in cols_p else "''"
                 user_edicao_expr = "COALESCE(usuario_ultima_edicao,'')" if "usuario_ultima_edicao" in cols_p else "''"
@@ -1427,12 +1855,13 @@ class RelatoriosPage(PageBase):
                 cur.execute(f"""
                     SELECT COALESCE(data_criacao,''), COALESCE(motorista,''), COALESCE(veiculo,''),
                            COALESCE(equipe,''), {kg_expr}, {status_expr}, {local_expr},
-                           {local_carreg_expr}, {tipo_estim_expr}, {caixas_estim_expr}, {user_criacao_expr}, {user_edicao_expr}
+                           {local_carreg_expr}, {tipo_estim_expr}, {caixas_estim_expr}, {user_criacao_expr}, {user_edicao_expr},
+                           {operacao_expr}, {transb_modal_expr}, {transb_grupo_expr}
                     FROM programacoes
                     WHERE codigo_programacao=?
                     LIMIT 1
                 """, (prog,))
-                meta = cur.fetchone() or ("", "", "", "", 0, "", "", "", "KG", 0, "", "")
+                meta = cur.fetchone() or ("", "", "", "", 0, "", "", "", "KG", 0, "", "", "VENDA", "", "")
 
                 cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='programacao_itens'")
                 if cur.fetchone():
@@ -1462,10 +1891,29 @@ class RelatoriosPage(PageBase):
                 + "Verifique a estrutura do banco e tente novamente."
             )
 
-        data_criacao, motorista, veiculo, equipe, kg_estimado, status, local, local_carreg, tipo_estimativa, caixas_estimado, usuario_criacao, usuario_edicao = meta
+        (
+            data_criacao,
+            motorista,
+            veiculo,
+            equipe,
+            kg_estimado,
+            status,
+            local,
+            local_carreg,
+            tipo_estimativa,
+            caixas_estimado,
+            usuario_criacao,
+            usuario_edicao,
+            operacao_tipo,
+            transbordo_modalidade,
+            transbordo_grupo,
+        ) = meta
         equipe_txt = self.resolve_equipe_nomes(equipe)
         total_prev = sum(safe_float(r[2], 0.0) for r in itens)
         tipo_estimativa = upper(tipo_estimativa or "KG")
+        operacao_tipo = upper(operacao_tipo or ("TRANSBORDO" if tipo_estimativa == "CX" else "VENDA"))
+        transbordo_modalidade = upper(transbordo_modalidade or "")
+        transbordo_grupo = upper(transbordo_grupo or "")
         if tipo_estimativa == "CX":
             estimativa_txt = f"FOB / CX ESTIMADO: {safe_int(caixas_estimado, 0)}"
         else:
@@ -1480,6 +1928,12 @@ class RelatoriosPage(PageBase):
             f"LOCAL DA ROTA: {_format_local_rota_display(local) or '-'}   "
             f"CARREGAMENTO: {upper(fix_mojibake_text(local_carreg)) or '-'}"
         )
+        op_line = f"OPERACAO: {operacao_tipo or '-'}"
+        if transbordo_modalidade:
+            op_line += f"   MODALIDADE: {transbordo_modalidade}"
+        if transbordo_grupo:
+            op_line += f"   GRUPO: {transbordo_grupo}"
+        lines.append(op_line)
         lines.append(f"EQUIPE: {equipe_txt or '-'}")
         lines.append(
             f"{estimativa_txt}   CLIENTES: {len(itens)}   TOTAL ESTIMADO: {self._fmt_rel_money(total_prev)}"
@@ -1521,6 +1975,10 @@ class RelatoriosPage(PageBase):
                 equipe = str(rota.get("equipe") or "")
                 status = str(rota.get("status") or "")
                 prest = str(rota.get("prestacao_status") or "PENDENTE")
+                tipo_estimativa = upper(str(rota.get("tipo_estimativa") or "KG"))
+                operacao_tipo = upper(str(rota.get("operacao_tipo") or ("TRANSBORDO" if tipo_estimativa == "CX" else "VENDA")))
+                transbordo_modalidade = upper(str(rota.get("transbordo_modalidade") or ""))
+                transbordo_grupo = upper(str(rota.get("transbordo_grupo") or ""))
                 local_rota = str(rota.get("local_rota") or rota.get("tipo_rota") or rota.get("local") or "")
                 local_carreg = str(
                     rota.get("local_carregamento")
@@ -1575,6 +2033,12 @@ class RelatoriosPage(PageBase):
                     f"LOCAL DA ROTA: {_format_local_rota_display(local_rota) or '-'}   "
                     f"CARREGAMENTO: {upper(fix_mojibake_text(local_carreg)) or '-'}"
                 )
+                op_line = f"OPERACAO: {operacao_tipo or '-'}"
+                if transbordo_modalidade:
+                    op_line += f"   MODALIDADE: {transbordo_modalidade}"
+                if transbordo_grupo:
+                    op_line += f"   GRUPO: {transbordo_grupo}"
+                lines.append(op_line)
                 lines.append("-" * 118)
                 lines.append(
                     f"ENTRADAS (RECEB+ADIANT.): {self._fmt_rel_money(entradas)}   "
@@ -1609,10 +2073,10 @@ class RelatoriosPage(PageBase):
                     + ("OK" if bool(log_info.get("itens_ok", True)) else "DIVERGENTE")
                 )
                 lines.append("-" * 118)
-                lines.append("[OCORRENCIAS DE TRANSBORDO / MORTALIDADE]")
-                lines.append(f"Mortalidade (aves): {safe_int(mort_aves, 0)}")
+                lines.append("[OCORRENCIAS OPERACIONAIS]")
+                lines.append(f"Ocorrencias (unid.): {safe_int(mort_aves, 0)}")
                 lines.append(
-                    f"Mortalidade (KG): {safe_float(mort_kg, 0.0):.2f}".replace(".", ",")
+                    f"Peso afetado (KG): {safe_float(mort_kg, 0.0):.2f}".replace(".", ",")
                 )
                 lines.append(
                     f"KG util NF (NF - mortalidade): {safe_float(kg_nf_util, 0.0):.2f}".replace(".", ",")
@@ -1663,16 +2127,29 @@ class RelatoriosPage(PageBase):
                 mort_kg_expr = "COALESCE(mortalidade_transbordo_kg,0)" if "mortalidade_transbordo_kg" in cols_p else "0"
                 obs_transb_expr = "COALESCE(obs_transbordo,'')" if "obs_transbordo" in cols_p else "''"
                 data_criacao_expr = "COALESCE(data_criacao,'')" if "data_criacao" in cols_p else ("COALESCE(data,'')" if "data" in cols_p else "''")
+                tipo_estim_expr = "COALESCE(tipo_estimativa,'KG')" if "tipo_estimativa" in cols_p else "'KG'"
+                operacao_expr = (
+                    "COALESCE(operacao_tipo, CASE WHEN UPPER(COALESCE(tipo_estimativa,''))='CX' THEN 'TRANSBORDO' ELSE 'VENDA' END)"
+                    if "operacao_tipo" in cols_p and "tipo_estimativa" in cols_p
+                    else (
+                        "COALESCE(operacao_tipo,'VENDA')"
+                        if "operacao_tipo" in cols_p
+                        else ("CASE WHEN UPPER(COALESCE(tipo_estimativa,''))='CX' THEN 'TRANSBORDO' ELSE 'VENDA' END" if "tipo_estimativa" in cols_p else "'VENDA'")
+                    )
+                )
+                transb_modal_expr = "COALESCE(transbordo_modalidade,'')" if "transbordo_modalidade" in cols_p else "''"
+                transb_grupo_expr = "COALESCE(transbordo_grupo,'')" if "transbordo_grupo" in cols_p else "''"
                 cur.execute(f"""
                     SELECT {data_criacao_expr}, COALESCE(motorista,''), COALESCE(veiculo,''), COALESCE(equipe,''),
                            {status_expr}, {prest_expr}, {local_rota_expr}, {local_carreg_expr},
                            {km_expr}, {media_expr}, {custo_expr}, {adiant_expr},
-                           {mort_aves_expr}, {mort_kg_expr}, {obs_transb_expr}
+                           {mort_aves_expr}, {mort_kg_expr}, {obs_transb_expr},
+                           {tipo_estim_expr}, {operacao_expr}, {transb_modal_expr}, {transb_grupo_expr}
                     FROM programacoes
                     WHERE codigo_programacao=?
                     LIMIT 1
                 """, (prog,))
-                meta = cur.fetchone() or ("", "", "", "", "", "", "", "", 0, 0, 0, 0, 0, 0.0, "")
+                meta = cur.fetchone() or ("", "", "", "", "", "", "", "", 0, 0, 0, 0, 0, 0.0, "", "KG", "VENDA", "", "")
 
                 cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='recebimentos'")
                 if cur.fetchone():
@@ -1748,7 +2225,15 @@ class RelatoriosPage(PageBase):
             mort_aves,
             mort_kg,
             obs_transb,
+            tipo_estimativa,
+            operacao_tipo,
+            transbordo_modalidade,
+            transbordo_grupo,
         ) = meta
+        tipo_estimativa = upper(tipo_estimativa or "KG")
+        operacao_tipo = upper(operacao_tipo or ("TRANSBORDO" if tipo_estimativa == "CX" else "VENDA"))
+        transbordo_modalidade = upper(transbordo_modalidade or "")
+        transbordo_grupo = upper(transbordo_grupo or "")
         equipe_txt = self.resolve_equipe_nomes(equipe)
         entradas = total_receb + safe_float(adiantamento, 0.0)
         saidas = total_desp
@@ -1787,6 +2272,12 @@ class RelatoriosPage(PageBase):
             f"LOCAL DA ROTA: {_format_local_rota_display(local_rota) or '-'}   "
             f"CARREGAMENTO: {upper(fix_mojibake_text(local_carreg)) or '-'}"
         )
+        op_line = f"OPERACAO: {operacao_tipo or '-'}"
+        if transbordo_modalidade:
+            op_line += f"   MODALIDADE: {transbordo_modalidade}"
+        if transbordo_grupo:
+            op_line += f"   GRUPO: {transbordo_grupo}"
+        lines.append(op_line)
         lines.append("-" * 118)
         lines.append(
             f"ENTRADAS (RECEB+ADIANT.): {self._fmt_rel_money(entradas)}   "
@@ -1821,10 +2312,10 @@ class RelatoriosPage(PageBase):
             + ("OK" if bool(log_info.get("itens_ok", True)) else "DIVERGENTE")
         )
         lines.append("-" * 118)
-        lines.append("[OCORRÊNCIAS DE TRANSBORDO / MORTALIDADE]")
-        lines.append(f"Mortalidade (aves): {safe_int(mort_aves, 0)}")
+        lines.append("[OCORRÊNCIAS OPERACIONAIS]")
+        lines.append(f"Ocorrências (unid.): {safe_int(mort_aves, 0)}")
         lines.append(
-            f"Mortalidade (KG): {safe_float(mort_kg, 0.0):.2f}".replace(".", ",")
+            f"Peso afetado (KG): {safe_float(mort_kg, 0.0):.2f}".replace(".", ",")
         )
         lines.append(
             f"KG útil NF (NF - mortalidade): {safe_float(kg_nf_util, 0.0):.2f}".replace(".", ",")
@@ -2062,10 +2553,10 @@ class RelatoriosPage(PageBase):
 
     def gerar_resumo(self):
         tipo_rel = self.cb_tipo_rel.get().strip() if hasattr(self, "cb_tipo_rel") else "Programacoes"
-        is_mortalidade = "MORTALIDADE" in upper(tipo_rel)
+        is_mortalidade = ("MORTALIDADE" in upper(tipo_rel)) or ("OCORRENCIA" in upper(tipo_rel)) or ("OCORRÊNCIA" in upper(tipo_rel))
         is_rotina = "ROTINA" in upper(tipo_rel)
         is_km_veic = "KM DE VEICULOS" in upper(tipo_rel)
-        is_despesas = upper(tipo_rel) == "DESPESAS"
+        is_despesas = upper(tipo_rel) in {"DESPESAS", "CUSTOS E DESPESAS"}
         if is_mortalidade:
             self._gerar_resumo_mortalidade_motorista()
             return
@@ -2079,12 +2570,15 @@ class RelatoriosPage(PageBase):
             self._gerar_relatorio_despesas_geral()
             return
 
+        self._clear_relatorio_details()
         prog = upper(self.cb_prog.get())
         if not prog:
-            messagebox.showwarning("ATENCAO", "Selecione uma programacao.")
+            messagebox.showwarning("ATENCAO", "Selecione um planejamento.")
             return
 
-        is_prestacao = "PRESTACAO" in upper(tipo_rel)
+        tipo_rel_up = upper(tipo_rel)
+        is_prestacao = ("PRESTACAO" in tipo_rel_up) or ("FECHAMENTO" in tipo_rel_up)
+        is_detalhe_completo = "DETALHE COMPLETO" in tipo_rel_up
 
         def fmt_money(v):
             vv = safe_float(v, 0.0)
@@ -2101,6 +2595,10 @@ class RelatoriosPage(PageBase):
         status = prestacao = ""
         data_criacao = ""
         nf = local_rota = local_carreg = ""
+        tipo_estimativa = "KG"
+        operacao_tipo = "VENDA"
+        transbordo_modalidade = ""
+        transbordo_grupo = ""
         data_saida = hora_saida = data_chegada = hora_chegada = ""
         kg_estimado = 0.0
         nf_kg = nf_caixas = nf_kg_carregado = nf_kg_vendido = nf_saldo = 0.0
@@ -2114,6 +2612,8 @@ class RelatoriosPage(PageBase):
         recebimentos = []
         despesas = []
         clientes_programacao = []
+        clientes_detalhados = []
+        vendas_importadas = []
 
         desktop_secret = os.environ.get("ROTA_SECRET", "").strip()
         api_enabled = bool(desktop_secret and self.is_desktop_api_sync_enabled())
@@ -2134,6 +2634,10 @@ class RelatoriosPage(PageBase):
                 equipe = str(rota.get("equipe") or "")
                 status = upper(str(rota.get("status") or ""))
                 prestacao = upper(str(rota.get("prestacao_status") or ""))
+                tipo_estimativa = upper(str(rota.get("tipo_estimativa") or "KG"))
+                operacao_tipo = upper(str(rota.get("operacao_tipo") or ("TRANSBORDO" if tipo_estimativa == "CX" else "VENDA")))
+                transbordo_modalidade = upper(str(rota.get("transbordo_modalidade") or ""))
+                transbordo_grupo = upper(str(rota.get("transbordo_grupo") or ""))
                 data_criacao = str(rota.get("data_criacao") or rota.get("data") or "")
                 usuario_criacao = str(
                     rota.get("usuario")
@@ -2158,10 +2662,16 @@ class RelatoriosPage(PageBase):
                 hora_saida = str(rota.get("hora_saida") or "")
                 data_chegada = str(rota.get("data_chegada") or "")
                 hora_chegada = str(rota.get("hora_chegada") or "")
-                nf_kg = safe_float(rota.get("nf_kg"), 0.0)
+                nf_kg = safe_float(rota.get("nf_kg"), 0.0) or safe_float(rota.get("kg_nf"), 0.0)
                 nf_caixas = safe_int(rota.get("nf_caixas"), 0)
-                nf_kg_carregado = safe_float(rota.get("nf_kg_carregado"), 0.0)
-                nf_kg_vendido = safe_float(rota.get("nf_kg_vendido"), 0.0)
+                nf_kg_carregado = (
+                    safe_float(rota.get("nf_kg_carregado"), 0.0)
+                    or safe_float(rota.get("kg_carregado"), 0.0)
+                )
+                nf_kg_vendido = (
+                    safe_float(rota.get("nf_kg_vendido"), 0.0)
+                    or safe_float(rota.get("kg_vendido"), 0.0)
+                )
                 nf_saldo = safe_float(rota.get("nf_saldo"), 0.0)
                 km_inicial = safe_float(rota.get("km_inicial"), 0.0)
                 km_final = safe_float(rota.get("km_final"), 0.0)
@@ -2191,9 +2701,10 @@ class RelatoriosPage(PageBase):
                     )
                     for r in clientes_api
                 ]
+                clientes_detalhados = [dict(r) for r in clientes_api if isinstance(r, dict)]
                 total_entregas = len(clientes_programacao)
 
-                if is_prestacao:
+                if is_prestacao or is_detalhe_completo:
                     recebimentos = [
                         (
                             str((r or {}).get("cod_cliente") or ""),
@@ -2217,6 +2728,7 @@ class RelatoriosPage(PageBase):
                     ]
                     total_receb = sum(safe_float(r[2], 0.0) for r in recebimentos)
                     total_desp = sum(safe_float(r[1], 0.0) for r in despesas)
+                    vendas_importadas = self._fetch_vendas_importadas_relatorio(prog)
             except Exception:
                 logging.debug("Falha ao carregar resumo via API.", exc_info=True)
                 if api_enabled:
@@ -2251,7 +2763,10 @@ class RelatoriosPage(PageBase):
                         usuario_col_name = cand
                         break
 
-                nf_col = "num_nf" if has_col("num_nf") else ("nf_numero" if has_col("nf_numero") else "''")
+                if has_col("num_nf") and has_col("nf_numero"):
+                    nf_col = "COALESCE(NULLIF(TRIM(num_nf),''), NULLIF(TRIM(nf_numero),''), '')"
+                else:
+                    nf_col = "num_nf" if has_col("num_nf") else ("nf_numero" if has_col("nf_numero") else "''")
 
                 def coalesce_prog_expr(candidates):
                     names = [name for name in candidates if has_col(name)]
@@ -2280,15 +2795,47 @@ class RelatoriosPage(PageBase):
                 prest_col = "COALESCE(prestacao_status,'') as prestacao_status" if has_col("prestacao_status") else "'' as prestacao_status"
                 data_col = "COALESCE(data_criacao,'') as data_criacao" if has_col("data_criacao") else ("COALESCE(data,'') as data_criacao" if has_col("data") else "'' as data_criacao")
                 usuario_col = f"COALESCE({usuario_col_name},'') as usuario_criacao" if usuario_col_name else "'' as usuario_criacao"
+                tipo_estimativa_col = "COALESCE(tipo_estimativa,'KG')" if has_col("tipo_estimativa") else "'KG'"
+                if has_col("operacao_tipo") and has_col("tipo_estimativa"):
+                    operacao_col = "COALESCE(operacao_tipo, CASE WHEN UPPER(COALESCE(tipo_estimativa,''))='CX' THEN 'TRANSBORDO' ELSE 'VENDA' END)"
+                elif has_col("operacao_tipo"):
+                    operacao_col = "COALESCE(operacao_tipo,'VENDA')"
+                elif has_col("tipo_estimativa"):
+                    operacao_col = "CASE WHEN UPPER(COALESCE(tipo_estimativa,''))='CX' THEN 'TRANSBORDO' ELSE 'VENDA' END"
+                else:
+                    operacao_col = "'VENDA'"
+                transb_modal_col = "COALESCE(transbordo_modalidade,'')" if has_col("transbordo_modalidade") else "''"
+                transb_grupo_col = "COALESCE(transbordo_grupo,'')" if has_col("transbordo_grupo") else "''"
                 kg_estimado_col = "COALESCE(kg_estimado,0)" if has_col("kg_estimado") else "0"
                 data_saida_col = "COALESCE(data_saida,'')" if has_col("data_saida") else "''"
                 hora_saida_col = "COALESCE(hora_saida,'')" if has_col("hora_saida") else "''"
                 data_chegada_col = "COALESCE(data_chegada,'')" if has_col("data_chegada") else "''"
                 hora_chegada_col = "COALESCE(hora_chegada,'')" if has_col("hora_chegada") else "''"
-                nf_kg_col = "COALESCE(nf_kg,0)" if has_col("nf_kg") else "0"
+                if has_col("nf_kg") and has_col("kg_nf"):
+                    nf_kg_col = "COALESCE(NULLIF(nf_kg,0), kg_nf, 0)"
+                elif has_col("nf_kg"):
+                    nf_kg_col = "COALESCE(nf_kg,0)"
+                elif has_col("kg_nf"):
+                    nf_kg_col = "COALESCE(kg_nf,0)"
+                else:
+                    nf_kg_col = "0"
                 nf_caixas_col = "COALESCE(nf_caixas,0)" if has_col("nf_caixas") else "0"
-                nf_kg_carregado_col = "COALESCE(nf_kg_carregado,0)" if has_col("nf_kg_carregado") else ("COALESCE(kg_carregado,0)" if has_col("kg_carregado") else "0")
-                nf_kg_vendido_col = "COALESCE(nf_kg_vendido,0)" if has_col("nf_kg_vendido") else ("COALESCE(kg_vendido,0)" if has_col("kg_vendido") else "0")
+                if has_col("nf_kg_carregado") and has_col("kg_carregado"):
+                    nf_kg_carregado_col = "COALESCE(NULLIF(nf_kg_carregado,0), kg_carregado, 0)"
+                elif has_col("nf_kg_carregado"):
+                    nf_kg_carregado_col = "COALESCE(nf_kg_carregado,0)"
+                elif has_col("kg_carregado"):
+                    nf_kg_carregado_col = "COALESCE(kg_carregado,0)"
+                else:
+                    nf_kg_carregado_col = "0"
+                if has_col("nf_kg_vendido") and has_col("kg_vendido"):
+                    nf_kg_vendido_col = "COALESCE(NULLIF(nf_kg_vendido,0), kg_vendido, 0)"
+                elif has_col("nf_kg_vendido"):
+                    nf_kg_vendido_col = "COALESCE(nf_kg_vendido,0)"
+                elif has_col("kg_vendido"):
+                    nf_kg_vendido_col = "COALESCE(kg_vendido,0)"
+                else:
+                    nf_kg_vendido_col = "0"
                 nf_saldo_col = "COALESCE(nf_saldo,0)" if has_col("nf_saldo") else "0"
                 km_inicial_col = "COALESCE(km_inicial,0)" if has_col("km_inicial") else "0"
                 km_final_col = "COALESCE(km_final,0)" if has_col("km_final") else "0"
@@ -2310,6 +2857,10 @@ class RelatoriosPage(PageBase):
                         motorista, veiculo, equipe,
                         {status_col}, {prest_col}, {data_col},
                         {usuario_col},
+                        {tipo_estimativa_col} as tipo_estimativa,
+                        {operacao_col} as operacao_tipo,
+                        {transb_modal_col} as transbordo_modalidade,
+                        {transb_grupo_col} as transbordo_grupo,
                         {kg_estimado_col},
                         {nf_col} as num_nf,
                         {local_rota_col} as local_rota,
@@ -2337,19 +2888,23 @@ class RelatoriosPage(PageBase):
                 status, prestacao = upper(row[3] or ""), upper(row[4] or "")
                 data_criacao = row[5] or ""
                 usuario_criacao = row[6] or ""
-                kg_estimado = safe_float(row[7], 0.0)
-                nf, local_rota, local_carreg = row[8] or "", row[9] or "", row[10] or ""
-                data_saida, hora_saida = row[11] or "", row[12] or ""
-                data_chegada, hora_chegada = row[13] or "", row[14] or ""
-                nf_kg, nf_caixas, nf_kg_carregado = safe_float(row[15], 0.0), safe_int(row[16], 0), safe_float(row[17], 0.0)
-                nf_kg_vendido, nf_saldo = safe_float(row[18], 0.0), safe_float(row[19], 0.0)
-                km_inicial, km_final = safe_float(row[20], 0.0), safe_float(row[21], 0.0)
-                litros, km_rodado = safe_float(row[22], 0.0), safe_float(row[23], 0.0)
-                media_km_l, custo_km = safe_float(row[24], 0.0), safe_float(row[25], 0.0)
-                ced_qtd[200], ced_qtd[100], ced_qtd[50] = safe_int(row[26], 0), safe_int(row[27], 0), safe_int(row[28], 0)
-                ced_qtd[20], ced_qtd[10], ced_qtd[5], ced_qtd[2] = safe_int(row[29], 0), safe_int(row[30], 0), safe_int(row[31], 0), safe_int(row[32], 0)
-                valor_dinheiro = safe_float(row[33], 0.0)
-                adiantamento = safe_float(row[34], 0.0)
+                tipo_estimativa = upper(row[7] or "KG")
+                operacao_tipo = upper(row[8] or ("TRANSBORDO" if tipo_estimativa == "CX" else "VENDA"))
+                transbordo_modalidade = upper(row[9] or "")
+                transbordo_grupo = upper(row[10] or "")
+                kg_estimado = safe_float(row[11], 0.0)
+                nf, local_rota, local_carreg = row[12] or "", row[13] or "", row[14] or ""
+                data_saida, hora_saida = row[15] or "", row[16] or ""
+                data_chegada, hora_chegada = row[17] or "", row[18] or ""
+                nf_kg, nf_caixas, nf_kg_carregado = safe_float(row[19], 0.0), safe_int(row[20], 0), safe_float(row[21], 0.0)
+                nf_kg_vendido, nf_saldo = safe_float(row[22], 0.0), safe_float(row[23], 0.0)
+                km_inicial, km_final = safe_float(row[24], 0.0), safe_float(row[25], 0.0)
+                litros, km_rodado = safe_float(row[26], 0.0), safe_float(row[27], 0.0)
+                media_km_l, custo_km = safe_float(row[28], 0.0), safe_float(row[29], 0.0)
+                ced_qtd[200], ced_qtd[100], ced_qtd[50] = safe_int(row[30], 0), safe_int(row[31], 0), safe_int(row[32], 0)
+                ced_qtd[20], ced_qtd[10], ced_qtd[5], ced_qtd[2] = safe_int(row[33], 0), safe_int(row[34], 0), safe_int(row[35], 0), safe_int(row[36], 0)
+                valor_dinheiro = safe_float(row[37], 0.0)
+                adiantamento = safe_float(row[38], 0.0)
 
                 data_saida, hora_saida = normalize_date_time_components(data_saida, hora_saida)
                 data_chegada, hora_chegada = normalize_date_time_components(data_chegada, hora_chegada)
@@ -2373,6 +2928,11 @@ class RelatoriosPage(PageBase):
                     nome_cliente_item_col = "COALESCE(nome_cliente,'')" if "nome_cliente" in cols_itens else "''"
                     preco_col = "COALESCE(preco,0)" if "preco" in cols_itens else "0"
                     vendedor_item_col = "COALESCE(vendedor,'')" if "vendedor" in cols_itens else "''"
+                    caixas_item_col = "COALESCE(qnt_caixas,0)" if "qnt_caixas" in cols_itens else "0"
+                    kg_item_col = "COALESCE(kg,0)" if "kg" in cols_itens else "0"
+                    pedido_item_col = "COALESCE(pedido,'')" if "pedido" in cols_itens else "''"
+                    produto_item_col = "COALESCE(produto,'')" if "produto" in cols_itens else "''"
+                    status_item_col = "COALESCE(status_pedido,'')" if "status_pedido" in cols_itens else "''"
                     cur.execute(
                         f"""
                         SELECT
@@ -2387,11 +2947,67 @@ class RelatoriosPage(PageBase):
                         (prog,),
                     )
                     clientes_programacao = cur.fetchall() or []
+                    try:
+                        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='programacao_itens_controle'")
+                        has_controle = bool(cur.fetchone())
+                        if has_controle:
+                            cols_ctrl = {str(c[1]).lower() for c in (cur.execute("PRAGMA table_info(programacao_itens_controle)").fetchall() or [])}
+                        else:
+                            cols_ctrl = set()
+
+                        def ctrl_expr(col, fallback="NULL"):
+                            return f"pc.{col}" if has_controle and col in cols_ctrl else fallback
+
+                        join_ctrl = ""
+                        if has_controle:
+                            join_ctrl = """
+                                LEFT JOIN programacao_itens_controle pc
+                                  ON UPPER(COALESCE(pc.codigo_programacao,''))=UPPER(COALESCE(pi.codigo_programacao,''))
+                                 AND UPPER(COALESCE(pc.cod_cliente,''))=UPPER(COALESCE(pi.cod_cliente,''))
+                                 AND COALESCE(pc.pedido,'')=COALESCE(pi.pedido,'')
+                            """
+                        cur.execute(
+                            f"""
+                            SELECT
+                                {cod_cliente_item_col.replace('cod_cliente', 'pi.cod_cliente')} AS cod_cliente,
+                                {nome_cliente_item_col.replace('nome_cliente', 'pi.nome_cliente')} AS nome_cliente,
+                                {caixas_item_col.replace('qnt_caixas', 'pi.qnt_caixas')} AS qnt_caixas,
+                                {kg_item_col.replace('kg', 'pi.kg')} AS kg,
+                                {preco_col.replace('preco', 'pi.preco')} AS preco,
+                                {vendedor_item_col.replace('vendedor', 'pi.vendedor')} AS vendedor,
+                                {pedido_item_col.replace('pedido', 'pi.pedido')} AS pedido,
+                                {produto_item_col.replace('produto', 'pi.produto')} AS produto,
+                                COALESCE({ctrl_expr('status_pedido', status_item_col.replace('status_pedido', 'pi.status_pedido'))}, '') AS status_pedido,
+                                COALESCE({ctrl_expr('caixas_atual', 'NULL')}, {caixas_item_col.replace('qnt_caixas', 'pi.qnt_caixas')}) AS caixas_atual,
+                                COALESCE({ctrl_expr('preco_atual', 'NULL')}, {preco_col.replace('preco', 'pi.preco')}) AS preco_atual,
+                                COALESCE({ctrl_expr('mortalidade_aves', '0')}, 0) AS mortalidade_aves,
+                                COALESCE({ctrl_expr('media_aplicada', '0')}, 0) AS media_aplicada,
+                                COALESCE({ctrl_expr('peso_previsto', '0')}, 0) AS peso_previsto,
+                                COALESCE({ctrl_expr('alteracao_tipo', "''")}, '') AS alteracao_tipo,
+                                COALESCE({ctrl_expr('alteracao_detalhe', "''")}, '') AS alteracao_detalhe,
+                                COALESCE({ctrl_expr('alterado_em', "''")}, '') AS alterado_em,
+                                COALESCE({ctrl_expr('endereco_evento', "''")}, '') AS endereco_evento,
+                                COALESCE({ctrl_expr('cidade_evento', "''")}, '') AS cidade_evento,
+                                COALESCE({ctrl_expr('bairro_evento', "''")}, '') AS bairro_evento,
+                                COALESCE({ctrl_expr('distancia', '0')}, 0) AS distancia
+                            FROM programacao_itens pi
+                            {join_ctrl}
+                            WHERE pi.codigo_programacao=?
+                            ORDER BY pi.nome_cliente ASC, pi.cod_cliente ASC
+                            """,
+                            (prog,),
+                        )
+                        cols_det = [d[0] for d in cur.description]
+                        clientes_detalhados = [dict(zip(cols_det, r)) for r in (cur.fetchall() or [])]
+                    except Exception:
+                        logging.debug("Falha ao montar clientes detalhados locais", exc_info=True)
+                        clientes_detalhados = []
                 else:
                     total_entregas = 0
                     clientes_programacao = []
+                    clientes_detalhados = []
 
-                if is_prestacao:
+                if is_prestacao or is_detalhe_completo:
                     if has_recebimentos:
                         cols_receb = {str(c[1]).lower() for c in (cur.execute("PRAGMA table_info(recebimentos)").fetchall() or [])}
                         cod_cliente_receb_col = "COALESCE(cod_cliente,'')" if "cod_cliente" in cols_receb else "''"
@@ -2449,14 +3065,36 @@ class RelatoriosPage(PageBase):
                     else:
                         total_desp = 0.0
                         despesas = []
+                    vendas_importadas = self._fetch_vendas_importadas_relatorio(prog)
 
         equipe_txt = self.resolve_equipe_nomes(equipe)
+        tipo_estimativa = upper(tipo_estimativa or "KG")
+        operacao_tipo = upper(operacao_tipo or ("TRANSBORDO" if tipo_estimativa == "CX" else "VENDA"))
+        transbordo_modalidade = upper(transbordo_modalidade or "")
+        transbordo_grupo = upper(transbordo_grupo or "")
+        if nf_kg_carregado <= 0 and nf_kg > 0:
+            nf_kg_carregado = nf_kg
+        if nf_kg_vendido <= 0:
+            nf_kg_vendido = sum(
+                safe_float(self._rel_dict_val(item, "peso_previsto", "kg", default=0), 0.0)
+                for item in (clientes_detalhados or [])
+                if upper(str(self._rel_dict_val(item, "status_pedido", default="") or "")) not in {"CANCELADO", "CANCELADA"}
+            )
+        if nf_kg_carregado <= 0 and nf_kg_vendido > 0 and nf_kg <= 0:
+            nf_kg_carregado = nf_kg_vendido
+        if abs(nf_saldo) < 0.0001 and (nf_kg_carregado > 0 or nf_kg_vendido > 0):
+            nf_saldo = (nf_kg - nf_kg_carregado) if nf_kg > 0 else (nf_kg_carregado - nf_kg_vendido)
+        op_resumo = f"Operacao: {operacao_tipo or '-'}"
+        if transbordo_modalidade:
+            op_resumo += f" | Modalidade: {transbordo_modalidade}"
+        if transbordo_grupo:
+            op_resumo += f" | Grupo: {transbordo_grupo}"
         data_criacao_n = normalize_date(data_criacao)
         data_criacao_show = data_criacao_n if data_criacao_n is not None else (data_criacao or "")
 
         self.txt.delete("1.0", "end")
 
-        if not is_prestacao:
+        if not is_prestacao and not is_detalhe_completo:
             valor_total_clientes = sum(normalize_unit_price(r[2]) for r in clientes_programacao)
 
             self.txt.insert("end", f"RELATORIO DE PROGRAMACAO - {prog}\n")
@@ -2472,6 +3110,7 @@ class RelatoriosPage(PageBase):
             self.txt.insert("end", f"Veiculo: {veiculo or '-'}\n")
             self.txt.insert("end", f"Local da rota: {_format_local_rota_display(local_rota) or '-'}\n")
             self.txt.insert("end", f"Local carregamento: {upper(fix_mojibake_text(local_carreg)) or '-'}\n")
+            self.txt.insert("end", f"{op_resumo}\n")
             self.txt.insert("end", f"KG estimado: {kg_estimado:.2f}\n")
             self.txt.insert("end", f"Clientes na programacao: {len(clientes_programacao)}\n")
             self.txt.insert("end", f"Total estimado (clientes): {fmt_money(valor_total_clientes)}\n\n")
@@ -2489,6 +3128,29 @@ class RelatoriosPage(PageBase):
                     )
 
             self.set_status("STATUS: Resumo de programacao gerado.")
+            self._populate_relatorio_details(
+                clientes=[(cod_cli, nome_cli, "", "", preco_cli, vendedor, "", "") for cod_cli, nome_cli, preco_cli, vendedor in clientes_programacao],
+                recebimentos=[],
+                despesas=[],
+                metrics={
+                    "clientes": len(clientes_programacao),
+                    "total_estimado": valor_total_clientes,
+                    "recebimentos": 0.0,
+                    "despesas": 0.0,
+                },
+                operacional_text=(
+                    f"Resumo operacional da programação {prog}\n"
+                    f"Motorista: {motorista or '-'}\n"
+                    f"Veículo: {veiculo or '-'}\n"
+                    f"{op_resumo}\n"
+                    f"Local da rota: {_format_local_rota_display(local_rota) or '-'}\n"
+                    f"Local de carregamento: {upper(fix_mojibake_text(local_carreg)) or '-'}\n"
+                    f"KG estimado: {kg_estimado:.2f}\n"
+                    f"Clientes: {len(clientes_programacao)}\n"
+                    f"Total estimado (clientes): {fmt_money(valor_total_clientes)}\n"
+                    f"Preço médio por cliente: {fmt_money(valor_total_clientes / max(len(clientes_programacao), 1))}\n"
+                ),
+            )
             self._set_dashboard(
                 f"Clientes: {len(clientes_programacao)}",
                 f"Total estimado: {fmt_money(valor_total_clientes)}",
@@ -2498,6 +3160,186 @@ class RelatoriosPage(PageBase):
                 [normalize_unit_price(r[2]) for r in clientes_programacao[:8]],
                 color="#1D4ED8",
             )
+            return
+
+        if is_detalhe_completo:
+            if not clientes_detalhados:
+                clientes_detalhados = [
+                    {
+                        "cod_cliente": cod_cli,
+                        "nome_cliente": nome_cli,
+                        "preco": preco_cli,
+                        "preco_atual": preco_cli,
+                        "vendedor": vendedor,
+                        "qnt_caixas": 0,
+                        "kg": 0,
+                        "pedido": "",
+                        "status_pedido": "",
+                        "mortalidade_aves": 0,
+                    }
+                    for cod_cli, nome_cli, preco_cli, vendedor in clientes_programacao
+                ]
+
+            valor_programado = sum(self._rel_item_valor_total(r) for r in clientes_detalhados)
+            venda_importada_total = sum(safe_float((r or {}).get("vr_total"), 0.0) for r in vendas_importadas)
+            valor_venda_real = total_receb if total_receb > 0 else (venda_importada_total if venda_importada_total > 0 else valor_programado)
+            total_caixas_prog = sum(self._rel_item_caixas(r) for r in clientes_detalhados)
+            total_kg_prog = sum(safe_float(self._rel_dict_val(r, "kg", "peso_previsto", default=0), 0.0) for r in clientes_detalhados)
+            total_mortalidade_clientes = sum(safe_int(self._rel_dict_val(r, "mortalidade_aves", default=0), 0) for r in clientes_detalhados)
+            total_mortalidade_doa = safe_int(self._rel_dict_val(locals().get("rota", {}), "mortalidade_transbordo_aves", "aves_mortas_transbordo", default=0), 0)
+            kg_mortalidade_doa = safe_float(self._rel_dict_val(locals().get("rota", {}), "mortalidade_transbordo_kg", default=0), 0.0)
+
+            despesas_veiculo = 0.0
+            despesas_rota = 0.0
+            descontos_desp = 0.0
+            for desc, valor, cat, obs, _data_reg in despesas:
+                classe = self._classificar_despesa_rota(cat, desc)
+                if classe == "VEICULO":
+                    despesas_veiculo += safe_float(valor, 0.0)
+                else:
+                    despesas_rota += safe_float(valor, 0.0)
+                descontos_desp += safe_float(self._rel_dict_val({"obs": obs}, "desconto", default=0), 0.0)
+
+            desconto_itens = 0.0
+            for item in clientes_detalhados:
+                preco_original = normalize_unit_price(self._rel_dict_val(item, "preco", default=0))
+                preco_atual = normalize_unit_price(self._rel_dict_val(item, "preco_atual", default=preco_original))
+                caixas = self._rel_item_caixas(item)
+                base_qtd = caixas if caixas > 0 and 0 < preco_original < 1000 else 1
+                if preco_original > preco_atual:
+                    desconto_itens += (preco_original - preco_atual) * base_qtd
+
+            total_descontos = desconto_itens + descontos_desp
+            total_compras = safe_float(nf_kg_carregado, 0.0)
+            if total_compras <= 0:
+                total_compras = safe_float(nf_kg, 0.0)
+            impacto_compra_mort = kg_mortalidade_doa if kg_mortalidade_doa > 0 else 0.0
+            impacto_venda_mort = 0.0
+            if total_caixas_prog > 0 and valor_programado > 0:
+                impacto_venda_mort = (valor_programado / total_caixas_prog) * total_mortalidade_clientes
+            resultado_bruto = valor_venda_real - total_descontos
+            resultado_liquido = resultado_bruto - despesas_rota - despesas_veiculo
+            margem = (resultado_liquido / valor_venda_real * 100.0) if valor_venda_real else 0.0
+
+            resultados = [
+                ("Vendas", "Programado", valor_programado, "Soma dos valores dos clientes/itens"),
+                ("Vendas", "Venda real", valor_venda_real, "Recebimentos; se ausente, vendas importadas ou programado"),
+                ("Compras", "KG compra/carregado", f"{total_compras:.2f} KG", "Base operacional de compra/carregamento"),
+                ("Descontos", "Descontos em itens", desconto_itens, "Diferença entre preço original e atual"),
+                ("Despesas", "Despesas do veículo", despesas_veiculo, "Combustível, manutenção, pedágio e similares"),
+                ("Despesas", "Despesas da rota", despesas_rota, "Diárias, alimentação e demais gastos operacionais"),
+                ("Ocorrencias", "Transbordo/operacao", f"{total_mortalidade_doa} unid. / {kg_mortalidade_doa:.2f} KG", "Impacto direto na compra"),
+                ("Ocorrencias", "Clientes", f"{total_mortalidade_clientes} unid.", "Impacto estimado na venda"),
+                ("Resultado", "Resultado bruto", resultado_bruto, "Venda real menos descontos"),
+                ("Resultado", "Resultado líquido", resultado_liquido, f"Margem estimada: {margem:.2f}%"),
+            ]
+
+            self.txt.insert("end", f"DETALHE COMPLETO DA ROTA - PROGRAMACAO {prog}\n")
+            self.txt.insert("end", "=" * 100 + "\n\n")
+            self.txt.insert("end", "[IDENTIFICACAO E OPERACAO]\n")
+            self.txt.insert("end", f"Status: {status or '-'} | Prestacao: {prestacao or '-'}\n")
+            self.txt.insert("end", f"Data criacao: {data_criacao_show or '-'} | Usuario criacao: {usuario_criacao or '-'}\n")
+            self.txt.insert("end", f"Motorista: {motorista or '-'} | Veiculo: {veiculo or '-'} | Equipe: {equipe_txt or '-'}\n")
+            self.txt.insert("end", f"Local rota: {_format_local_rota_display(local_rota) or '-'} | Carregamento: {upper(fix_mojibake_text(local_carreg)) or '-'}\n")
+            self.txt.insert("end", f"{op_resumo}\n")
+            self.txt.insert("end", f"Saida: {(data_saida + ' ' + hora_saida).strip() or '-'} | Chegada: {(data_chegada + ' ' + hora_chegada).strip() or '-'}\n\n")
+
+            self.txt.insert("end", "[CARREGAMENTO, CONSUMO E ROTA]\n")
+            self.txt.insert("end", f"NF: {nf or '-'} | NF KG: {nf_kg:.2f} | NF caixas: {safe_int(nf_caixas, 0)}\n")
+            self.txt.insert("end", f"KG carregado: {nf_kg_carregado:.2f} | KG vendido: {nf_kg_vendido:.2f} | Saldo KG: {nf_saldo:.2f}\n")
+            self.txt.insert("end", f"Caixas programadas/atuais: {self._format_quant(total_caixas_prog)} | KG clientes: {total_kg_prog:.2f}\n")
+            self.txt.insert("end", f"KM inicial/final: {km_inicial:.2f} / {km_final:.2f} | KM rodado: {km_rodado:.2f} | Litros: {litros:.2f} | Media: {media_km_l:.2f} km/l\n\n")
+
+            self.txt.insert("end", "[RESULTADO FINANCEIRO]\n")
+            self.txt.insert("end", f"Compras/KG base: {total_compras:.2f} KG\n")
+            self.txt.insert("end", f"Venda programada: {fmt_money(valor_programado)}\n")
+            self.txt.insert("end", f"Venda real: {fmt_money(valor_venda_real)}\n")
+            self.txt.insert("end", f"Descontos: {fmt_money(total_descontos)}\n")
+            self.txt.insert("end", f"Despesas do veiculo: {fmt_money(despesas_veiculo)}\n")
+            self.txt.insert("end", f"Despesas de rota: {fmt_money(despesas_rota)}\n")
+            self.txt.insert("end", f"Resultado bruto: {fmt_money(resultado_bruto)}\n")
+            self.txt.insert("end", f"Resultado liquido: {fmt_money(resultado_liquido)} | Margem: {margem:.2f}%\n\n")
+
+            self.txt.insert("end", "[OCORRENCIAS E IMPACTOS]\n")
+            self.txt.insert("end", f"Transbordo/operacao: {total_mortalidade_doa} unid., {kg_mortalidade_doa:.2f} KG. Impacto compra: {impacto_compra_mort:.2f} KG.\n")
+            self.txt.insert("end", f"Clientes: {total_mortalidade_clientes} unid. Impacto estimado venda: {fmt_money(impacto_venda_mort)}.\n\n")
+
+            self.txt.insert("end", "[CLIENTES / ENTREGA]\n")
+            self.txt.insert("end", "COD | CLIENTE | CX | KG | VALOR | STATUS | MORT. | PEDIDO | ULTIMO EVENTO\n")
+            self.txt.insert("end", "-" * 100 + "\n")
+            for item in clientes_detalhados:
+                self.txt.insert(
+                    "end",
+                    f"{self._rel_dict_val(item, 'cod_cliente') or '-'} | "
+                    f"{self._rel_dict_val(item, 'nome_cliente') or '-'} | "
+                    f"{self._format_quant(self._rel_item_caixas(item))} | "
+                    f"{safe_float(self._rel_dict_val(item, 'kg', 'peso_previsto', default=0), 0.0):.2f} | "
+                    f"{fmt_money(self._rel_item_valor_total(item))} | "
+                    f"{self._rel_dict_val(item, 'status_pedido', default='-') or '-'} | "
+                    f"{safe_int(self._rel_dict_val(item, 'mortalidade_aves', default=0), 0)} | "
+                    f"{self._rel_dict_val(item, 'pedido', default='-') or '-'} | "
+                    f"{self._rel_dict_val(item, 'alterado_em', 'evento_datahora', default='-') or '-'}\n"
+                )
+
+            if bool(self.var_show_desp_detalhe.get()):
+                self.txt.insert("end", "\n[DESPESAS CLASSIFICADAS]\n")
+                for desc, valor, cat, obs, data_reg in despesas:
+                    classe = self._classificar_despesa_rota(cat, desc)
+                    self.txt.insert("end", f"{(data_reg or '')[:19]} | {classe} | {cat or 'OUTROS'} | {desc or '-'} | {fmt_money(valor)} | {obs or '-'}\n")
+
+            clientes_tree = [
+                (
+                    self._rel_dict_val(item, "cod_cliente"),
+                    self._rel_dict_val(item, "nome_cliente"),
+                    self._rel_item_caixas(item),
+                    self._rel_dict_val(item, "kg", "peso_previsto", default=0),
+                    self._rel_item_valor_total(item),
+                    self._rel_dict_val(item, "vendedor"),
+                    self._rel_dict_val(item, "pedido"),
+                    self._rel_dict_val(item, "status_pedido", default=self._rel_dict_val(item, "alteracao_tipo")),
+                    self._rel_dict_val(item, "mortalidade_aves", default=0),
+                )
+                for item in clientes_detalhados
+            ]
+            desp_tree = [
+                (data_reg, self._classificar_despesa_rota(cat, desc), f"{cat or 'OUTROS'} - {desc or ''}".strip(" -"), valor, obs)
+                for desc, valor, cat, obs, data_reg in (despesas or [])
+            ]
+            operacional = (
+                f"Rota {prog}\n"
+                f"Motorista: {motorista or '-'}\n"
+                f"Veiculo: {veiculo or '-'}\n"
+                f"{op_resumo}\n"
+                f"Clientes: {len(clientes_detalhados)} | Caixas: {self._format_quant(total_caixas_prog)} | KG clientes: {total_kg_prog:.2f}\n"
+                f"KM rodado: {km_rodado:.2f} | Litros: {litros:.2f} | Media: {media_km_l:.2f} km/l\n"
+                f"Despesas veiculo: {fmt_money(despesas_veiculo)} | Despesas rota: {fmt_money(despesas_rota)}\n"
+                f"Venda real: {fmt_money(valor_venda_real)} | Resultado liquido: {fmt_money(resultado_liquido)}\n"
+                f"Ocorrencias transbordo/operacao: {total_mortalidade_doa} unid. / {kg_mortalidade_doa:.2f} KG\n"
+                f"Ocorrencias clientes: {total_mortalidade_clientes} unid.\n"
+            )
+            self._populate_relatorio_details(
+                clientes=clientes_tree,
+                recebimentos=[(data_reg, cod_cli, nome_cli, valor, forma, obs) for cod_cli, nome_cli, valor, forma, obs, data_reg in (recebimentos or [])],
+                despesas=desp_tree,
+                metrics={
+                    "clientes": len(clientes_detalhados),
+                    "total_estimado": valor_programado,
+                    "recebimentos": total_receb,
+                    "despesas": total_desp,
+                },
+                operacional_text=operacional,
+                resultados=resultados,
+            )
+            self._set_dashboard(
+                f"Venda real: {fmt_money(valor_venda_real)}",
+                f"Desp. veiculo/rota: {fmt_money(despesas_veiculo)} / {fmt_money(despesas_rota)}",
+                f"Resultado: {fmt_money(resultado_liquido)}",
+                f"Margem: {margem:.2f}%",
+                ["Venda", "Descontos", "Desp. veic.", "Desp. rota", "Resultado"],
+                [valor_venda_real, total_descontos, despesas_veiculo, despesas_rota, abs(resultado_liquido)],
+                color="#0F766E",
+            )
+            self.set_status(f"STATUS: Detalhe completo da rota {prog} gerado.")
             return
 
         ced_total = sum(float(ced) * safe_int(qtd, 0) for ced, qtd in ced_qtd.items())
@@ -2519,6 +3361,7 @@ class RelatoriosPage(PageBase):
         self.txt.insert("end", f"Motorista: {motorista or '-'}\n")
         self.txt.insert("end", f"Veiculo: {veiculo or '-'}\n")
         self.txt.insert("end", f"Equipe: {equipe_txt or '-'}\n")
+        self.txt.insert("end", f"{op_resumo}\n")
         self.txt.insert("end", f"Entregas (itens): {total_entregas}\n")
         self.txt.insert("end", f"KG estimado: {kg_estimado:.2f}\n\n")
 
@@ -2585,18 +3428,50 @@ class RelatoriosPage(PageBase):
             self.txt.insert("end", "\n[ALERTA] Prestacao FECHADA: alteracoes financeiras estao bloqueadas.\n")
 
         self.set_status("STATUS: Resumo detalhado gerado.")
+        self._populate_relatorio_details(
+            clientes=[(cod_cli, nome_cli, "", "", 0.0, "", "", "") for cod_cli, nome_cli, *_ in clientes_programacao],
+            recebimentos=[(data_reg, cod_cli, nome_cli, valor, forma, obs) for cod_cli, nome_cli, valor, forma, obs, data_reg in (recebimentos or [])],
+            despesas=[(data_reg, cat, desc, valor, obs) for desc, valor, cat, obs, data_reg in (despesas or [])],
+            metrics={
+                "clientes": len(clientes_programacao),
+                "total_estimado": sum(normalize_unit_price(r[2]) for r in clientes_programacao),
+                "recebimentos": total_receb,
+                "despesas": total_desp,
+            },
+            operacional_text=(
+                f"Resumo operacional da programação {prog}\n"
+                f"Motorista: {motorista or '-'}\n"
+                f"Veículo: {veiculo or '-'}\n"
+                f"Status: {status or '-'}\n"
+                f"Prestação: {prestacao or '-'}\n"
+                f"{op_resumo}\n"
+                f"Local rota: {_format_local_rota_display(local_rota) or '-'}\n"
+                f"Local de carregamento: {upper(fix_mojibake_text(local_carreg)) or '-'}\n"
+                f"Entregas: {total_entregas}\n"
+                f"KG estimado: {kg_estimado:.2f}\n"
+                f"KM rodado: {km_rodado:.2f}\n"
+                f"Média km/l: {media_km_l:.2f}\n"
+                f"Custo por KM: {custo_km:.2f}\n"
+                f"Recebimentos: {fmt_money(total_receb)}\n"
+                f"Despesas: {fmt_money(total_desp)}\n"
+                f"Resultado líquido: {fmt_money(resultado)}\n"
+                f"Cédulas em caixa: {fmt_money(ced_total)}\n"
+                f"Valor final caixa: {fmt_money(valor_final_caixa)}\n"
+                f"Diferença caixa x cédulas: {fmt_money(diferenca)}\n"
+            ),
+        )
         self._set_dashboard(
             f"Recebimentos: {fmt_money(total_receb)}",
             f"Despesas: {fmt_money(total_desp)}",
             f"Resultado: {fmt_money(resultado)}",
             f"Prestação: {prestacao or '-'}",
-            ["Entradas", "SaÃÂdas", "Resultado"],
+            ["Entradas", "Saídas", "Resultado"],
             [total_entradas, total_saidas, abs(resultado)],
             color="#0EA5E9",
         )
 
     def _gerar_resumo_mortalidade_motorista(self):
-        tipo_rel = self.cb_tipo_rel.get().strip() if hasattr(self, "cb_tipo_rel") else "Mortalidade Motorista"
+        tipo_rel = self.cb_tipo_rel.get().strip() if hasattr(self, "cb_tipo_rel") else "Ocorrencias por Motorista"
         filtro_cod = upper(self.ent_filtro_codigo.get().strip()) if hasattr(self, "ent_filtro_codigo") else ""
         filtro_mot = upper(self.ent_filtro_motorista.get().strip()) if hasattr(self, "ent_filtro_motorista") else ""
         filtro_data_raw = str(self.ent_filtro_data.get().strip()) if hasattr(self, "ent_filtro_data") else ""
@@ -2718,18 +3593,18 @@ class RelatoriosPage(PageBase):
                 rows = cur.fetchall() or []
 
         self.txt.delete("1.0", "end")
-        self.txt.insert("end", "RELATORIO DE MORTALIDADE POR MOTORISTA\n")
+        self.txt.insert("end", "RELATORIO DE OCORRENCIAS POR MOTORISTA\n")
         self.txt.insert("end", f"Tipo: {tipo_rel}\n")
         self.txt.insert("end", "=" * 95 + "\n\n")
 
         if not rows:
             self.txt.insert("end", "Nenhum dado encontrado para os filtros informados.\n")
-            self.set_status("STATUS: Nenhum dado de mortalidade encontrado.")
+            self.set_status("STATUS: Nenhum dado de ocorrencia encontrado.")
             return
 
         # Ranking por rota (menor mortalidade primeiro)
-        self.txt.insert("end", "[RANKING POR ROTA - MENOR MORTALIDADE]\n")
-        self.txt.insert("end", "POS | PROGRAMAÇÃO | MOTORISTA | MORTALIDADE | CLIENTES C/ MORT. | DATA | STATUS\n")
+        self.txt.insert("end", "[RANKING POR ROTA - MENOR OCORRENCIA]\n")
+        self.txt.insert("end", "POS | PROGRAMAÇÃO | MOTORISTA | OCORRENCIAS | CLIENTES C/ OCORR. | DATA | STATUS\n")
         self.txt.insert("end", "-" * 95 + "\n")
         for i, (codigo, motorista, data_ref, status_ref, mort_total, cli_mort) in enumerate(rows, start=1):
             self.txt.insert(
@@ -2753,7 +3628,7 @@ class RelatoriosPage(PageBase):
                 item["melhor"] = mort
 
         self.txt.insert("end", "\n[CONSOLIDADO POR MOTORISTA]\n")
-        self.txt.insert("end", "MOTORISTA | ROTAS | MORTALIDADE TOTAL | MEDIA/ROTA | MELHOR ROTA | PIOR ROTA\n")
+        self.txt.insert("end", "MOTORISTA | ROTAS | OCORRENCIAS TOTAL | MEDIA/ROTA | MELHOR ROTA | PIOR ROTA\n")
         self.txt.insert("end", "-" * 95 + "\n")
         ranking_motorista = sorted(
             resumo_mot.items(),
@@ -2775,8 +3650,8 @@ class RelatoriosPage(PageBase):
         self.txt.insert("end", "\n[DESTAQUE]\n")
         self.txt.insert(
             "end",
-            f"Motorista com menor média de mortalidade por rota: {melhor_mot} "
-            f"(média {melhor_media:.2f} aves/rota em {melhor_data['rotas']} rota(s)).\n",
+            f"Motorista com menor media de ocorrencias por rota: {melhor_mot} "
+            f"(media {melhor_media:.2f} unid./rota em {melhor_data['rotas']} rota(s)).\n",
         )
         self._set_dashboard(
             f"Rotas analisadas: {len(rows)}",
@@ -2787,14 +3662,14 @@ class RelatoriosPage(PageBase):
             [(_d["mort_total"] / max(_d["rotas"], 1)) for _m, _d in ranking_motorista[:8]],
             color="#7C3AED",
         )
-        self.set_status(f"STATUS: Relatório de mortalidade gerado ({len(rows)} rota(s)).")
+        self.set_status(f"STATUS: Relatorio de ocorrencias gerado ({len(rows)} rota(s)).")
 
     def exportar_excel(self):
         prog = upper(self.cb_prog.get())
         if not (require_pandas() and require_openpyxl()):
             return
         if not prog:
-            messagebox.showwarning("ATENCAO", "Selecione uma programacao.")
+            messagebox.showwarning("ATENCAO", "Selecione um planejamento.")
             return
 
         path = filedialog.asksaveasfilename(
@@ -2890,29 +3765,33 @@ class RelatoriosPage(PageBase):
         if not self.require_reportlab():
             return
         tipo_rel = self.cb_tipo_rel.get().strip() if hasattr(self, "cb_tipo_rel") else "Programacoes"
-        is_mortalidade = "MORTALIDADE" in upper(tipo_rel)
-        is_prestacao = "PRESTACAO" in upper(tipo_rel)
+        is_mortalidade = ("MORTALIDADE" in upper(tipo_rel)) or ("OCORRENCIA" in upper(tipo_rel)) or ("OCORRÊNCIA" in upper(tipo_rel))
+        is_prestacao = ("PRESTACAO" in upper(tipo_rel)) or ("FECHAMENTO" in upper(tipo_rel))
         prog = upper(self.cb_prog.get())
 
-        # Prestacao de contas: reutiliza exatamente o mesmo gerador de PDF da tela de Despesas.
+        # Fechamento operacional: reutiliza o mesmo gerador de PDF da tela de custos.
         if is_prestacao:
             if not prog:
-                messagebox.showwarning("ATENCAO", "Selecione uma programacao.")
+                messagebox.showwarning("ATENCAO", "Selecione um planejamento.")
                 return
             try:
                 despesas_page = None
                 if hasattr(self, "app") and hasattr(self.app, "pages"):
                     despesas_page = self.app.pages.get("Despesas")
+                    if despesas_page is None and hasattr(self.app, "_create_page_if_needed"):
+                        despesas_page = self.app._create_page_if_needed("Despesas")
                 if not despesas_page or not hasattr(despesas_page, "imprimir_resumo"):
-                    messagebox.showerror("ERRO", "Tela de Despesas indisponivel para gerar PDF da prestacao.")
+                    messagebox.showerror("ERRO", "Tela de Custos e Despesas indisponivel para gerar PDF do fechamento.")
                     return
 
                 prev_prog = getattr(despesas_page, "_current_programacao", "")
-                despesas_page._current_programacao = prog
-                despesas_page.imprimir_resumo()
-                despesas_page._current_programacao = prev_prog
+                try:
+                    despesas_page._current_programacao = prog
+                    despesas_page.imprimir_resumo(reimpressao=True)
+                finally:
+                    despesas_page._current_programacao = prev_prog
             except Exception as e:
-                messagebox.showerror("ERRO", f"Erro ao gerar PDF da prestacao: {str(e)}")
+                messagebox.showerror("ERRO", f"Erro ao gerar PDF do fechamento: {str(e)}")
             return
 
         if "PROGRAMACOES" in upper(tipo_rel):
@@ -2920,10 +3799,10 @@ class RelatoriosPage(PageBase):
             return
 
         if (not is_mortalidade) and (not prog):
-            messagebox.showwarning("ATENCAO", "Selecione uma programacao.")
+            messagebox.showwarning("ATENCAO", "Selecione um planejamento.")
             return
 
-        nome_base = f"RELATORIO_{prog}" if prog else "RELATORIO_MORTALIDADE_MOTORISTA"
+        nome_base = f"RELATORIO_{prog}" if prog else "RELATORIO_OCORRENCIAS_MOTORISTA"
 
         path = filedialog.asksaveasfilename(
             title="Salvar PDF do Relatorio",
@@ -2943,7 +3822,7 @@ class RelatoriosPage(PageBase):
             y = h - 60
 
             c.setFont("Helvetica-Bold", 14)
-            titulo_pdf = f"RELATORIO - {prog}" if prog else "RELATORIO - MORTALIDADE POR MOTORISTA"
+            titulo_pdf = f"RELATORIO - {prog}" if prog else "RELATORIO - OCORRENCIAS POR MOTORISTA"
             c.drawString(40, y, titulo_pdf)
             y -= 24
 
@@ -2965,7 +3844,7 @@ class RelatoriosPage(PageBase):
     def finalizar_rota(self):
         prog = upper(self.cb_prog.get())
         if not prog:
-            messagebox.showwarning("ATENCAO", "Selecione uma programacao.")
+            messagebox.showwarning("ATENCAO", "Selecione um planejamento.")
             return
         if not self.ensure_system_api_binding(context=f"Finalizar rota ({prog})", parent=self):
             return
@@ -3020,7 +3899,7 @@ class RelatoriosPage(PageBase):
     def reabrir_rota(self):
         prog = upper(self.cb_prog.get())
         if not prog:
-            messagebox.showwarning("ATENCAO", "Selecione uma programacao.")
+            messagebox.showwarning("ATENCAO", "Selecione um planejamento.")
             return
         if not self.ensure_system_api_binding(context=f"Reabrir rota ({prog})", parent=self):
             return

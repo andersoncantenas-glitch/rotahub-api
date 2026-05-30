@@ -81,11 +81,31 @@ class CadastrosPage(PageBase):
                 ("placa", "PLACA"),
                 ("modelo", "MODELO"),
                 ("capacidade_cx", "CAPACIDADE (CX)"),
+                ("status", "STATUS"),
             ],
             app=app,
         )
         crud_veiculos.pack(fill="both", expand=True)
         nb.add(frm_veiculos, text="Veiculos")
+
+        frm_caixas = ttk.Frame(nb, style="Content.TFrame")
+        crud_caixas = CadastroCRUD(
+            frm_caixas,
+            "Caixas",
+            "caixas",
+            [
+                ("codigo", "CODIGO RASTREIO"),
+                ("lote", "LOTE"),
+                ("cor", "COR"),
+                ("veiculo_placa", "VEICULO VINCULADO"),
+                ("status", "STATUS"),
+                ("data_compra", "DATA COMPRA"),
+                ("observacao", "OBSERVACAO / QUEBRA"),
+            ],
+            app=app,
+        )
+        crud_caixas.pack(fill="both", expand=True)
+        nb.add(frm_caixas, text="Caixas")
 
         frm_ajudantes = ttk.Frame(nb, style="Content.TFrame")
         crud_ajudantes = CadastroCRUD(
@@ -107,6 +127,33 @@ class CadastrosPage(PageBase):
         clientes_page = ClientesImportPage(frm_clientes, app=app)
         clientes_page.pack(fill="both", expand=True)
         nb.add(frm_clientes, text="Clientes")
+
+        frm_produtos = ttk.Frame(nb, style="Content.TFrame")
+        crud_produtos = CadastroCRUD(
+            frm_produtos,
+            "Produtos",
+            "produtos",
+            [
+                ("codigo", "CODIGO"),
+                ("nome", "NOME"),
+                ("categoria", "CATEGORIA"),
+                ("unidade", "UNIDADE"),
+                ("unidade_estoque", "UNID. ESTOQUE"),
+                ("controla_estoque_fisico", "EST. FISICO"),
+                ("controla_estoque_fiscal", "EST. FISCAL"),
+                ("estoque_min_kg", "MIN KG"),
+                ("estoque_min_caixas", "MIN CX"),
+                ("ncm", "NCM"),
+                ("cfop_entrada", "CFOP ENT."),
+                ("cfop_saida", "CFOP SAI."),
+                ("custo_padrao", "CUSTO"),
+                ("preco_padrao", "PRECO"),
+                ("status", "STATUS"),
+            ],
+            app=app,
+        )
+        crud_produtos.pack(fill="both", expand=True)
+        nb.add(frm_produtos, text="Produtos")
 
     def on_show(self):
         self.set_status("STATUS: Cadastros (CRUD + Base de Clientes via Wibi).")

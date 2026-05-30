@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import logging
 import re
+import unicodedata
 from tkinter import messagebox
 
 try:
@@ -100,6 +101,17 @@ def guess_col(cols, candidates):
         }
         for k, v in repl.items():
             s = s.replace(k, v)
+        mojibake_repl = {
+            "ã¡": "a", "ã ": "a", "ã¢": "a", "ã£": "a",
+            "ã©": "e", "ã¨": "e", "ãª": "e",
+            "ã¬": "i", "ã®": "i",
+            "ã³": "o", "ã²": "o", "ã´": "o", "ãµ": "o",
+            "ãº": "u", "ã¹": "u", "ã»": "u",
+            "ã§": "c",
+        }
+        for k, v in mojibake_repl.items():
+            s = s.replace(k, v)
+        s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
         s = re.sub(r"[^a-z0-9]+", " ", s).strip()
         return s
 
