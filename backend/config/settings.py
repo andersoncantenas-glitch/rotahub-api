@@ -5,9 +5,9 @@ Application settings and configuration
 import os
 import tempfile
 from pathlib import Path
-from typing import Annotated, Any, List
+from typing import Any, List
 from pydantic import field_validator
-from pydantic_settings import BaseSettings, NoDecode
+from pydantic_settings import BaseSettings
 
 
 def default_database_url() -> str:
@@ -46,13 +46,13 @@ class Settings(BaseSettings):
     # Server
     HOST: str = os.getenv("HOST", "0.0.0.0")
     PORT: int = int(os.getenv("PORT", "8000"))
-    ALLOWED_HOSTS: Annotated[List[str], NoDecode] = os.getenv(
+    ALLOWED_HOSTS: Any = os.getenv(
         "ALLOWED_HOSTS",
         "localhost,127.0.0.1,10.0.2.2",
     ).split(",")
 
     # CORS
-    CORS_ORIGINS: Annotated[List[str], NoDecode] = os.getenv(
+    CORS_ORIGINS: Any = os.getenv(
         "CORS_ORIGINS",
         "http://localhost:3000,http://127.0.0.1:3000,http://localhost:8000,http://10.0.2.2:8000"
     ).split(",")
@@ -104,7 +104,7 @@ class Settings(BaseSettings):
     # SaaS Settings
     DEFAULT_PLAN_VEHICLES: int = 5
     MAX_FREE_VEHICLES: int = 2
-    OWNER_ADMIN_USERS: Annotated[List[str], NoDecode] = os.getenv("OWNER_ADMIN_USERS", "ADMIN").split(",")
+    OWNER_ADMIN_USERS: Any = os.getenv("OWNER_ADMIN_USERS", "ADMIN").split(",")
     ROTA_ENABLE_LEGACY_MOBILE_API: bool = (
         os.getenv("ROTA_ENABLE_LEGACY_MOBILE_API", "0").lower()
         in {"1", "true", "yes", "y", "sim", "on"}
