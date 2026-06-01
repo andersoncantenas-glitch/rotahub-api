@@ -2,12 +2,26 @@
 import logging
 import re
 import unicodedata
-from tkinter import messagebox
+
+try:
+    from tkinter import messagebox
+except Exception:
+    messagebox = None
 
 try:
     import pandas as pd
 except Exception:
     pd = None
+
+
+def _show_error(title: str, message: str) -> None:
+    if messagebox is None:
+        logging.warning("%s: %s", title, message.replace("\n", " "))
+        return
+    try:
+        messagebox.showerror(title, message)
+    except Exception:
+        logging.debug("Falha ignorada")
 
 
 def upper(s):
@@ -16,14 +30,11 @@ def upper(s):
 
 def require_pandas() -> bool:
     if pd is None:
-        try:
-            messagebox.showerror(
-                "ERRO",
-                "Esta funcionalidade requer o pacote 'pandas'.\n\n"
-                "Instale com: pip install pandas"
-            )
-        except Exception:
-            logging.debug("Falha ignorada")
+        _show_error(
+            "ERRO",
+            "Esta funcionalidade requer o pacote 'pandas'.\n\n"
+            "Instale com: pip install pandas"
+        )
         return False
     return True
 
@@ -33,14 +44,11 @@ def _require_openpyxl() -> bool:
         import openpyxl  # noqa: F401
         return True
     except Exception:
-        try:
-            messagebox.showerror(
-                "ERRO",
-                "Exportacao Excel requer o pacote 'openpyxl'.\n\n"
-                "Instale com: pip install openpyxl"
-            )
-        except Exception:
-            logging.debug("Falha ignorada")
+        _show_error(
+            "ERRO",
+            "Exportacao Excel requer o pacote 'openpyxl'.\n\n"
+            "Instale com: pip install openpyxl"
+        )
         return False
 
 
@@ -49,14 +57,11 @@ def _require_xlrd() -> bool:
         import xlrd  # noqa: F401  # type: ignore[import-not-found]
         return True
     except Exception:
-        try:
-            messagebox.showerror(
-                "ERRO",
-                "Importacao de .xls requer o pacote 'xlrd'.\n\n"
-                "Instale com: pip install xlrd"
-            )
-        except Exception:
-            logging.debug("Falha ignorada")
+        _show_error(
+            "ERRO",
+            "Importacao de .xls requer o pacote 'xlrd'.\n\n"
+            "Instale com: pip install xlrd"
+        )
         return False
 
 
@@ -75,14 +80,11 @@ def require_excel_support(path: str) -> bool:
         return _require_xlrd()
     if p.endswith(".xlsx"):
         return _require_openpyxl()
-    try:
-        messagebox.showerror(
-            "ERRO",
-            "Formato de arquivo nao suportado.\n\n"
-            "Use .xlsx ou .xls."
-        )
-    except Exception:
-        logging.debug("Falha ignorada")
+    _show_error(
+        "ERRO",
+        "Formato de arquivo nao suportado.\n\n"
+        "Use .xlsx ou .xls."
+    )
     return False
 
 
