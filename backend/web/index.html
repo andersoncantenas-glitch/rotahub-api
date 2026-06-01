@@ -117,6 +117,14 @@
         </div>
       </header>
 
+      <section id="trialNotice" class="trial-notice hidden" aria-live="polite">
+        <div>
+          <strong id="trialNoticeTitle">Periodo de teste</strong>
+          <p id="trialNoticeText">Sua demonstracao esta ativa.</p>
+        </div>
+        <button id="trialNoticeBillingButton" type="button" class="primary">Ver assinatura</button>
+      </section>
+
       <section id="dashboardView" class="view">
         <section class="panel home-hero">
           <div class="panel-header">
@@ -180,7 +188,7 @@
             <div class="panel-header">
               <div>
                 <h2>Base e Sistema</h2>
-                <p class="panel-subtitle">Versao, banco e estado da API do navegador.</p>
+                <p class="panel-subtitle">Versao atual do sistema.</p>
               </div>
             </div>
             <div id="homeSystemInfo" class="home-info-grid"></div>
@@ -2788,6 +2796,7 @@
             </div>
             <button id="billingRefreshButton" type="button" class="secondary">ATUALIZAR</button>
           </div>
+          <div id="billingTrialBanner" class="billing-trial-banner hidden"></div>
           <div id="billingSummary" class="metric-grid billing-summary"></div>
         </section>
 

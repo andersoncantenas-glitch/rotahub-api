@@ -685,6 +685,40 @@ textarea {
   font-weight: 900;
 }
 
+.hidden {
+  display: none !important;
+}
+
+.success-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(15, 23, 42, 0.72);
+}
+
+.success-modal-card {
+  width: min(100%, 480px);
+  padding: 30px;
+  border-radius: 20px;
+  background: #fff;
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.28);
+}
+
+.success-modal-card strong {
+  display: block;
+  color: var(--primary-dark);
+  font-size: 1.55rem;
+}
+
+.success-modal-card p {
+  margin: 12px 0 22px;
+  color: var(--muted);
+  line-height: 1.65;
+}
+
 @media (max-width: 1080px) {
   .hero {
     grid-template-columns: minmax(330px, 0.9fr) minmax(390px, 1.1fr);

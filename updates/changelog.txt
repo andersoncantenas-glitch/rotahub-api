@@ -1,3 +1,8 @@
+2026-06-01 15:39:22 - v5.0.3
+- Release automatizada (patch).
+- Versao anterior: v5.0.2.
+- Correcoes SaaS: cadastro publico com login imediato, privacidade das informacoes de base para clientes, aviso de teste/assinatura e migracao da Escala para evitar erro interno.
+
 2026-06-01 09:40:00 - v5.0.2
 - Release web (patch).
 - Versao anterior: v5.0.1.

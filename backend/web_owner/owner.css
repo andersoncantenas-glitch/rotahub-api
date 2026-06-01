@@ -132,6 +132,7 @@ header p { margin: 4px 0 0; color: var(--muted); }
 .panel-actions { display: flex; gap: 8px; padding: 0 14px 14px; }
 .info-grid { display: grid; grid-template-columns: repeat(3, minmax(160px, 1fr)); gap: 10px; padding: 0 14px 14px; }
 .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.muted-action { color: var(--muted); font-size: 12px; font-weight: 800; }
 .inline-control { min-width: 126px; }
 .trial-days { width: 72px; min-width: 72px; }
 .contact-lines { display: grid; gap: 3px; min-width: 180px; }

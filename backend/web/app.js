@@ -758,6 +758,7 @@ function bindEvents() {
   el("permissoesModuloFilter").addEventListener("change", renderPermissoesView);
   el("permissoesApplyPerfilButton").addEventListener("click", applyPermissionProfile);
   el("billingRefreshButton").addEventListener("click", loadBilling);
+  el("trialNoticeBillingButton").addEventListener("click", () => switchView("billing"));
   el("saasAdminRefreshButton").addEventListener("click", loadSaasAdmin);
   el("saasAdminCompanySelect").addEventListener("change", () => {
     state.saasAdmin.selectedCompanyId = Number(el("saasAdminCompanySelect").value || 0) || null;
@@ -1014,6 +1015,7 @@ async function loadSession() {
     state.currentUser = await apiRequest("/users/me");
     state.planContext = await apiRequest("/auth/plan-context");
     showApp();
+    renderTrialNotice();
     scheduleAuthRefresh();
     await loadLogisticaConfig({silent: true});
     await loadDashboard();
@@ -1051,6 +1053,7 @@ function logout(event) {
   state.tokenExpiresAt = 0;
   state.currentUser = null;
   state.planContext = null;
+  state.billing = {company: null, subscription: null, usage: {}, plans: [], pending_requests: []};
   sessionStorage.removeItem(TOKEN_KEY);
   sessionStorage.removeItem(TOKEN_EXPIRES_KEY);
   showLogin();
@@ -1491,11 +1494,85 @@ function billingStatusLabel(value) {
   return labels[key] || clean(value) || "-";
 }
 
+function dateOnly(value) {
+  const raw = clean(value);
+  if (!raw) return null;
+  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!match) return null;
+  return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+}
+
+function trialDaysRemaining(value) {
+  const due = dateOnly(value);
+  if (!due) return null;
+  const today = new Date();
+  const start = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  return Math.ceil((due.getTime() - start.getTime()) / 86400000);
+}
+
+function trialMessage(subscription) {
+  if (clean(subscription?.status).toLowerCase() !== "trialing") return null;
+  const days = trialDaysRemaining(subscription.next_due_date);
+  const planName = subscription.plan_name || subscription.plan_code || "melhor plano";
+  if (days === null) {
+    return {
+      title: "Periodo de teste ativo",
+      text: `Sua demonstracao esta ativa no ${planName}. Acesse Plano e Assinatura para definir o pacote definitivo.`,
+      daysLabel: "-",
+    };
+  }
+  if (days < 0) {
+    return {
+      title: "Periodo de teste vencido",
+      text: `Seu periodo de teste venceu. Escolha a assinatura para manter o acesso ao sistema.`,
+      daysLabel: "Vencido",
+    };
+  }
+  const dayText = days === 1 ? "1 dia restante" : `${days} dias restantes`;
+  return {
+    title: `Teste gratis: ${dayText}`,
+    text: `Durante a demonstracao voce esta usando o ${planName}, com todos os recursos do melhor plano liberados.`,
+    daysLabel: dayText,
+  };
+}
+
+function currentSubscriptionForTrialNotice() {
+  const billingSubscription = state.billing?.subscription || {};
+  if (billingSubscription.status) return billingSubscription;
+  const context = state.planContext || {};
+  return {
+    status: context.subscription_status,
+    next_due_date: context.next_due_date,
+    plan_name: context.plan_name,
+    plan_code: context.plan_code,
+  };
+}
+
+function renderTrialNotice() {
+  const notice = el("trialNotice");
+  if (!notice) return;
+  const message = trialMessage(currentSubscriptionForTrialNotice());
+  notice.classList.toggle("hidden", !message);
+  if (!message) return;
+  el("trialNoticeTitle").textContent = message.title;
+  el("trialNoticeText").textContent = message.text;
+}
+
 async function loadBilling() {
   try {
     const data = await apiRequest("/billing/my-plan");
     state.billing = data || {};
+    if (state.billing.subscription) {
+      state.planContext = {
+        ...(state.planContext || {}),
+        plan_code: state.billing.subscription.plan_code,
+        plan_name: state.billing.subscription.plan_name,
+        subscription_status: state.billing.subscription.status,
+        next_due_date: state.billing.subscription.next_due_date,
+      };
+    }
     renderBilling();
+    renderTrialNotice();
   } catch (error) {
     notify(error.message, true);
   }
@@ -1517,6 +1594,7 @@ function renderBilling() {
   const planName = subscription.plan_name || subscription.plan_code || "Sem plano";
   const vehicleLimit = subscription.plan_vehicle_limit;
   const userLimit = subscription.plan_user_limit;
+  renderBillingTrialBanner(subscription);
   el("billingInfo").textContent = `${planName} / ${billingStatusLabel(subscription.status)} / vencimento ${subscription.next_due_date || "-"}`;
   el("billingSummary").innerHTML = [
     ["Plano atual", planName, billingStatusLabel(subscription.status)],
@@ -1534,18 +1612,46 @@ function renderBilling() {
   renderBillingRequests();
 }
 
+function renderBillingTrialBanner(subscription) {
+  const banner = el("billingTrialBanner");
+  if (!banner) return;
+  const message = trialMessage(subscription || {});
+  banner.classList.toggle("hidden", !message);
+  if (!message) {
+    banner.innerHTML = "";
+    return;
+  }
+  banner.innerHTML = `
+    <div>
+      <span>Periodo de teste</span>
+      <strong>${escapeHtml(message.title)}</strong>
+      <p>${escapeHtml(message.text)}</p>
+    </div>
+    <em>${escapeHtml(message.daysLabel)}</em>
+  `;
+}
+
 function renderBillingPlans() {
   const currentCode = clean((state.billing.subscription || {}).plan_code).toLowerCase();
+  const trialing = clean((state.billing.subscription || {}).status).toLowerCase() === "trialing";
   const pending = (state.billing.pending_requests || []).some((item) => clean(item.status).toLowerCase() === "pending");
   const plans = state.billing.plans || [];
   el("billingPlans").innerHTML = plans.map((plan) => {
     const code = clean(plan.code).toLowerCase();
-    const current = code === currentCode;
+    const current = code === currentCode && !trialing;
+    const disabled = pending || (current && !trialing);
+    const actionLabel = pending
+      ? "Solicitacao pendente"
+      : current && !trialing
+        ? "Plano atual"
+        : trialing
+          ? "Escolher este plano"
+          : "Solicitar alteracao";
     const features = Object.entries(plan.features || {}).filter(([, enabled]) => enabled).slice(0, 7);
     return `
       <article class="billing-plan-card ${current ? "current" : ""}">
         <div>
-          <span>${current ? "Plano atual" : "Pacote"}</span>
+          <span>${current ? (trialing ? "Liberado no teste" : "Plano atual") : "Pacote"}</span>
           <h3>${escapeHtml(plan.name || plan.code)}</h3>
           <strong>${escapeHtml(formatCurrencyBR(plan.monthly_price || 0))}/mês</strong>
         </div>
@@ -1557,7 +1663,7 @@ function renderBillingPlans() {
         <div class="billing-plan-features">
           ${features.map(([key]) => `<span>${escapeHtml(saasFeatureLabels[key] || key)}</span>`).join("")}
         </div>
-        <button type="button" class="secondary" data-request-plan="${escapeHtml(code)}" ${current || pending ? "disabled" : ""}>
+        <button type="button" class="secondary" data-request-plan="${escapeHtml(code)}" ${disabled ? "disabled" : ""}>
           ${pending ? "Solicitação pendente" : current ? "Plano atual" : "Solicitar alteração"}
         </button>
       </article>
@@ -9370,14 +9476,25 @@ function renderHomePending(pendencias) {
 }
 
 function renderHomeSystem(sistema) {
-  el("homeSystemInfo").innerHTML = [
-    homeInfoItem("Versao local", sistema.versao_local || "-"),
-    homeInfoItem("Versao disponivel", sistema.versao_disponivel || "-"),
-    homeInfoItem("API", sistema.api || "-"),
-    homeInfoItem("Ambiente", sistema.ambiente || "-"),
-    homeInfoItem("Banco", sistema.banco || "-"),
-    homeInfoItem("Data/Hora", formatDate(sistema.data_hora_atual)),
-  ].join("");
+  const items = [
+    homeInfoItem("Versao atual", sistema.versao_local || "-"),
+  ];
+  if (Object.prototype.hasOwnProperty.call(sistema, "versao_disponivel")) {
+    items.push(homeInfoItem("Versao disponivel", sistema.versao_disponivel || "-"));
+  }
+  if (Object.prototype.hasOwnProperty.call(sistema, "api")) {
+    items.push(homeInfoItem("API", sistema.api || "-"));
+  }
+  if (Object.prototype.hasOwnProperty.call(sistema, "ambiente")) {
+    items.push(homeInfoItem("Ambiente", sistema.ambiente || "-"));
+  }
+  if (Object.prototype.hasOwnProperty.call(sistema, "banco")) {
+    items.push(homeInfoItem("Banco", sistema.banco || "-"));
+  }
+  if (Object.prototype.hasOwnProperty.call(sistema, "data_hora_atual")) {
+    items.push(homeInfoItem("Data/Hora", formatDate(sistema.data_hora_atual)));
+  }
+  el("homeSystemInfo").innerHTML = items.join("");
 }
 
 function homeInfoItem(label, value) {

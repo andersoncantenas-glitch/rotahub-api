@@ -183,7 +183,10 @@ async def request_plan_change(
         requested_plan = plan_by_code(conn, payload.requested_plan_code)
         if not requested_plan or payload.requested_plan_code not in COMMERCIAL_PLAN_CODES:
             raise HTTPException(status_code=404, detail="Plano solicitado nao encontrado.")
-        if str(subscription.get("plan_code") or "").lower() == payload.requested_plan_code:
+        if (
+            str(subscription.get("plan_code") or "").lower() == payload.requested_plan_code
+            and str(subscription.get("status") or "").strip().lower() != "trialing"
+        ):
             raise HTTPException(status_code=409, detail="Este ja e o plano atual da empresa.")
         existing = [
             item for item in list_plan_change_requests(conn, status="pending", limit=500)

@@ -78,6 +78,11 @@ class BackendAuthFlowTests(unittest.TestCase):
             self.assertEqual(me.status_code, 200)
             self.assertEqual(me.json()["username"], "admin")
 
+            home = client.get("/api/v1/home/overview", headers=headers)
+            self.assertEqual(home.status_code, 200)
+            self.assertIn("banco", home.json()["sistema"])
+            self.assertIn("ambiente", home.json()["sistema"])
+
             users = client.get("/api/v1/users/", headers=headers)
             self.assertEqual(users.status_code, 200)
             self.assertEqual(users.json()[0]["username"], "admin")
@@ -120,6 +125,97 @@ class BackendAuthFlowTests(unittest.TestCase):
             script = client.get("/app/app.js")
             self.assertEqual(script.status_code, 200)
             self.assertIn("rotahub_access_token", script.text)
+
+    def test_public_signup_creates_trial_and_allows_immediate_login(self):
+        from backend.api.v1.endpoints.public import PUBLIC_SIGNUP_ATTEMPTS
+
+        PUBLIC_SIGNUP_ATTEMPTS.clear()
+        payload = {
+            "name": "ADMIN",
+            "document": "12345678909",
+            "email": "cliente.publico@example.com",
+            "phone": "85999999999",
+            "company": "EMPRESA PUBLICA",
+            "plan_code": "starter",
+            "username": "cliente.publico",
+            "password": "Cliente@123",
+        }
+        with TestClient(app, base_url="http://testserver") as client:
+            created = client.post("/api/v1/public/signup", json=payload)
+            self.assertEqual(created.status_code, 201)
+            self.assertTrue(created.json()["ok"])
+            self.assertEqual(created.json()["next_url"], "/app/index.html")
+
+            login = client.post(
+                "/api/v1/auth/login",
+                data={"username": payload["username"], "password": payload["password"]},
+            )
+            self.assertEqual(login.status_code, 200)
+            headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+            me = client.get("/api/v1/users/me", headers=headers)
+            self.assertEqual(me.status_code, 200)
+            self.assertEqual(me.json()["username"], payload["username"])
+            self.assertEqual(me.json()["permissoes"], "ADMIN")
+
+            plan = client.get("/api/v1/auth/plan-context", headers=headers)
+            self.assertEqual(plan.status_code, 200)
+            self.assertEqual(plan.json()["plan_code"], "enterprise")
+            self.assertEqual(plan.json()["subscription_status"], "trialing")
+
+            home = client.get("/api/v1/home/overview", headers=headers)
+            self.assertEqual(home.status_code, 200)
+            self.assertEqual(set(home.json()["sistema"]), {"versao_local"})
+
+            owner = client.get("/api/v1/saas-admin/dashboard", headers=headers)
+            self.assertEqual(owner.status_code, 403)
+
+            plan_request = client.post(
+                "/api/v1/billing/plan-change-requests",
+                headers=headers,
+                json={"requested_plan_code": "enterprise", "message": "Manter melhor plano apos o teste."},
+            )
+            self.assertEqual(plan_request.status_code, 201)
+            self.assertEqual(plan_request.json()["request"]["requested_plan_code"], "enterprise")
+
+            duplicate = client.post("/api/v1/public/signup", json=payload)
+            self.assertEqual(duplicate.status_code, 409)
+
+    def test_public_signup_rate_limits_repeated_attempts(self):
+        from backend.api.v1.endpoints.public import PUBLIC_SIGNUP_ATTEMPTS
+
+        PUBLIC_SIGNUP_ATTEMPTS.clear()
+        with TestClient(app, base_url="http://testserver") as client:
+            for index in range(5):
+                response = client.post(
+                    "/api/v1/public/signup",
+                    json={
+                        "name": f"CLIENTE LIMITE {index}",
+                        "document": f"1234567890{index}",
+                        "email": f"limite{index}@example.com",
+                        "phone": "85999999999",
+                        "company": f"EMPRESA LIMITE {index}",
+                        "plan_code": "starter",
+                        "username": f"cliente.limite.{index}",
+                        "password": "Cliente@123",
+                    },
+                )
+                self.assertIn(response.status_code, {201, 409})
+
+            limited = client.post(
+                "/api/v1/public/signup",
+                json={
+                    "name": "CLIENTE BLOQUEADO",
+                    "document": "12345678999",
+                    "email": "bloqueado@example.com",
+                    "phone": "85999999999",
+                    "company": "EMPRESA BLOQUEADA",
+                    "plan_code": "starter",
+                    "username": "cliente.bloqueado",
+                    "password": "Cliente@123",
+                },
+            )
+            self.assertEqual(limited.status_code, 429)
 
     def test_admin_can_create_update_and_login_new_user(self):
         with TestClient(app, base_url="http://testserver") as client:

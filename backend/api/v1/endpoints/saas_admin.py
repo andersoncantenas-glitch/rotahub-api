@@ -34,6 +34,7 @@ router = APIRouter()
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 VALID_COMPANY_STATUSES = {"active", "suspended", "cancelled", "inactive"}
+TRIAL_PLAN_PRIORITY = ("enterprise", "professional", "growth", "starter")
 
 
 class CompanyStatusPayload(BaseModel):
@@ -201,6 +202,24 @@ def company_code(value: str, lead_id: int) -> str:
     normalized = unicodedata.normalize("NFKD", str(value or "empresa")).encode("ascii", "ignore").decode("ascii")
     slug = re.sub(r"[^a-z0-9]+", "-", normalized.lower()).strip("-")[:42] or "empresa"
     return f"{slug}-{int(lead_id)}"
+
+
+def best_trial_plan(cur) -> dict:
+    placeholders = ",".join("?" for _ in TRIAL_PLAN_PRIORITY)
+    cur.execute(
+        f"""
+        SELECT *
+          FROM plans
+         WHERE status='active'
+           AND code IN ({placeholders})
+        """,
+        TRIAL_PLAN_PRIORITY,
+    )
+    plans = {str(row["code"] or "").strip().lower(): row_to_dict(row) for row in cur.fetchall()}
+    for code in TRIAL_PLAN_PRIORITY:
+        if code in plans:
+            return plans[code]
+    raise HTTPException(status_code=404, detail="Plano de demonstracao nao encontrado.")
 
 
 def raise_service_error(result: dict, *, default_status: int = status.HTTP_400_BAD_REQUEST) -> None:
@@ -411,10 +430,7 @@ async def approve_signup_lead_trial(
             raise HTTPException(status_code=404, detail="Solicitacao nao encontrada.")
         if str(lead.get("status") or "").strip().lower() != "novo":
             raise HTTPException(status_code=409, detail="Esta solicitacao ja foi analisada.")
-        cur.execute("SELECT * FROM plans WHERE code=? AND status='active' LIMIT 1", (payload.plan_code,))
-        plan = row_to_dict(cur.fetchone())
-        if not plan:
-            raise HTTPException(status_code=404, detail="Plano nao encontrado.")
+        plan = best_trial_plan(cur)
         cur.execute("SELECT id FROM companies WHERE document=? LIMIT 1", (lead.get("document"),))
         if cur.fetchone():
             raise HTTPException(status_code=409, detail="Ja existe uma empresa cadastrada com este CPF/CNPJ.")
@@ -487,7 +503,8 @@ async def approve_signup_lead_trial(
             "metadata": {
                 "actor": actor,
                 "lead_id": int(lead_id),
-                "plan_code": payload.plan_code,
+                "plan_code": plan.get("code"),
+                "requested_plan_code": payload.plan_code,
                 "trial_days": payload.trial_days,
             },
         }

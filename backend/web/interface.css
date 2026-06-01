@@ -146,6 +146,55 @@ body {
   font-size: 12px;
 }
 
+.trial-notice,
+.billing-trial-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin: 0 0 18px;
+  padding: 16px 18px;
+  border: 1px solid #99f6e4;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #ecfeff, #f0fdf4);
+  box-shadow: 0 14px 34px rgba(15, 118, 110, 0.12);
+}
+
+.trial-notice strong,
+.billing-trial-banner strong {
+  display: block;
+  color: #0f766e;
+  font-size: 17px;
+}
+
+.trial-notice p,
+.billing-trial-banner p {
+  margin: 4px 0 0;
+  color: #344054;
+  line-height: 1.45;
+}
+
+.billing-trial-banner {
+  margin: 14px;
+}
+
+.billing-trial-banner span {
+  color: #0f766e;
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.billing-trial-banner em {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 8px 12px;
+  background: #0f766e;
+  color: #fff;
+  font-style: normal;
+  font-weight: 900;
+}
+
 .billing-plans {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));

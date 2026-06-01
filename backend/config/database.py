@@ -1244,7 +1244,8 @@ def _ensure_backend_columns(sync_conn):
                     motivo TEXT,
                     status TEXT DEFAULT 'ATIVA',
                     criado_em TEXT,
-                    atualizado_em TEXT
+                    atualizado_em TEXT,
+                    company_id INTEGER
                 )
                 """
             )
@@ -1263,11 +1264,16 @@ def _ensure_backend_columns(sync_conn):
             "status": "TEXT DEFAULT 'ATIVA'",
             "criado_em": "TEXT",
             "atualizado_em": "TEXT",
+            "company_id": "INTEGER",
         },
     )
     if "escala_folgas" in table_names:
+        sync_conn.execute(text("UPDATE escala_folgas SET company_id=1 WHERE company_id IS NULL"))
         sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_backend_escala_folgas_status ON escala_folgas(status)"))
         sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_backend_escala_folgas_pessoa ON escala_folgas(tipo, pessoa_nome)"))
+        sync_conn.execute(
+            text("CREATE INDEX IF NOT EXISTS idx_backend_escala_folgas_company_status ON escala_folgas(company_id, status)")
+        )
 
     add_missing_columns(
         "roteiro_operacional",

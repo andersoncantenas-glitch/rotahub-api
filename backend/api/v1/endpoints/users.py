@@ -83,9 +83,8 @@ async def require_admin_user(current_user: User = Depends(get_current_user)) -> 
 async def require_owner_user(current_user: User = Depends(get_current_user)) -> User:
     profile = str(current_user.permissoes or "").strip().upper()
     username = str(current_user.username or "").strip().upper()
-    name = str(current_user.nome or "").strip().upper()
     owner_users = {item.strip().upper() for item in settings.OWNER_ADMIN_USERS if item.strip()}
-    if profile in {"DONO", "OWNER", "SUPERADMIN", "SUPER_ADMIN"} or username in owner_users or name in owner_users:
+    if profile in {"DONO", "OWNER", "SUPERADMIN", "SUPER_ADMIN"} or username in owner_users:
         return current_user
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,

@@ -2,14 +2,16 @@
 """
 Public marketing and signup endpoints.
 
-These endpoints intentionally do not authenticate users into the operational
-system. They collect commercial interest and expose plan cards for the public
-landing page.
+These endpoints expose plan cards and provision the initial trial account for
+the public landing page.
 """
 from __future__ import annotations
 
 import json
 import re
+import time
+import unicodedata
+from collections import defaultdict
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -18,8 +20,14 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config.database import get_db
+from backend.services.auth import get_password_hash
 
 router = APIRouter()
+
+PUBLIC_SIGNUP_MAX_ATTEMPTS = 5
+PUBLIC_SIGNUP_WINDOW_SECONDS = 10 * 60
+PUBLIC_SIGNUP_ATTEMPTS: dict[str, list[float]] = defaultdict(list)
+TRIAL_PLAN_PRIORITY = ("enterprise", "professional", "growth", "starter")
 
 
 PLAN_FALLBACKS = [
@@ -97,9 +105,11 @@ class PublicSignupPayload(BaseModel):
     phone: str = Field(min_length=8, max_length=30)
     company: str = Field(min_length=2, max_length=180)
     plan_code: str = Field(min_length=1, max_length=80)
+    username: str = Field(min_length=3, max_length=80)
+    password: str = Field(min_length=6, max_length=128)
     message: str | None = Field(default="", max_length=600)
 
-    @field_validator("name", "document", "email", "phone", "company", "plan_code", "message", mode="before")
+    @field_validator("name", "document", "email", "phone", "company", "plan_code", "username", "message", mode="before")
     @classmethod
     def strip_text(cls, value: Any) -> str:
         return str(value or "").strip()
@@ -124,6 +134,67 @@ class PublicSignupPayload(BaseModel):
     @classmethod
     def normalize_plan(cls, value: str) -> str:
         return value.strip().lower()
+
+    @field_validator("username")
+    @classmethod
+    def validate_username(cls, value: str) -> str:
+        username = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9._@-]+", username):
+            raise ValueError("Use somente letras, numeros, ponto, traco, underline ou @ no login.")
+        return username
+
+
+def company_code(value: str, lead_id: int) -> str:
+    normalized = unicodedata.normalize("NFKD", str(value or "empresa")).encode("ascii", "ignore").decode("ascii")
+    slug = re.sub(r"[^a-z0-9]+", "-", normalized.lower()).strip("-")[:42] or "empresa"
+    return f"{slug}-{int(lead_id)}"
+
+
+def public_client_ip(request: Request) -> str:
+    forwarded = str(request.headers.get("x-forwarded-for") or "").strip()
+    if forwarded:
+        return forwarded.split(",", 1)[0].strip()
+    real_ip = str(request.headers.get("x-real-ip") or "").strip()
+    if real_ip:
+        return real_ip
+    return str(request.client.host if request.client else "unknown")
+
+
+def enforce_public_signup_rate_limit(request: Request) -> str:
+    ip_address = public_client_ip(request)
+    now = time.time()
+    attempts = [
+        attempted_at
+        for attempted_at in PUBLIC_SIGNUP_ATTEMPTS[ip_address]
+        if now - attempted_at < PUBLIC_SIGNUP_WINDOW_SECONDS
+    ]
+    if len(attempts) >= PUBLIC_SIGNUP_MAX_ATTEMPTS:
+        PUBLIC_SIGNUP_ATTEMPTS[ip_address] = attempts
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Muitas tentativas de cadastro. Aguarde alguns minutos e tente novamente.",
+        )
+    attempts.append(now)
+    PUBLIC_SIGNUP_ATTEMPTS[ip_address] = attempts
+    return ip_address
+
+
+async def best_trial_plan_id(db: AsyncSession) -> int:
+    result = await db.execute(
+        text(
+            """
+            SELECT id, code
+              FROM plans
+             WHERE status='active'
+               AND code IN ('enterprise', 'professional', 'growth', 'starter')
+            """
+        )
+    )
+    plans = {str(row.code or "").strip().lower(): int(row.id) for row in result.fetchall()}
+    for code in TRIAL_PLAN_PRIORITY:
+        if code in plans:
+            return plans[code]
+    raise HTTPException(status_code=404, detail="Plano de demonstracao nao encontrado.")
 
 
 def decode_features(raw: Any) -> list[str]:
@@ -165,11 +236,27 @@ async def ensure_public_signup_table(db: AsyncSession) -> None:
                 status TEXT DEFAULT 'novo',
                 user_agent TEXT,
                 ip_address TEXT,
+                company_id INTEGER,
+                reviewed_at TEXT,
+                reviewed_by TEXT,
+                review_notes TEXT,
+                trial_days INTEGER,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
     )
+    result = await db.execute(text("PRAGMA table_info(public_signup_leads)"))
+    columns = {str(row[1]).lower() for row in result.fetchall()}
+    for column, definition in {
+        "company_id": "INTEGER",
+        "reviewed_at": "TEXT",
+        "reviewed_by": "TEXT",
+        "review_notes": "TEXT",
+        "trial_days": "INTEGER",
+    }.items():
+        if column not in columns:
+            await db.execute(text(f"ALTER TABLE public_signup_leads ADD COLUMN {column} {definition}"))
     await db.execute(text("CREATE INDEX IF NOT EXISTS idx_public_signup_leads_document ON public_signup_leads(document)"))
     await db.execute(text("CREATE INDEX IF NOT EXISTS idx_public_signup_leads_created ON public_signup_leads(created_at)"))
 
@@ -230,38 +317,154 @@ async def public_signup(
     db: AsyncSession = Depends(get_db),
 ):
     await ensure_public_signup_table(db)
-    result = await db.execute(
-        text("SELECT 1 FROM public_signup_leads WHERE document=:document AND status='novo' LIMIT 1"),
-        {"document": payload.document},
-    )
-    duplicate = result.scalar_one_or_none()
-    if duplicate:
-        raise HTTPException(status_code=409, detail="Ja existe um cadastro em analise para este CPF/CNPJ.")
-    await db.execute(
-        text(
-            """
-            INSERT INTO public_signup_leads (
-                name, document, email, phone, company, plan_code, message, user_agent, ip_address
-            ) VALUES (
-                :name, :document, :email, :phone, :company, :plan_code, :message, :user_agent, :ip_address
-            )
-            """
-        ),
-        {
-            "name": payload.name,
-            "document": payload.document,
-            "email": str(payload.email),
-            "phone": payload.phone,
-            "company": payload.company,
-            "plan_code": payload.plan_code,
-            "message": payload.message or "",
-            "user_agent": request.headers.get("user-agent", "")[:300],
-            "ip_address": str(request.client.host if request.client else ""),
-        },
-    )
-    await db.commit()
+    ip_address = enforce_public_signup_rate_limit(request)
+    try:
+        result = await db.execute(
+            text("SELECT 1 FROM companies WHERE document=:document LIMIT 1"),
+            {"document": payload.document},
+        )
+        if result.scalar_one_or_none():
+            raise HTTPException(status_code=409, detail="Ja existe uma empresa cadastrada com este CPF/CNPJ.")
+
+        result = await db.execute(
+            text("SELECT 1 FROM usuarios WHERE UPPER(TRIM(username))=UPPER(:username) LIMIT 1"),
+            {"username": payload.username},
+        )
+        if result.scalar_one_or_none():
+            raise HTTPException(status_code=409, detail="Este login ja esta em uso. Escolha outro.")
+
+        plan_id = await best_trial_plan_id(db)
+
+        await db.execute(
+            text(
+                """
+                INSERT INTO public_signup_leads (
+                    name, document, email, phone, company, plan_code, message,
+                    status, user_agent, ip_address, reviewed_at, reviewed_by, trial_days
+                ) VALUES (
+                    :name, :document, :email, :phone, :company, :plan_code, :message,
+                    'aprovado', :user_agent, :ip_address, datetime('now'), 'cadastro_publico', 30
+                )
+                """
+            ),
+            {
+                "name": payload.name,
+                "document": payload.document,
+                "email": str(payload.email),
+                "phone": payload.phone,
+                "company": payload.company,
+                "plan_code": payload.plan_code,
+                "message": payload.message or "",
+                "user_agent": request.headers.get("user-agent", "")[:300],
+                "ip_address": ip_address,
+            },
+        )
+        lead_id = (await db.execute(text("SELECT last_insert_rowid()"))).scalar_one()
+        result = await db.execute(
+            text(
+                """
+                INSERT INTO companies (
+                    code, name, legal_name, document, email, phone, status, timezone, created_at, updated_at
+                )
+                SELECT
+                    :code, :company, :company, :document, :email, :phone,
+                    'active', 'America/Fortaleza', datetime('now'), datetime('now')
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM companies WHERE document=:document
+                )
+                """
+            ),
+            {
+                "code": company_code(payload.company, lead_id),
+                "company": payload.company,
+                "document": payload.document,
+                "email": str(payload.email),
+                "phone": payload.phone,
+            },
+        )
+        if result.rowcount != 1:
+            raise HTTPException(status_code=409, detail="Ja existe uma empresa cadastrada com este CPF/CNPJ.")
+        company_id = (await db.execute(text("SELECT last_insert_rowid()"))).scalar_one()
+        await db.execute(
+            text(
+                """
+                INSERT INTO subscriptions (
+                    company_id, plan_id, status, billing_cycle,
+                    current_period_start, current_period_end, next_due_date,
+                    created_at, updated_at
+                ) VALUES (
+                    :company_id, :plan_id, 'trialing', 'monthly',
+                    date('now'), date('now', '+30 day'), date('now', '+30 day'),
+                    datetime('now'), datetime('now')
+                )
+                """
+            ),
+            {"company_id": company_id, "plan_id": plan_id},
+        )
+        subscription_id = (await db.execute(text("SELECT last_insert_rowid()"))).scalar_one()
+        result = await db.execute(
+            text(
+                """
+                INSERT INTO usuarios (
+                    username, nome, senha, permissoes, cpf, telefone, is_active, company_id
+                )
+                SELECT
+                    :username, :name, :password_hash, 'ADMIN', :document, :phone, 1, :company_id
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM usuarios WHERE UPPER(TRIM(username))=UPPER(:username)
+                )
+                """
+            ),
+            {
+                "username": payload.username,
+                "name": payload.name,
+                "password_hash": get_password_hash(payload.password),
+                "document": payload.document,
+                "phone": payload.phone,
+                "company_id": company_id,
+            },
+        )
+        if result.rowcount != 1:
+            raise HTTPException(status_code=409, detail="Este login ja esta em uso. Escolha outro.")
+        await db.execute(
+            text("UPDATE public_signup_leads SET company_id=:company_id WHERE id=:lead_id"),
+            {"company_id": company_id, "lead_id": lead_id},
+        )
+        await db.execute(
+            text(
+                """
+                INSERT INTO audit_logs (
+                    company_id, actor_type, action, entity_type, entity_id, severity,
+                    ip_address, metadata_json, created_at
+                ) VALUES (
+                    :company_id, 'customer', 'demonstracao_autoativada', 'subscription',
+                    :subscription_id, 'info', :ip_address, :metadata_json, datetime('now')
+                )
+                """
+            ),
+            {
+                "company_id": company_id,
+                "subscription_id": str(subscription_id),
+                "ip_address": ip_address,
+                "metadata_json": json.dumps(
+                    {"lead_id": int(lead_id), "plan_code": payload.plan_code, "trial_days": 30},
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ),
+            },
+        )
+        await db.commit()
+    except HTTPException:
+        await db.rollback()
+        raise
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Nao foi possivel concluir o cadastro. Confira os dados e tente novamente.",
+        ) from exc
     return {
         "ok": True,
-        "message": "Cadastro recebido. A equipe RotaHub irá validar os dados e liberar o acesso.",
+        "message": "Cadastro concluido. Seu acesso ao RotaHub ja esta liberado.",
         "next_url": "/app/index.html",
     }

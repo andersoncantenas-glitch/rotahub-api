@@ -240,6 +240,32 @@ def database_label() -> str:
     return str((ROOT_DIR / path).resolve()) if path.startswith("./") else path
 
 
+def is_owner_user(user: User) -> bool:
+    profile = str(user.permissoes or "").strip().upper()
+    username = str(user.username or "").strip().upper()
+    owner_users = {item.strip().upper() for item in settings.OWNER_ADMIN_USERS if item.strip()}
+    return profile in {"DONO", "OWNER", "SUPERADMIN", "SUPER_ADMIN"} or username in owner_users
+
+
+def system_info_payload(user: User, manifest: dict[str, Any], now: str) -> dict[str, Any]:
+    payload = {
+        "versao_local": read_local_version(),
+    }
+    if is_owner_user(user):
+        payload.update(
+            {
+                "versao_disponivel": clean_text(manifest.get("version")) or "-",
+                "banco": database_label(),
+                "ambiente": settings.ENVIRONMENT,
+                "debug": settings.DEBUG,
+                "api": "online",
+                "data_hora_atual": now,
+                "alerta": clean_text(manifest.get("alert")) or "",
+            }
+        )
+    return payload
+
+
 async def count_scalar(db: AsyncSession, stmt) -> int:
     result = await db.execute(stmt)
     return safe_int(result.scalar_one_or_none(), 0)
@@ -251,7 +277,6 @@ async def home_overview(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    del current_user
     limit = max(1, min(limit, 100))
     active_filters = active_programacao_filters()
 
@@ -319,16 +344,7 @@ async def home_overview(
             )
             for programacao in rotas
         ],
-        "sistema": {
-            "versao_local": read_local_version(),
-            "versao_disponivel": clean_text(manifest.get("version")) or "-",
-            "banco": database_label(),
-            "ambiente": settings.ENVIRONMENT,
-            "debug": settings.DEBUG,
-            "api": "online",
-            "data_hora_atual": now,
-            "alerta": clean_text(manifest.get("alert")) or "",
-        },
+        "sistema": system_info_payload(current_user, manifest, now),
     }
 
 

@@ -117,7 +117,7 @@ function renderPlans(plans) {
         </div>
         <ul>${features.slice(0, 6).map((feature) => `<li>${escapeHtml(feature)}</li>`).join("")}</ul>
         ${nextPlan ? `<p class="plan-upgrade">Quer ampliar depois? Conheça também o <strong>${escapeHtml(nextPlan.name || nextPlan.code)}</strong>.</p>` : '<p class="plan-upgrade">Implantação acompanhada para operações maiores.</p>'}
-        <a class="primary-button" href="#cadastro" data-plan="${escapeHtml(plan.code)}">Testar por 30 dias</a>
+        <a class="primary-button" href="#cadastro" data-plan="${escapeHtml(plan.code)}">Escolher apos o teste</a>
       </article>
     `;
   }).join("");
@@ -153,10 +153,18 @@ async function onSignup(event) {
     status.textContent = "Informe um CPF ou CNPJ válido.";
     return;
   }
+  if (data.password !== data.password_confirm) {
+    status.className = "form-status error";
+    status.textContent = "A confirmacao da senha nao confere.";
+    return;
+  }
+  delete data.password_confirm;
   try {
     el("signupButton").disabled = true;
     const result = await apiRequest("/public/signup", {method: "POST", body: JSON.stringify(data)});
     status.textContent = result.message || "Cadastro recebido.";
+    el("signupSuccessLogin").href = result.next_url || "/app/index.html";
+    el("signupSuccessModal").classList.remove("hidden");
     form.reset();
   } catch (error) {
     status.className = "form-status error";

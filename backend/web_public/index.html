@@ -6,8 +6,8 @@
   <meta name="description" content="RotaHub: sistema online para planejamento de rotas, app do motorista, prestação de contas, despesas por tipo, análise de custos e relatórios logísticos.">
   <title>RotaHub | Gestão de rotas, entregas e prestação de contas</title>
   <link rel="icon" href="/assets/app_icon.png">
-  <link rel="stylesheet" href="/public/styles.css?v=20260530-public-6">
-  <script defer src="/public/public.js?v=20260530-public-5"></script>
+  <link rel="stylesheet" href="/public/styles.css?v=20260601-signup-auto-1">
+  <script defer src="/public/public.js?v=20260601-signup-auto-1"></script>
 </head>
 <body>
   <header class="site-header">
@@ -123,7 +123,7 @@
       <div class="section-title">
         <span>Pacotes</span>
         <h2>Escolha pelo tamanho da frota e pelo nível de controle que sua operação precisa.</h2>
-        <p>Comece com 30 dias de demonstração no pacote escolhido. Conforme sua operação evoluir, migre para um plano mais completo sem perder seus dados.</p>
+        <p>Comece com 30 dias de demonstração com o melhor plano liberado. Depois escolha o pacote definitivo para sua operação.</p>
       </div>
       <div id="plansGrid" class="plans-grid">
         <article class="plan-card skeleton"></article>
@@ -136,7 +136,7 @@
       <div class="signup-copy">
         <span>Cadastro comercial</span>
         <h2>Informe seus dados para iniciar a contratação.</h2>
-        <p>O cadastro fica em análise para validação do CPF/CNPJ, plano escolhido e liberação do primeiro acesso ao sistema.</p>
+        <p>Crie seu acesso e comece agora com 30 dias de demonstracao no melhor plano disponivel.</p>
       </div>
       <form id="signupForm" class="signup-form">
         <label>Nome do responsável<input name="name" autocomplete="name" required></label>
@@ -144,9 +144,12 @@
         <label>E-mail<input name="email" type="email" autocomplete="email" required></label>
         <label>Telefone/WhatsApp<input name="phone" autocomplete="tel" required></label>
         <label>Empresa<input name="company" autocomplete="organization" required></label>
-        <label>Plano<select id="signupPlan" name="plan_code" required></select></label>
+        <label>Plano de interesse após o teste<select id="signupPlan" name="plan_code" required></select></label>
+        <label>Login de acesso<input name="username" autocomplete="username" minlength="3" required></label>
+        <label>Senha<input name="password" type="password" autocomplete="new-password" minlength="6" required></label>
+        <label>Confirmar senha<input name="password_confirm" type="password" autocomplete="new-password" minlength="6" required></label>
         <label class="wide">Observação<textarea name="message" rows="3" placeholder="Informe o tamanho da frota, cidade e principal necessidade."></textarea></label>
-        <button id="signupButton" class="primary-button" type="submit">Solicitar cadastro</button>
+        <button id="signupButton" class="primary-button" type="submit">Criar acesso</button>
         <p id="signupStatus" class="form-status" role="status"></p>
       </form>
     </section>
@@ -170,5 +173,13 @@
     <span>Gestão de rotas, entregas e prestação de contas.</span>
     <a href="/app/index.html">Login operacional</a>
   </footer>
+
+  <div id="signupSuccessModal" class="success-modal hidden" role="dialog" aria-modal="true" aria-labelledby="signupSuccessTitle">
+    <div class="success-modal-card">
+      <strong id="signupSuccessTitle">Cadastro concluido</strong>
+      <p>Seu acesso ao RotaHub ja esta liberado. Entre com o login e a senha que voce acabou de cadastrar.</p>
+      <a id="signupSuccessLogin" class="primary-button" href="/app/index.html">Acessar sistema</a>
+    </div>
+  </div>
 </body>
 </html>

@@ -365,6 +365,14 @@ function renderLeads(leads, plans) {
   `).join("");
   leads.forEach((lead) => {
     const pending = clean(lead.status).toLowerCase() === "novo";
+    const autoActivated = clean(lead.status).toLowerCase() === "aprovado"
+      && clean(lead.reviewed_by).toLowerCase() === "cadastro_publico";
+    const actionHtml = pending
+      ? `
+        <button type="button" data-approve-lead="${lead.id}">Ativar demo</button>
+        <button type="button" class="danger" data-reject-lead="${lead.id}">Recusar</button>
+      `
+      : `<span class="muted-action">${autoActivated ? "Autoativado" : "Sem ação"}</span>`;
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td>${escapeHtml(dateTime(lead.created_at))}</td>
@@ -375,8 +383,7 @@ function renderLeads(leads, plans) {
       <td><input class="trial-days" data-lead-days="${lead.id}" type="number" min="1" max="90" value="${escapeHtml(lead.trial_days || 30)}" ${pending ? "" : "disabled"}></td>
       <td>${statusBadge(lead.status)}</td>
       <td><div class="actions">
-        <button type="button" data-approve-lead="${lead.id}" ${pending ? "" : "disabled"}>Ativar demo</button>
-        <button type="button" class="danger" data-reject-lead="${lead.id}" ${pending ? "" : "disabled"}>Recusar</button>
+        ${actionHtml}
       </div></td>
     `;
     rows.appendChild(tr);
