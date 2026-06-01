@@ -1,9 +1,9 @@
 {
-  "version": "5.0.0",
+  "version": "5.0.1",
   "setup_url": "",
   "changelog_url": "https://raw.githubusercontent.com/andersoncantenas-glitch/rotahub-api/main/updates/changelog.txt",
-  "release_kind": "major",
-  "released_at": "2026-05-30 19:55:00",
+  "release_kind": "patch",
+  "released_at": "2026-06-01 08:30:00",
   "alert": "",
   "alerts": [
     "Primeira versão web do RotaHub com acesso por navegador.",

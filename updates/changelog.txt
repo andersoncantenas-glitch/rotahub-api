@@ -1,3 +1,8 @@
+2026-06-01 08:30:00 - v5.0.1
+- Release web (patch).
+- Versao anterior: v5.0.0.
+- Consolida o deploy SaaS no Render com Python 3.11, inicializacao web dedicada, SQLite temporario para testes externos e compatibilidade do backend Linux sem Tkinter.
+
 2026-05-05 21:53:34 - v4.4.9
 - Release automatizada (patch).
 - Versao anterior: v4.4.8.
