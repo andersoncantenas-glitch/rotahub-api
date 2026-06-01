@@ -4,16 +4,16 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="RotaHub: sistema online para planejamento de rotas, app do motorista, prestação de contas, despesas por tipo, análise de custos e relatórios logísticos.">
-  <title>RotaHub | Gestão de rotas, entregas e prestação de contas</title>
+  <title>RotaHub Log | Gestão de rotas, entregas e prestação de contas</title>
   <link rel="icon" href="/assets/app_icon.png">
-  <link rel="stylesheet" href="/public/styles.css?v=20260601-signup-auto-1">
-  <script defer src="/public/public.js?v=20260601-signup-auto-1"></script>
+  <link rel="stylesheet" href="/public/styles.css?v=20260601-welcome-1">
+  <script defer src="/public/public.js?v=20260601-welcome-1"></script>
 </head>
 <body>
   <header class="site-header">
-    <a class="brand" href="#top" aria-label="RotaHub">
+    <a class="brand" href="#top" aria-label="RotaHub Log">
       <img src="/assets/app_icon.png" alt="">
-      <span>RotaHub</span>
+      <span>RotaHub <em class="brand-log">Log</em></span>
     </a>
     <nav aria-label="Navegação">
       <a href="#recursos">Recursos</a>
@@ -169,16 +169,30 @@
   </main>
 
   <footer class="site-footer">
-    <strong>RotaHub</strong>
+    <strong>RotaHub <em class="brand-log">Log</em></strong>
     <span>Gestão de rotas, entregas e prestação de contas.</span>
     <a href="/app/index.html">Login operacional</a>
   </footer>
 
   <div id="signupSuccessModal" class="success-modal hidden" role="dialog" aria-modal="true" aria-labelledby="signupSuccessTitle">
     <div class="success-modal-card">
-      <strong id="signupSuccessTitle">Cadastro concluido</strong>
-      <p>Seu acesso ao RotaHub ja esta liberado. Entre com o login e a senha que voce acabou de cadastrar.</p>
+      <div class="success-modal-icon" aria-hidden="true">&#10003;</div>
+      <span class="success-modal-eyebrow">Bem-vindo ao RotaHub Log</span>
+      <strong id="signupSuccessTitle">Parabens! Seu cadastro foi concluido.</strong>
+      <p>Seu acesso ja esta liberado. Agora voce pode entrar com o login e a senha que acabou de cadastrar e iniciar sua operacao.</p>
       <a id="signupSuccessLogin" class="primary-button" href="/app/index.html">Acessar sistema</a>
+    </div>
+  </div>
+
+  <div id="loginTransition" class="login-transition hidden" role="status" aria-live="polite" aria-label="Carregando acesso ao sistema">
+    <div class="login-transition-content">
+      <div class="login-transition-logo">
+        <span class="login-transition-ring" aria-hidden="true"></span>
+        <img src="/assets/app_icon.png" alt="">
+      </div>
+      <strong>RotaHub <em>Log</em></strong>
+      <p>Preparando seu ambiente logistico...</p>
+      <span class="login-transition-progress" aria-hidden="true"><i></i></span>
     </div>
   </div>
 </body>

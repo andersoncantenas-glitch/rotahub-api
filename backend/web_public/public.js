@@ -70,6 +70,16 @@ function planLimitLabel(plan) {
   return `Até ${plan.vehicle_limit} veículos`;
 }
 
+function transitionToLogin(url = "/app/index.html") {
+  const transition = el("loginTransition");
+  if (transition.classList.contains("is-visible")) return;
+  transition.classList.remove("hidden");
+  requestAnimationFrame(() => transition.classList.add("is-visible"));
+  window.setTimeout(() => {
+    window.location.href = url;
+  }, 1500);
+}
+
 function escapeHtml(value) {
   return clean(value)
     .replaceAll("&", "&amp;")
@@ -186,11 +196,15 @@ function onClientAccess(event) {
   }
   localStorage.setItem("rotahub_client_document", documentValue);
   status.textContent = "Redirecionando para o login...";
-  window.location.href = "/app/index.html";
+  transitionToLogin("/app/index.html");
 }
 
 document.addEventListener("DOMContentLoaded", () => {
   loadPlans();
   el("signupForm").addEventListener("submit", onSignup);
   el("clientAccessForm").addEventListener("submit", onClientAccess);
+  el("signupSuccessLogin").addEventListener("click", (event) => {
+    event.preventDefault();
+    transitionToLogin(event.currentTarget.href);
+  });
 });

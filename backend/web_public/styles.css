@@ -61,6 +61,14 @@ a {
   box-shadow: 0 8px 18px rgba(17, 129, 117, 0.22);
 }
 
+.brand-log {
+  color: var(--amber);
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 0.92em;
+  font-style: italic;
+  letter-spacing: 0.02em;
+}
+
 .site-header nav {
   display: flex;
   align-items: center;
@@ -705,6 +713,8 @@ textarea {
   border-radius: 20px;
   background: #fff;
   box-shadow: 0 24px 70px rgba(15, 23, 42, 0.28);
+  text-align: center;
+  animation: success-modal-enter 360ms ease-out both;
 }
 
 .success-modal-card strong {
@@ -717,6 +727,143 @@ textarea {
   margin: 12px 0 22px;
   color: var(--muted);
   line-height: 1.65;
+}
+
+.success-modal-icon {
+  display: grid;
+  width: 62px;
+  height: 62px;
+  margin: 0 auto 14px;
+  place-items: center;
+  border-radius: 50%;
+  color: #fff;
+  background: var(--primary);
+  box-shadow: 0 0 0 9px rgba(17, 129, 117, 0.13);
+  font-size: 1.8rem;
+  font-weight: 900;
+}
+
+.success-modal-eyebrow {
+  display: block;
+  margin-bottom: 8px;
+  color: #d97706;
+  font-size: 0.76rem;
+  font-weight: 950;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.login-transition {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  opacity: 0;
+  background:
+    radial-gradient(circle at center, rgba(17, 129, 117, 0.2), transparent 42%),
+    #101c2b;
+  transition: opacity 220ms ease;
+}
+
+.login-transition.is-visible {
+  opacity: 1;
+}
+
+.login-transition-content {
+  display: grid;
+  justify-items: center;
+  color: #fff;
+  text-align: center;
+}
+
+.login-transition-logo {
+  position: relative;
+  display: grid;
+  width: 112px;
+  height: 112px;
+  margin-bottom: 24px;
+  place-items: center;
+}
+
+.login-transition-logo img {
+  width: 72px;
+  height: 72px;
+  border-radius: 16px;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.28);
+  animation: login-logo-pulse 1.25s ease-in-out infinite;
+}
+
+.login-transition-ring {
+  position: absolute;
+  inset: 0;
+  border: 3px solid rgba(255, 255, 255, 0.18);
+  border-top-color: #f59e0b;
+  border-radius: 50%;
+  animation: login-ring-spin 900ms linear infinite;
+}
+
+.login-transition-content strong {
+  font-size: 1.85rem;
+  letter-spacing: -0.04em;
+}
+
+.login-transition-content em {
+  color: #f59e0b;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 0.92em;
+  letter-spacing: 0.02em;
+}
+
+.login-transition-content p {
+  margin: 8px 0 20px;
+  color: #cbd5e1;
+  font-weight: 700;
+}
+
+.login-transition-progress {
+  width: min(260px, 68vw);
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.login-transition-progress i {
+  display: block;
+  width: 45%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #118175, #f59e0b);
+  animation: login-progress 1s ease-in-out infinite;
+}
+
+@keyframes success-modal-enter {
+  from { opacity: 0; transform: translateY(16px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes login-ring-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes login-logo-pulse {
+  50% { transform: scale(1.08); }
+}
+
+@keyframes login-progress {
+  from { transform: translateX(-115%); }
+  to { transform: translateX(245%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .success-modal-card,
+  .login-transition-logo img,
+  .login-transition-ring,
+  .login-transition-progress i {
+    animation: none;
+  }
 }
 
 @media (max-width: 1080px) {
