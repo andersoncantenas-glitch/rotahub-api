@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 import logging
 from dotenv import load_dotenv
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 # Ensure the project root is on sys.path so backend package imports work when running this script directly
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -36,9 +36,12 @@ from backend.middleware.tenant import TenantMiddleware
 from backend.middleware.rate_limit import RateLimitMiddleware
 from backend.middleware.logging import LoggingMiddleware
 from backend.api.v1.api import api_router
+from backend.models.user import UserDB
+from backend.services.auth import get_password_hash
 from app.db.connection import configure_connection
 from app.middleware.feature_middleware import FeatureGateMiddleware
 from app.middleware.billing_middleware import BillingProtectionMiddleware
+from app.repositories.base_repository import ensure_saas_ready, get_db as get_saas_db
 from app.repositories import company_repository, subscription_repository
 from app.services import feature_service
 
@@ -105,6 +108,82 @@ def _configure_feature_db() -> None:
         configure_connection(sqlite_path)
 
 
+def _temporary_admin_password() -> tuple[str, str]:
+    configured_password = (
+        os.getenv("ROTA_OWNER_ADMIN_PASSWORD")
+        or os.getenv("OWNER_ADMIN_PASSWORD")
+        or os.getenv("ROTA_ADMIN_PASS")
+        or os.getenv("ROTA_ADMIN_PASSWORD")
+        or ""
+    ).strip()
+    if configured_password:
+        return configured_password, "ambiente"
+    return "123456", "padrao"
+
+
+async def _ensure_saas_baseline() -> None:
+    _configure_feature_db()
+    with get_saas_db() as conn:
+        ensure_saas_ready(conn)
+
+
+async def _ensure_owner_admin_user() -> None:
+    owner_names = [item.strip().upper() for item in settings.OWNER_ADMIN_USERS if str(item or "").strip()]
+    username = owner_names[0] if owner_names else "ADMIN"
+    password, password_source = _temporary_admin_password()
+
+    async with async_session() as db:
+        result = await db.execute(
+            text(
+                """
+                SELECT id
+                  FROM usuarios
+                 WHERE UPPER(COALESCE(username, '')) IN :owner_names
+                    OR UPPER(COALESCE(nome, '')) IN :owner_names
+                    OR UPPER(COALESCE(permissoes, '')) IN ('DONO', 'OWNER', 'SUPERADMIN', 'SUPER_ADMIN')
+                 ORDER BY id ASC
+                 LIMIT 1
+                """
+            ).bindparams(bindparam("owner_names", expanding=True)),
+            {"owner_names": owner_names or ["ADMIN"]},
+        )
+        owner_id = result.scalar_one_or_none()
+        if owner_id:
+            await db.execute(
+                text(
+                    """
+                    UPDATE usuarios
+                       SET permissoes='ADMIN',
+                           is_active=1,
+                           company_id=COALESCE(company_id, 1),
+                           username=COALESCE(NULLIF(TRIM(username), ''), :username),
+                           nome=COALESCE(NULLIF(TRIM(nome), ''), :username)
+                     WHERE id=:user_id
+                    """
+                ),
+                {"username": username, "user_id": int(owner_id)},
+            )
+            await db.commit()
+            logger.info("Owner admin user verified: %s", username)
+            return
+
+        user = UserDB(
+            username=username,
+            nome=username,
+            senha=get_password_hash(password),
+            permissoes="ADMIN",
+            is_active=True,
+            company_id=1,
+        )
+        db.add(user)
+        await db.commit()
+        logger.warning(
+            "Owner admin user created: %s | temporary password source: %s",
+            username,
+            password_source,
+        )
+
+
 def _can_use_plan_feature(company_id: int, feature_name: str) -> bool:
     _configure_feature_db()
     result = feature_service.can_use_feature(company_id, feature_name)
@@ -152,6 +231,8 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting RotaHub SaaS API...")
     await create_tables()
+    await _ensure_saas_baseline()
+    await _ensure_owner_admin_user()
     logger.info("Database tables created/verified")
     if LEGACY_MOBILE_ENSURE_TABLES is not None:
         LEGACY_MOBILE_ENSURE_TABLES()

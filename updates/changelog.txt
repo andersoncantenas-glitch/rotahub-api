@@ -1,3 +1,8 @@
+2026-06-01 09:40:00 - v5.0.2
+- Release web (patch).
+- Versao anterior: v5.0.1.
+- Garante criacao automatica da empresa/plano base e do usuario Owner ADMIN em bancos novos do Render, permitindo o primeiro acesso administrativo.
+
 2026-06-01 08:30:00 - v5.0.1
 - Release web (patch).
 - Versao anterior: v5.0.0.
