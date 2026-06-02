@@ -49,6 +49,7 @@ class AppConfigStore {
     final current = await load();
     final next = _migrateAndroidEmulatorLoopback(config.copyWith(
       baseUrl: config.normalizedBaseUrl,
+      companyId: config.companyId.trim(),
       vendedorPadrao: config.vendedorPadrao.trim().toUpperCase(),
       vendedorLogin: config.vendedorLogin.trim(),
       cidadePadrao: config.cidadePadrao.trim().toUpperCase(),
@@ -56,6 +57,7 @@ class AppConfigStore {
     final resetBootstrap = current == null ||
         current.normalizedBaseUrl != next.normalizedBaseUrl ||
         current.desktopSecret.trim() != next.desktopSecret.trim() ||
+        current.companyId.trim() != next.companyId.trim() ||
         current.vendedorPadrao.trim().toUpperCase() !=
             next.vendedorPadrao.trim().toUpperCase() ||
         current.vendedorLogin.trim() != next.vendedorLogin.trim() ||

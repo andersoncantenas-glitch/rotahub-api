@@ -2,6 +2,7 @@ class AppConfig {
   const AppConfig({
     required this.baseUrl,
     required this.desktopSecret,
+    required this.companyId,
     required this.vendedorPadrao,
     required this.vendedorLogin,
     required this.cidadePadrao,
@@ -9,6 +10,7 @@ class AppConfig {
 
   final String baseUrl;
   final String desktopSecret;
+  final String companyId;
   final String vendedorPadrao;
   final String vendedorLogin;
   final String cidadePadrao;
@@ -16,12 +18,12 @@ class AppConfig {
   String get normalizedBaseUrl => baseUrl.trim().replaceAll(RegExp(r'/+$'), '');
 
   bool get isComplete =>
-      normalizedBaseUrl.isNotEmpty &&
-      desktopSecret.trim().isNotEmpty;
+      normalizedBaseUrl.isNotEmpty && desktopSecret.trim().isNotEmpty;
 
   AppConfig copyWith({
     String? baseUrl,
     String? desktopSecret,
+    String? companyId,
     String? vendedorPadrao,
     String? vendedorLogin,
     String? cidadePadrao,
@@ -29,6 +31,7 @@ class AppConfig {
     return AppConfig(
       baseUrl: baseUrl ?? this.baseUrl,
       desktopSecret: desktopSecret ?? this.desktopSecret,
+      companyId: companyId ?? this.companyId,
       vendedorPadrao: vendedorPadrao ?? this.vendedorPadrao,
       vendedorLogin: vendedorLogin ?? this.vendedorLogin,
       cidadePadrao: cidadePadrao ?? this.cidadePadrao,
@@ -38,6 +41,7 @@ class AppConfig {
   Map<String, dynamic> toJson() => <String, dynamic>{
         'base_url': normalizedBaseUrl,
         'desktop_secret': desktopSecret.trim(),
+        'company_id': companyId.trim(),
         'vendedor_padrao': vendedorPadrao.trim().toUpperCase(),
         'vendedor_login': vendedorLogin.trim(),
         'cidade_padrao': cidadePadrao.trim().toUpperCase(),
@@ -47,6 +51,7 @@ class AppConfig {
     return AppConfig(
       baseUrl: (json['base_url'] ?? '').toString(),
       desktopSecret: (json['desktop_secret'] ?? '').toString(),
+      companyId: (json['company_id'] ?? '').toString(),
       vendedorPadrao: (json['vendedor_padrao'] ?? '').toString(),
       vendedorLogin: (json['vendedor_login'] ?? '').toString(),
       cidadePadrao: (json['cidade_padrao'] ?? '').toString(),

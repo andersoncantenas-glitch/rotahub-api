@@ -6,6 +6,7 @@ void main() {
     const config = AppConfig(
       baseUrl: 'http://localhost:8000///',
       desktopSecret: 'segredo',
+      companyId: '1',
       vendedorPadrao: 'joao',
       vendedorLogin: 'Joao',
       cidadePadrao: 'ipu',

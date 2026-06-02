@@ -40,17 +40,20 @@ def _pick(row: sqlite3.Row, keys: list[str], fallback: Any = "") -> Any:
     return fallback
 
 
-def _post_json(url: str, payload: dict, desktop_secret: str, timeout: int = 30) -> dict:
+def _post_json(url: str, payload: dict, desktop_secret: str, company_id: str = "", timeout: int = 30) -> dict:
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json; charset=utf-8",
+        "X-Desktop-Secret": desktop_secret,
+    }
+    if str(company_id or "").strip():
+        headers["X-Company-ID"] = str(company_id).strip()
     req = urllib.request.Request(
         url,
         data=data,
         method="POST",
-        headers={
-            "Accept": "application/json",
-            "Content-Type": "application/json; charset=utf-8",
-            "X-Desktop-Secret": desktop_secret,
-        },
+        headers=headers,
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         body = (resp.read() or b"").decode("utf-8", errors="ignore")
@@ -89,7 +92,7 @@ def _resolve_equipe_nomes(raw: str, ajudantes_map: dict[str, str]) -> str:
     return " / ".join(nomes) if nomes else _upper(txt)
 
 
-def sync_motoristas(cur: sqlite3.Cursor, api_base: str, secret: str) -> tuple[int, int]:
+def sync_motoristas(cur: sqlite3.Cursor, api_base: str, secret: str, company_id: str) -> tuple[int, int]:
     cur.execute(
         """
         SELECT
@@ -121,7 +124,7 @@ def sync_motoristas(cur: sqlite3.Cursor, api_base: str, secret: str) -> tuple[in
             "acesso_obs": "Sincronizado em lote (desktop -> nuvem)",
         }
         try:
-            _post_json(f"{api_base}/desktop/cadastros/motoristas/upsert", payload, secret)
+            _post_json(f"{api_base}/desktop/cadastros/motoristas/upsert", payload, secret, company_id)
             ok += 1
         except Exception as exc:
             fail += 1
@@ -129,7 +132,7 @@ def sync_motoristas(cur: sqlite3.Cursor, api_base: str, secret: str) -> tuple[in
     return ok, fail
 
 
-def sync_veiculos(cur: sqlite3.Cursor, api_base: str, secret: str) -> tuple[int, int]:
+def sync_veiculos(cur: sqlite3.Cursor, api_base: str, secret: str, company_id: str) -> tuple[int, int]:
     cur.execute(
         """
         SELECT
@@ -151,7 +154,7 @@ def sync_veiculos(cur: sqlite3.Cursor, api_base: str, secret: str) -> tuple[int,
             "capacidade_cx": _safe_int(r["capacidade_cx"], 0),
         }
         try:
-            _post_json(f"{api_base}/desktop/cadastros/veiculos/upsert", payload, secret)
+            _post_json(f"{api_base}/desktop/cadastros/veiculos/upsert", payload, secret, company_id)
             ok += 1
         except Exception as exc:
             fail += 1
@@ -159,7 +162,7 @@ def sync_veiculos(cur: sqlite3.Cursor, api_base: str, secret: str) -> tuple[int,
     return ok, fail
 
 
-def sync_ajudantes(cur: sqlite3.Cursor, api_base: str, secret: str) -> tuple[int, int]:
+def sync_ajudantes(cur: sqlite3.Cursor, api_base: str, secret: str, company_id: str) -> tuple[int, int]:
     cur.execute(
         """
         SELECT
@@ -183,7 +186,7 @@ def sync_ajudantes(cur: sqlite3.Cursor, api_base: str, secret: str) -> tuple[int
             "status": _upper(r["status"] or "ATIVO"),
         }
         try:
-            _post_json(f"{api_base}/desktop/cadastros/ajudantes/upsert", payload, secret)
+            _post_json(f"{api_base}/desktop/cadastros/ajudantes/upsert", payload, secret, company_id)
             ok += 1
         except Exception as exc:
             fail += 1
@@ -191,7 +194,7 @@ def sync_ajudantes(cur: sqlite3.Cursor, api_base: str, secret: str) -> tuple[int
     return ok, fail
 
 
-def sync_clientes(cur: sqlite3.Cursor, api_base: str, secret: str) -> tuple[int, int]:
+def sync_clientes(cur: sqlite3.Cursor, api_base: str, secret: str, company_id: str) -> tuple[int, int]:
     cur.execute(
         """
         SELECT
@@ -217,7 +220,7 @@ def sync_clientes(cur: sqlite3.Cursor, api_base: str, secret: str) -> tuple[int,
             "vendedor": _upper(r["vendedor"]),
         }
         try:
-            _post_json(f"{api_base}/desktop/cadastros/clientes/upsert", payload, secret)
+            _post_json(f"{api_base}/desktop/cadastros/clientes/upsert", payload, secret, company_id)
             ok += 1
         except Exception as exc:
             fail += 1
@@ -225,7 +228,7 @@ def sync_clientes(cur: sqlite3.Cursor, api_base: str, secret: str) -> tuple[int,
     return ok, fail
 
 
-def sync_programacoes(cur: sqlite3.Cursor, api_base: str, secret: str, include_all: bool = False) -> tuple[int, int, int]:
+def sync_programacoes(cur: sqlite3.Cursor, api_base: str, secret: str, company_id: str, include_all: bool = False) -> tuple[int, int, int]:
     where = ""
     if not include_all:
         where = "WHERE UPPER(TRIM(COALESCE(status,''))) NOT IN ('FINALIZADA','FINALIZADO','CANCELADA','CANCELADO')"
@@ -302,7 +305,7 @@ def sync_programacoes(cur: sqlite3.Cursor, api_base: str, secret: str, include_a
             "itens": itens,
         }
         try:
-            _post_json(f"{api_base}/desktop/rotas/upsert", payload, secret)
+            _post_json(f"{api_base}/desktop/rotas/upsert", payload, secret, company_id)
             ok += 1
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="ignore")
@@ -316,7 +319,7 @@ def sync_programacoes(cur: sqlite3.Cursor, api_base: str, secret: str, include_a
             fail += 1
             print(f"[ERRO] programacao {codigo}: {exc}")
     try:
-        out = _post_json(f"{api_base}/desktop/programacoes/reconciliar-vinculos", {}, secret)
+        out = _post_json(f"{api_base}/desktop/programacoes/reconciliar-vinculos", {}, secret, company_id)
         print(f"Reconciliar vínculos: {out}")
     except Exception as exc:
         print(f"Aviso: falha ao reconciliar vínculos: {exc}")
@@ -331,6 +334,7 @@ def main() -> int:
     db_path = _env("ROTA_DB", r"C:\rotahub\rota_granja.db")
     api_base = _env("ROTA_SERVER_URL", "https://rotahub-api.onrender.com").rstrip("/")
     secret = _env("ROTA_SECRET")
+    company_id = _env("ROTA_COMPANY_ID")
 
     if not secret:
         print("ERRO: ROTA_SECRET não definido.")
@@ -345,13 +349,14 @@ def main() -> int:
 
     print(f"DB: {db_path}")
     print(f"API: {api_base}")
+    print(f"Empresa: {company_id or '(padrao do servidor)'}")
     print("")
 
-    m_ok, m_fail = sync_motoristas(cur, api_base, secret)
-    v_ok, v_fail = sync_veiculos(cur, api_base, secret)
-    a_ok, a_fail = sync_ajudantes(cur, api_base, secret)
-    c_ok, c_fail = sync_clientes(cur, api_base, secret)
-    p_ok, p_fail, p_skip = sync_programacoes(cur, api_base, secret, include_all=args.all)
+    m_ok, m_fail = sync_motoristas(cur, api_base, secret, company_id)
+    v_ok, v_fail = sync_veiculos(cur, api_base, secret, company_id)
+    a_ok, a_fail = sync_ajudantes(cur, api_base, secret, company_id)
+    c_ok, c_fail = sync_clientes(cur, api_base, secret, company_id)
+    p_ok, p_fail, p_skip = sync_programacoes(cur, api_base, secret, company_id, include_all=args.all)
     conn.close()
 
     print("")
@@ -368,4 +373,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

@@ -138,6 +138,7 @@ class VendedorApiService {
   VendedorApiService({
     required this.baseUrl,
     required this.desktopSecret,
+    this.companyId = '',
     required this.store,
     this.timeoutSeconds = 25,
     this.maxRetries = 12,
@@ -146,6 +147,7 @@ class VendedorApiService {
 
   final String baseUrl;
   final String desktopSecret;
+  final String companyId;
   final LocalSyncStore store;
   final int timeoutSeconds;
   final int maxRetries;
@@ -157,11 +159,18 @@ class VendedorApiService {
     return Uri.parse('$cleanBase$cleanPath');
   }
 
-  Map<String, String> _headers() => <String, String>{
-        'Accept': 'application/json',
-        'Content-Type': 'application/json',
-        'X-Desktop-Secret': desktopSecret,
-      };
+  Map<String, String> _headers() {
+    final headers = <String, String>{
+      'Accept': 'application/json',
+      'Content-Type': 'application/json',
+      'X-Desktop-Secret': desktopSecret,
+    };
+    final company = companyId.trim();
+    if (company.isNotEmpty) {
+      headers['X-Company-ID'] = company;
+    }
+    return headers;
+  }
 
   Future<dynamic> _decode(http.Response response) async {
     if (response.body.trim().isEmpty) return <String, dynamic>{};
@@ -449,7 +458,8 @@ class VendedorApiService {
       return createdA == null ? 1 : -1;
     }
 
-    return _upperValue(a['codigo_avulsa']).compareTo(_upperValue(b['codigo_avulsa']));
+    return _upperValue(a['codigo_avulsa'])
+        .compareTo(_upperValue(b['codigo_avulsa']));
   }
 
   bool _matchesDateRange(
@@ -554,7 +564,8 @@ class VendedorApiService {
             .where((draft) => _upperValue(draft['status']) == normalizedStatus)
             .toList();
     final rangeDrafts = filteredDrafts
-        .where((draft) => _matchesDateRange(draft, dataDe: dataDe, dataAte: dataAte))
+        .where((draft) =>
+            _matchesDateRange(draft, dataDe: dataDe, dataAte: dataAte))
         .toList();
     final filteredServer = normalizedStatus.isEmpty
         ? serverItems
@@ -562,7 +573,8 @@ class VendedorApiService {
             .where((item) => _upperValue(item['status']) == normalizedStatus)
             .toList();
     final rangeServer = filteredServer
-        .where((item) => _matchesDateRange(item, dataDe: dataDe, dataAte: dataAte))
+        .where(
+            (item) => _matchesDateRange(item, dataDe: dataDe, dataAte: dataAte))
         .toList();
 
     final combined = <String, Map<String, dynamic>>{};
@@ -852,7 +864,8 @@ class VendedorApiService {
     required int caixas,
     required double preco,
     String observacao = '',
-    Map<String, Map<String, dynamic>> alertas = const <String, Map<String, dynamic>>{},
+    Map<String, Map<String, dynamic>> alertas =
+        const <String, Map<String, dynamic>>{},
   }) async {
     final now = DateTime.now().toIso8601String();
     final novos = <Map<String, dynamic>>[];
@@ -945,7 +958,8 @@ class VendedorApiService {
 
   Future<void> removerVendaRascunho(String id) async {
     if (await _shouldUseOnlineSharedFlow('Excluir venda do rascunho')) {
-      await _vendorDelete('/vendedor/rascunho/${Uri.encodeComponent(id.trim())}');
+      await _vendorDelete(
+          '/vendedor/rascunho/${Uri.encodeComponent(id.trim())}');
       return;
     }
     final items = await _loadSalesDraftItems();
@@ -954,7 +968,8 @@ class VendedorApiService {
   }
 
   Future<void> removerVendasRascunhoPorIds(List<String> ids) async {
-    final normalized = ids.map((item) => item.trim()).where((item) => item.isNotEmpty).toSet();
+    final normalized =
+        ids.map((item) => item.trim()).where((item) => item.isNotEmpty).toSet();
     if (normalized.isEmpty) return;
     if (await _shouldUseOnlineSharedFlow('Remover vendas do rascunho')) {
       await _vendorPost(
@@ -1020,19 +1035,25 @@ class VendedorApiService {
     final target = id.trim();
     if (target.isEmpty) return;
     await _shouldUseOnlineSharedFlow('Remover pre-programacao');
-    await _vendorDelete('/vendedor/pre-programacoes/${Uri.encodeComponent(target)}');
+    await _vendorDelete(
+        '/vendedor/pre-programacoes/${Uri.encodeComponent(target)}');
   }
 
   Future<Map<String, Map<String, dynamic>>> carregarAlertasClientesEmEntrega(
     List<String> codClientes,
   ) async {
-    final cods = codClientes.map(_upperValue).where((item) => item.isNotEmpty).toSet().toList();
+    final cods = codClientes
+        .map(_upperValue)
+        .where((item) => item.isNotEmpty)
+        .toSet()
+        .toList();
     if (cods.isEmpty) return <String, Map<String, dynamic>>{};
     if (!await isOnlineServerReachable()) {
       return <String, Map<String, dynamic>>{};
     }
 
-    final programacoes = await listarProgramacoesOficiais(modo: 'ativas', limit: 120);
+    final programacoes =
+        await listarProgramacoesOficiais(modo: 'ativas', limit: 120);
     final warnings = <String, Map<String, dynamic>>{};
 
     for (final programacao in programacoes) {
@@ -1198,13 +1219,11 @@ class VendedorApiService {
           itemPayload['eta'] = etaRaw;
         }
         final distanciaRaw = item['distancia'];
-        if (distanciaRaw != null &&
-            distanciaRaw.toString().trim().isNotEmpty) {
+        if (distanciaRaw != null && distanciaRaw.toString().trim().isNotEmpty) {
           itemPayload['distancia'] = _doubleValue(distanciaRaw);
         }
         final confiancaRaw = item['confianca_localizacao'];
-        if (confiancaRaw != null &&
-            confiancaRaw.toString().trim().isNotEmpty) {
+        if (confiancaRaw != null && confiancaRaw.toString().trim().isNotEmpty) {
           itemPayload['confianca_localizacao'] = _doubleValue(confiancaRaw);
         }
         return itemPayload;

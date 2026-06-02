@@ -6,6 +6,7 @@ AppConfig buildDefaultAppConfig() {
   return AppConfig(
     baseUrl: _resolveBaseUrl(),
     desktopSecret: _resolveDesktopSecret(),
+    companyId: _resolveCompanyId(),
     vendedorPadrao: '',
     vendedorLogin: _resolveDefaultLogin(),
     cidadePadrao: _resolveDefaultCity(),
@@ -29,6 +30,14 @@ String _resolveBaseUrl() {
   }
 
   return 'https://rotahub-api.onrender.com';
+}
+
+String _resolveCompanyId() {
+  const vendorCompany = String.fromEnvironment('VENDOR_COMPANY_ID');
+  const sharedCompany = String.fromEnvironment('ROTA_COMPANY_ID');
+  return vendorCompany.trim().isNotEmpty
+      ? vendorCompany.trim()
+      : sharedCompany.trim();
 }
 
 String _resolveDesktopSecret() {
@@ -65,8 +74,7 @@ String _resolveDefaultCity() {
     'ROTA_CIDADE_BASE',
     defaultValue: '',
   );
-  final city = vendorCity.trim().isNotEmpty
-      ? vendorCity.trim()
-      : sharedCity.trim();
+  final city =
+      vendorCity.trim().isNotEmpty ? vendorCity.trim() : sharedCity.trim();
   return city.toUpperCase();
 }

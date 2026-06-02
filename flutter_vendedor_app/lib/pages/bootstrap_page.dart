@@ -38,6 +38,7 @@ class _BootstrapPageState extends State<BootstrapPage> {
     return VendedorApiService(
       baseUrl: config.normalizedBaseUrl,
       desktopSecret: config.desktopSecret.trim(),
+      companyId: config.companyId.trim(),
       store: store,
     );
   }
@@ -110,7 +111,8 @@ class _BootstrapPageState extends State<BootstrapPage> {
   Future<void> _openConfig() async {
     await Navigator.of(context).push<AppConfig>(
       MaterialPageRoute<AppConfig>(
-        builder: (_) => ConfigPage(initialConfig: _config ?? buildDefaultAppConfig()),
+        builder: (_) =>
+            ConfigPage(initialConfig: _config ?? buildDefaultAppConfig()),
       ),
     );
     await _reload();
@@ -284,7 +286,9 @@ class _BootstrapPageState extends State<BootstrapPage> {
               runSpacing: 8,
               children: [
                 StatusBadge(
-                  label: _serverReachable ? 'Servidor online' : 'Servidor indisponivel',
+                  label: _serverReachable
+                      ? 'Servidor online'
+                      : 'Servidor indisponivel',
                   color: _serverReachable
                       ? VendorUiColors.success
                       : VendorUiColors.danger,

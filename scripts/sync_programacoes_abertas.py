@@ -28,17 +28,20 @@ def _safe_float(v, default=0.0) -> float:
         return float(default)
 
 
-def _post_json(url: str, payload: dict, desktop_secret: str, timeout: int = 20) -> dict:
+def _post_json(url: str, payload: dict, desktop_secret: str, company_id: str = "", timeout: int = 20) -> dict:
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json; charset=utf-8",
+        "X-Desktop-Secret": desktop_secret,
+    }
+    if str(company_id or "").strip():
+        headers["X-Company-ID"] = str(company_id).strip()
     req = urllib.request.Request(
         url,
         data=data,
         method="POST",
-        headers={
-            "Accept": "application/json",
-            "Content-Type": "application/json; charset=utf-8",
-            "X-Desktop-Secret": desktop_secret,
-        },
+        headers=headers,
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         body = (resp.read() or b"").decode("utf-8", errors="ignore")
@@ -49,6 +52,7 @@ def main() -> int:
     db_path = _env("ROTA_DB", r"C:\pdc_rota\rota_granja.db")
     api_base = _env("ROTA_SERVER_URL", "https://rotahub-api.onrender.com").rstrip("/")
     secret = _env("ROTA_SECRET")
+    company_id = _env("ROTA_COMPANY_ID")
     if not secret:
         print("ERRO: ROTA_SECRET não definido.")
         return 2
@@ -134,7 +138,7 @@ def main() -> int:
         }
 
         try:
-            _post_json(upsert_url, payload, secret)
+            _post_json(upsert_url, payload, secret, company_id)
             sent += 1
             print(f"OK  {codigo} ({len(itens)} itens)")
         except urllib.error.HTTPError as exc:
@@ -148,7 +152,7 @@ def main() -> int:
     conn.close()
 
     try:
-        out = _post_json(reconcile_url, {}, secret)
+        out = _post_json(reconcile_url, {}, secret, company_id)
         print(f"Reconciliar vínculos: {out}")
     except Exception as exc:
         print(f"Aviso: falha ao reconciliar vínculos no servidor: {exc}")

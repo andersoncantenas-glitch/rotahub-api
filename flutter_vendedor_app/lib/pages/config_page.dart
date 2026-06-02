@@ -21,6 +21,7 @@ class _ConfigPageState extends State<ConfigPage> {
 
   late final TextEditingController _baseUrlCtrl;
   late final TextEditingController _secretCtrl;
+  late final TextEditingController _companyIdCtrl;
   late final TextEditingController _vendedorLoginCtrl;
   late final TextEditingController _cidadeCtrl;
   bool _saving = false;
@@ -32,6 +33,8 @@ class _ConfigPageState extends State<ConfigPage> {
         text: widget.initialConfig?.normalizedBaseUrl ?? '');
     _secretCtrl =
         TextEditingController(text: widget.initialConfig?.desktopSecret ?? '');
+    _companyIdCtrl =
+        TextEditingController(text: widget.initialConfig?.companyId ?? '');
     _vendedorLoginCtrl =
         TextEditingController(text: widget.initialConfig?.vendedorLogin ?? '');
     _cidadeCtrl =
@@ -42,6 +45,7 @@ class _ConfigPageState extends State<ConfigPage> {
   void dispose() {
     _baseUrlCtrl.dispose();
     _secretCtrl.dispose();
+    _companyIdCtrl.dispose();
     _vendedorLoginCtrl.dispose();
     _cidadeCtrl.dispose();
     super.dispose();
@@ -57,6 +61,7 @@ class _ConfigPageState extends State<ConfigPage> {
     final config = AppConfig(
       baseUrl: _baseUrlCtrl.text.trim(),
       desktopSecret: _secretCtrl.text.trim(),
+      companyId: _companyIdCtrl.text.trim(),
       vendedorPadrao: widget.initialConfig?.vendedorPadrao ?? '',
       vendedorLogin: _vendedorLoginCtrl.text.trim(),
       cidadePadrao: _cidadeCtrl.text.trim().toUpperCase(),
@@ -158,6 +163,15 @@ class _ConfigPageState extends State<ConfigPage> {
                               }
                               return null;
                             },
+                          ),
+                          const SizedBox(height: 16),
+                          TextFormField(
+                            controller: _companyIdCtrl,
+                            decoration: const InputDecoration(
+                              labelText: 'Empresa / X-Company-ID (opcional)',
+                              helperText:
+                                  'Use o mesmo ROTA_COMPANY_ID do desktop para manter app e web na mesma empresa.',
+                            ),
                           ),
                           const SizedBox(height: 16),
                           TextFormField(
