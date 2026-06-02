@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, create_model
 from sqlalchemy import func, select, text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.security.passwords import hash_password_pbkdf2
@@ -543,6 +543,37 @@ def serialize_item(item: Any, config: CadastroResource) -> CadastroItemResponse:
     if config.password_field and data.get(config.password_field):
         data[config.password_field] = "******"
     return CadastroItemResponse(id=item.id, data=data)
+
+
+def current_company_id(current_user: User) -> int:
+    try:
+        return int(getattr(current_user, "company_id", None) or 1)
+    except Exception:
+        return 1
+
+
+def assign_company_id(item: Any, current_user: User) -> None:
+    if hasattr(item, "company_id") and not getattr(item, "company_id", None):
+        setattr(item, "company_id", current_company_id(current_user))
+
+
+def cadastro_integrity_message(resource: str, exc: Exception) -> str:
+    detail = str(getattr(exc, "orig", None) or exc)
+    lower = detail.lower()
+    label = resource.rstrip("s")
+    if "unique" in lower or "constraint" in lower:
+        if "codigo" in lower:
+            return f"Ja existe {label} com este codigo."
+        if "placa" in lower:
+            return "Ja existe veiculo com esta placa."
+        if "cpf" in lower:
+            return f"Ja existe {label} com este CPF."
+        if "telefone" in lower:
+            return f"Ja existe {label} com este telefone."
+        return f"Cadastro duplicado em {resource}. Atualize a lista e tente novamente."
+    if "no such column" in lower or "has no column" in lower or "no such table" in lower:
+        return "Banco do servidor precisa atualizar a estrutura de cadastros. Recarregue o sistema e tente novamente."
+    return "Nao foi possivel salvar o cadastro. Verifique os dados e tente novamente."
 
 
 async def get_item_or_404(db: AsyncSession, config: CadastroResource, item_id: int):
@@ -1910,20 +1941,28 @@ async def create_cadastro_item(
     data = clean_base_payload(payload, config, partial=False)
     data = await validate_and_prepare(resource=resource, config=config, db=db, data=data, partial=False)
     item = config.model(**data)
+    assign_company_id(item, current_user)
     db.add(item)
-    await db.flush()
-    if resource == "caixas":
-        await record_caixa_movimento(db, caixa=item, movimento="CADASTRO", observacao=data.get("observacao"))
-    record_audit_log(
-        db,
-        action=f"{resource}_criado",
-        actor_user=current_user,
-        entity_type=resource,
-        entity_id=item.id,
-        ip_address=client_ip_from_request(request),
-        metadata={"fields": sorted(field for field in data.keys() if field != "senha")},
-    )
-    await db.commit()
+    try:
+        await db.flush()
+        if resource == "caixas":
+            await record_caixa_movimento(db, caixa=item, movimento="CADASTRO", observacao=data.get("observacao"))
+        record_audit_log(
+            db,
+            action=f"{resource}_criado",
+            actor_user=current_user,
+            entity_type=resource,
+            entity_id=item.id,
+            ip_address=client_ip_from_request(request),
+            metadata={"fields": sorted(field for field in data.keys() if field != "senha")},
+        )
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail=cadastro_integrity_message(resource, exc)) from exc
+    except SQLAlchemyError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=cadastro_integrity_message(resource, exc)) from exc
     await db.refresh(item)
     return serialize_item(item, config)
 
