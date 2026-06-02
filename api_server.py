@@ -1516,6 +1516,7 @@ def ensure_tables():
             "payload_json": "payload_json TEXT DEFAULT '{}'",
             "registrado_em": "registrado_em TEXT",
             "created_at": "created_at TEXT",
+            "company_id": "company_id INTEGER",
         }.items():
             try:
                 cur.execute("PRAGMA table_info(programacao_itens_log)")
@@ -1547,9 +1548,14 @@ def ensure_tables():
                 lon REAL NOT NULL,
                 speed REAL DEFAULT NULL,
                 accuracy REAL DEFAULT NULL,
-                recorded_at TEXT DEFAULT (datetime('now'))
+                recorded_at TEXT DEFAULT (datetime('now')),
+                company_id INTEGER
             )
         """)
+        cur.execute("PRAGMA table_info(rota_gps_pings)")
+        cols_gps = {row[1] for row in cur.fetchall() or []}
+        if "company_id" not in cols_gps:
+            cur.execute("ALTER TABLE rota_gps_pings ADD COLUMN company_id INTEGER")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS rota_fotos (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1569,9 +1575,14 @@ def ensure_tables():
                 motorista_codigo TEXT,
                 motorista_nome TEXT,
                 registrado_em TEXT DEFAULT (datetime('now')),
-                payload_json TEXT DEFAULT '{}'
+                payload_json TEXT DEFAULT '{}',
+                company_id INTEGER
             )
         """)
+        cur.execute("PRAGMA table_info(rota_fotos)")
+        cols_fotos = {row[1] for row in cur.fetchall() or []}
+        if "company_id" not in cols_fotos:
+            cur.execute("ALTER TABLE rota_fotos ADD COLUMN company_id INTEGER")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_rota_fotos_prog_categoria ON rota_fotos(codigo_programacao, categoria)")
 
         cur.execute("""
@@ -1756,6 +1767,7 @@ def ensure_tables():
             add_ctrl_col("distancia", "distancia REAL")
             add_ctrl_col("confianca_localizacao", "confianca_localizacao REAL")
             add_ctrl_col("updated_at", "updated_at TEXT")
+            add_ctrl_col("company_id", "company_id INTEGER")
         except Exception:
             pass
 
@@ -1775,9 +1787,14 @@ def ensure_tables():
                     motorista_codigo TEXT,
                     motorista_nome TEXT,
                     origem TEXT DEFAULT 'APP',
-                    registrado_em TEXT DEFAULT (datetime('now'))
+                    registrado_em TEXT DEFAULT (datetime('now')),
+                    company_id INTEGER
                 )
             """)
+            cur.execute("PRAGMA table_info(cliente_localizacao_amostras)")
+            cols_cli_loc = {row[1] for row in cur.fetchall() or []}
+            if "company_id" not in cols_cli_loc:
+                cur.execute("ALTER TABLE cliente_localizacao_amostras ADD COLUMN company_id INTEGER")
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_cli_loc_amostras_cliente ON cliente_localizacao_amostras(cod_cliente, registrado_em DESC)"
             )
@@ -1792,6 +1809,8 @@ def ensure_tables():
                 cols_rec = {row[1] for row in cur.fetchall() or []}
                 if "pedido" not in cols_rec:
                     cur.execute("ALTER TABLE recebimentos ADD COLUMN pedido TEXT")
+                if "company_id" not in cols_rec:
+                    cur.execute("ALTER TABLE recebimentos ADD COLUMN company_id INTEGER")
         except Exception:
             pass
 
@@ -1891,6 +1910,7 @@ def ensure_tables():
                 add_desp_col("vinculo_prestacao_json", "vinculo_prestacao_json TEXT")
                 add_desp_col("desktop_web_json", "desktop_web_json TEXT")
                 add_desp_col("foto_despesa_ref_json", "foto_despesa_ref_json TEXT")
+                add_desp_col("company_id", "company_id INTEGER")
                 cur.execute(
                     "CREATE INDEX IF NOT EXISTS idx_despesas_prog_id_local ON despesas(codigo_programacao, id_local)"
                 )
@@ -9405,6 +9425,7 @@ def salvar_controle_cliente(
 ):
     nome_motorista = (m["nome"] or "").strip()
     codigo_motorista = (m.get("codigo") or "").strip().upper()
+    company_id = int(m.get("company_id") or 1)
     is_admin = bool(m.get("is_admin"))
     codigo_programacao = (codigo_programacao or "").strip()
 
@@ -9734,6 +9755,20 @@ def salvar_controle_cliente(
                     confianca_localizacao,
                 ),
             )
+        try:
+            cur.execute("PRAGMA table_info(programacao_itens_controle)")
+            cols_ctrl_company = {row[1] for row in cur.fetchall() or []}
+            if "company_id" in cols_ctrl_company:
+                cur.execute(
+                    """
+                    UPDATE programacao_itens_controle
+                       SET company_id=COALESCE(company_id, ?)
+                     WHERE codigo_programacao=? AND cod_cliente=? AND COALESCE(pedido, '')=COALESCE(?, '')
+                    """,
+                    (company_id, codigo_programacao, cod_cliente, pedido),
+                )
+        except Exception:
+            pass
 
         foto_mortalidade_ref = _store_mobile_photo(
             cur,
@@ -9748,6 +9783,7 @@ def salvar_controle_cliente(
             pedido=str(pedido or ""),
             id_vinculo=str(pedido or cod_cliente or ""),
             path_hint=payload.foto_mortalidade_path or payload.mortalidade_foto_path or "",
+            company_id=company_id,
         )
         try:
             cur.execute("PRAGMA table_info(programacao_itens_controle)")
@@ -9849,41 +9885,42 @@ def salvar_controle_cliente(
                         "DELETE FROM recebimentos WHERE codigo_programacao=? AND cod_cliente=? AND COALESCE(pedido,'')=COALESCE(?, '')",
                         (codigo_programacao, cod_cliente, pedido),
                     )
+                    receb_cols = [
+                        "codigo_programacao", "cod_cliente", "pedido", "nome_cliente", "valor",
+                        "forma_pagamento", "observacao", "data_registro",
+                    ]
+                    receb_vals = [
+                        codigo_programacao, cod_cliente, pedido, nome_cliente, float(valor_recebido),
+                        (forma_recebimento or "DINHEIRO"), (obs_recebimento or None), _now_iso(),
+                    ]
+                    if "company_id" in cols_receb:
+                        receb_cols.append("company_id")
+                        receb_vals.append(company_id)
+                    placeholders = ", ".join(["?"] * len(receb_cols))
                     cur.execute(
-                        """
-                        INSERT INTO recebimentos
-                            (codigo_programacao, cod_cliente, pedido, nome_cliente, valor, forma_pagamento, observacao, data_registro)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
-                        """,
-                        (
-                            codigo_programacao,
-                            cod_cliente,
-                            pedido,
-                            nome_cliente,
-                            float(valor_recebido),
-                            (forma_recebimento or "DINHEIRO"),
-                            (obs_recebimento or None),
-                        ),
+                        f"INSERT INTO recebimentos ({', '.join(receb_cols)}) VALUES ({placeholders})",
+                        tuple(receb_vals),
                     )
                 else:
                     cur.execute(
                         "DELETE FROM recebimentos WHERE codigo_programacao=? AND cod_cliente=?",
                         (codigo_programacao, cod_cliente),
                     )
+                    receb_cols = [
+                        "codigo_programacao", "cod_cliente", "nome_cliente", "valor",
+                        "forma_pagamento", "observacao", "data_registro",
+                    ]
+                    receb_vals = [
+                        codigo_programacao, cod_cliente, nome_cliente, float(valor_recebido),
+                        (forma_recebimento or "DINHEIRO"), (obs_recebimento or None), _now_iso(),
+                    ]
+                    if "company_id" in cols_receb:
+                        receb_cols.append("company_id")
+                        receb_vals.append(company_id)
+                    placeholders = ", ".join(["?"] * len(receb_cols))
                     cur.execute(
-                        """
-                        INSERT INTO recebimentos
-                            (codigo_programacao, cod_cliente, nome_cliente, valor, forma_pagamento, observacao, data_registro)
-                        VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-                        """,
-                        (
-                            codigo_programacao,
-                            cod_cliente,
-                            nome_cliente,
-                            float(valor_recebido),
-                            (forma_recebimento or "DINHEIRO"),
-                            (obs_recebimento or None),
-                        ),
+                        f"INSERT INTO recebimentos ({', '.join(receb_cols)}) VALUES ({placeholders})",
+                        tuple(receb_vals),
                     )
             else:
                 if has_receb_pedido:
@@ -9916,10 +9953,10 @@ def salvar_controle_cliente(
             cur.execute(
                 """
                 INSERT INTO programacao_itens_log
-                    (codigo_programacao, cod_cliente, evento, payload_json)
-                VALUES (?, ?, ?, ?)
+                    (codigo_programacao, cod_cliente, evento, payload_json, company_id)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (codigo_programacao, cod_cliente, "cliente_controle", payload_json),
+                (codigo_programacao, cod_cliente, "cliente_controle", payload_json, company_id),
             )
         except Exception:
             pass
@@ -9939,6 +9976,7 @@ def salvar_controle_cliente(
                 motorista_codigo=codigo_motorista,
                 motorista_nome=nome_motorista,
                 origem="APP",
+                company_id=company_id,
             )
         except Exception:
             pass
@@ -10035,6 +10073,7 @@ def salvar_gps(
 ):
     nome_motorista = (m["nome"] or "").strip()
     codigo_motorista = (m.get("codigo") or "").strip().upper()
+    company_id = int(m.get("company_id") or 1)
     codigo_programacao = (codigo_programacao or "").strip()
 
     if not codigo_programacao:
@@ -10058,21 +10097,25 @@ def salvar_gps(
         if ts is None:
             ts = datetime.now()
 
+        cur.execute("PRAGMA table_info(rota_gps_pings)")
+        cols_gps = {row[1] for row in cur.fetchall() or []}
+        gps_cols = ["codigo_programacao", "motorista", "lat", "lon", "speed", "accuracy", "recorded_at"]
+        gps_vals = [
+            codigo_programacao,
+            nome_motorista,
+            float(payload.lat),
+            float(payload.lon),
+            (float(payload.speed) if payload.speed is not None else None),
+            (float(payload.accuracy) if payload.accuracy is not None else None),
+            ts.isoformat(timespec="seconds"),
+        ]
+        if "company_id" in cols_gps:
+            gps_cols.append("company_id")
+            gps_vals.append(company_id)
+        placeholders = ", ".join(["?"] * len(gps_cols))
         cur.execute(
-            """
-            INSERT INTO rota_gps_pings
-                (codigo_programacao, motorista, lat, lon, speed, accuracy, recorded_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                codigo_programacao,
-                nome_motorista,
-                float(payload.lat),
-                float(payload.lon),
-                (float(payload.speed) if payload.speed is not None else None),
-                (float(payload.accuracy) if payload.accuracy is not None else None),
-                ts.isoformat(timespec="seconds"),
-            ),
+            f"INSERT INTO rota_gps_pings ({', '.join(gps_cols)}) VALUES ({placeholders})",
+            tuple(gps_vals),
         )
         _idempotency_mark(cur, codigo_motorista, codigo_programacao, "gps", payload.idempotency_key)
         _idempotency_mark(cur, codigo_motorista, codigo_programacao, "clientes_controle", payload.idempotency_key)
@@ -10903,6 +10946,7 @@ def salvar_transbordo_rota(
     codigo_programacao = (codigo_programacao or "").strip()
     codigo_motorista = (m.get("codigo") or "").strip().upper()
     nome_motorista = (m.get("nome") or "").strip()
+    company_id = int(m.get("company_id") or 1)
     is_admin = bool(m.get("is_admin"))
 
     with get_conn() as conn:
@@ -10940,6 +10984,7 @@ def salvar_transbordo_rota(
             motorista_nome=nome_motorista,
             id_vinculo="TRANSBORDO",
             path_hint=path_foto,
+            company_id=company_id,
         )
 
         cur.execute("PRAGMA table_info(programacoes)")
@@ -11008,6 +11053,7 @@ def salvar_despesa_rota_mobile(
     codigo_programacao = (codigo_programacao or "").strip()
     codigo_motorista = (payload.motorista_codigo or m.get("codigo") or "").strip().upper()
     nome_motorista = (payload.motorista_nome or m.get("nome") or "").strip()
+    company_id = int(m.get("company_id") or 1)
     idem = payload.idempotency_key or payload.sync_key or payload.id_local
 
     with get_conn() as conn:
@@ -11034,6 +11080,7 @@ def salvar_despesa_rota_mobile(
             motorista_nome=nome_motorista,
             id_vinculo=id_local or tipo,
             path_hint=payload.comprovante_path or "",
+            company_id=company_id,
         )
 
         cur.execute("PRAGMA table_info(despesas)")
@@ -11070,6 +11117,7 @@ def salvar_despesa_rota_mobile(
             "vinculo_prestacao_json": json.dumps(payload.vinculo_prestacao or {}, ensure_ascii=False),
             "desktop_web_json": json.dumps(payload.desktop_web or {}, ensure_ascii=False),
             "foto_despesa_ref_json": json.dumps(foto_ref or {}, ensure_ascii=False),
+            "company_id": company_id,
         }
         insert_cols = [col for col in data.keys() if col in cols]
         if not insert_cols:
@@ -11305,6 +11353,7 @@ def _store_mobile_photo(
     pedido: str = "",
     id_vinculo: str = "",
     path_hint: str = "",
+    company_id: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
     photo_in = dict(photo or {})
     path_local = str(photo_in.get("path_local") or photo_in.get("arquivo_path") or path_hint or "").strip()
@@ -11411,6 +11460,16 @@ def _store_mobile_photo(
                 json.dumps(payload_to_store, ensure_ascii=False),
             ),
         )
+        try:
+            cur.execute("PRAGMA table_info(rota_fotos)")
+            cols_fotos = {row[1] for row in cur.fetchall() or []}
+            if "company_id" in cols_fotos:
+                cur.execute(
+                    "UPDATE rota_fotos SET company_id=COALESCE(company_id, ?) WHERE id_foto=?",
+                    (int(company_id or 1), id_foto),
+                )
+        except Exception:
+            pass
     except Exception:
         return ref
     return ref
@@ -12046,32 +12105,40 @@ def _registrar_amostra_localizacao_cliente(
     motorista_codigo: Optional[str],
     motorista_nome: Optional[str],
     origem: str = "APP",
+    company_id: Optional[int] = None,
 ) -> None:
     has_geo = lat_evento not in (None, "") and lon_evento not in (None, "")
     has_addr = any(str(v or "").strip() for v in (endereco_evento, cidade_evento, bairro_evento))
     if not has_geo and not has_addr:
         return
+    cur.execute("PRAGMA table_info(cliente_localizacao_amostras)")
+    cols = {row[1] for row in cur.fetchall() or []}
+    insert_cols = [
+        "cod_cliente", "codigo_programacao", "pedido", "latitude", "longitude", "endereco", "cidade", "bairro",
+        "status_pedido", "motorista_codigo", "motorista_nome", "origem", "registrado_em",
+    ]
+    insert_vals = [
+        (cod_cliente or "").strip().upper(),
+        (codigo_programacao or "").strip().upper(),
+        (pedido or "").strip(),
+        float(lat_evento) if lat_evento not in (None, "") else None,
+        float(lon_evento) if lon_evento not in (None, "") else None,
+        str(endereco_evento or "").strip().upper(),
+        str(cidade_evento or "").strip().upper(),
+        str(bairro_evento or "").strip().upper(),
+        str(status_pedido or "").strip().upper(),
+        str(motorista_codigo or "").strip().upper(),
+        str(motorista_nome or "").strip().upper(),
+        str(origem or "APP").strip().upper(),
+        _now_iso(),
+    ]
+    if "company_id" in cols:
+        insert_cols.append("company_id")
+        insert_vals.append(int(company_id or 1))
+    placeholders = ", ".join(["?"] * len(insert_cols))
     cur.execute(
-        """
-        INSERT INTO cliente_localizacao_amostras
-            (cod_cliente, codigo_programacao, pedido, latitude, longitude, endereco, cidade, bairro,
-             status_pedido, motorista_codigo, motorista_nome, origem, registrado_em)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-        """,
-        (
-            (cod_cliente or "").strip().upper(),
-            (codigo_programacao or "").strip().upper(),
-            (pedido or "").strip(),
-            float(lat_evento) if lat_evento not in (None, "") else None,
-            float(lon_evento) if lon_evento not in (None, "") else None,
-            str(endereco_evento or "").strip().upper(),
-            str(cidade_evento or "").strip().upper(),
-            str(bairro_evento or "").strip().upper(),
-            str(status_pedido or "").strip().upper(),
-            str(motorista_codigo or "").strip().upper(),
-            str(motorista_nome or "").strip().upper(),
-            str(origem or "APP").strip().upper(),
-        ),
+        f"INSERT INTO cliente_localizacao_amostras ({', '.join(insert_cols)}) VALUES ({placeholders})",
+        tuple(insert_vals),
     )
 
 

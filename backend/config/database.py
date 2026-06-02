@@ -118,6 +118,32 @@ def _ensure_backend_columns(sync_conn):
             if column not in columns:
                 sync_conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column} {definition}"))
 
+    def backfill_company_id(table_name, codigo_column="codigo_programacao"):
+        if table_name not in table_names:
+            return
+        local_columns = {column["name"] for column in inspect(sync_conn).get_columns(table_name)}
+        if "company_id" not in local_columns:
+            return
+        if codigo_column in local_columns and "programacoes" in table_names:
+            sync_conn.execute(
+                text(
+                    f"""
+                    UPDATE {table_name}
+                       SET company_id=COALESCE((
+                           SELECT p.company_id
+                             FROM programacoes p
+                            WHERE UPPER(TRIM(COALESCE(p.codigo_programacao, ''))) =
+                                  UPPER(TRIM(COALESCE({table_name}.{codigo_column}, '')))
+                              AND p.company_id IS NOT NULL
+                            LIMIT 1
+                       ), 1)
+                     WHERE company_id IS NULL OR company_id=0
+                    """
+                )
+            )
+        else:
+            sync_conn.execute(text(f"UPDATE {table_name} SET company_id=1 WHERE company_id IS NULL OR company_id=0"))
+
     def repair_clientes_table():
         nonlocal table_names
         if "clientes" not in table_names:
@@ -977,9 +1003,11 @@ def _ensure_backend_columns(sync_conn):
             "observacao": "TEXT",
             "num_nf": "TEXT",
             "data_registro": "TEXT",
+            "company_id": "INTEGER",
         },
     )
     if "recebimentos" in table_names:
+        backfill_company_id("recebimentos")
         sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_backend_receb_programacao ON recebimentos(codigo_programacao)"))
         sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_backend_receb_cliente ON recebimentos(cod_cliente)"))
 
@@ -1017,9 +1045,11 @@ def _ensure_backend_columns(sync_conn):
             "vinculo_prestacao_json": "TEXT",
             "desktop_web_json": "TEXT",
             "foto_despesa_ref_json": "TEXT",
+            "company_id": "INTEGER",
         },
     )
     if "despesas" in table_names:
+        backfill_company_id("despesas")
         sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_backend_despesas_programacao ON despesas(codigo_programacao)"))
         sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_backend_despesas_prog_id_local ON despesas(codigo_programacao, id_local)"))
 
@@ -1059,9 +1089,11 @@ def _ensure_backend_columns(sync_conn):
             "distancia": "REAL",
             "confianca_localizacao": "REAL",
             "updated_at": "TEXT",
+            "company_id": "INTEGER",
         },
     )
     if "programacao_itens_controle" in table_names:
+        backfill_company_id("programacao_itens_controle")
         sync_conn.execute(
             text(
                 "CREATE INDEX IF NOT EXISTS idx_backend_prog_itens_ctrl_prog_cliente "
@@ -1091,7 +1123,8 @@ def _ensure_backend_columns(sync_conn):
                     motorista_codigo TEXT,
                     motorista_nome TEXT,
                     registrado_em TEXT DEFAULT (datetime('now')),
-                    payload_json TEXT DEFAULT '{}'
+                    payload_json TEXT DEFAULT '{}',
+                    company_id INTEGER
                 )
                 """
             )
@@ -1117,9 +1150,11 @@ def _ensure_backend_columns(sync_conn):
             "motorista_nome": "TEXT",
             "registrado_em": "TEXT",
             "payload_json": "TEXT DEFAULT '{}'",
+            "company_id": "INTEGER",
         },
     )
     if "rota_fotos" in table_names:
+        backfill_company_id("rota_fotos")
         sync_conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS idx_backend_rota_fotos_id ON rota_fotos(id_foto)"))
         sync_conn.execute(
             text("CREATE INDEX IF NOT EXISTS idx_backend_rota_fotos_prog_categoria ON rota_fotos(codigo_programacao, categoria)")
@@ -1161,9 +1196,11 @@ def _ensure_backend_columns(sync_conn):
             "speed": "REAL",
             "accuracy": "REAL",
             "recorded_at": "TEXT",
+            "company_id": "INTEGER",
         },
     )
     if "rota_gps_pings" in table_names:
+        backfill_company_id("rota_gps_pings")
         sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_backend_rota_gps_prog_id ON rota_gps_pings(codigo_programacao, id)"))
 
     add_missing_columns(
@@ -1176,9 +1213,11 @@ def _ensure_backend_columns(sync_conn):
             "payload_json": "TEXT DEFAULT '{}'",
             "registrado_em": "TEXT",
             "created_at": "TEXT",
+            "company_id": "INTEGER",
         },
     )
     if "programacao_itens_log" in table_names:
+        backfill_company_id("programacao_itens_log")
         sync_conn.execute(
             text(
                 """
