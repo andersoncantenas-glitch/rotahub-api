@@ -4,7 +4,7 @@ services:
     runtime: python
     plan: free
     buildCommand: "python -m pip install --upgrade pip setuptools wheel && pip install -r backend/requirements.txt"
-    startCommand: "python scripts/render_start.py"
+    startCommand: "python scripts/server_start.py"
     envVars:
       - key: PYTHON_VERSION
         value: "3.11.11"
@@ -30,7 +30,13 @@ services:
         value: https://rotahub-api.onrender.com
       - key: DATABASE_URL
         value: sqlite+aiosqlite:////tmp/rotahub/rotadb.db
+      - key: ROTA_DATA_ROOT
+        value: /tmp/rotahub
       - key: ROTA_DB
         value: /tmp/rotahub/rotadb.db
       - key: ROTA_MOBILE_PHOTOS_DIR
         value: /tmp/rotahub/fotos_rotas
+      - key: BACKUP_DIR
+        value: /tmp/rotahub/backups
+      - key: ROTA_EXPORT_DIR
+        value: /tmp/rotahub/exports

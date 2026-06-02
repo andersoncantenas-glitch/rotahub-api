@@ -41,6 +41,17 @@ def warn(message: str) -> None:
     print(f"AVISO - {message}")
 
 
+def writable_directory(path: Path, label: str) -> bool:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        test_file = path / ".write_test"
+        test_file.write_text("ok", encoding="utf-8")
+        test_file.unlink(missing_ok=True)
+        return status(True, f"{label} gravavel: {path}")
+    except Exception as exc:
+        return status(False, f"{label} sem gravacao: {exc}")
+
+
 def sqlite_path_from_env() -> Path | None:
     rota_db = os.getenv("ROTA_DB", "").strip()
     if rota_db:
@@ -69,6 +80,8 @@ def main() -> int:
     ok &= status((ROOT / "backend" / "web_public" / "index.html").exists(), "pagina publica encontrada")
     ok &= status((ROOT / "backend" / "web_owner" / "index.html").exists(), "painel Owner SaaS encontrado")
     ok &= status((ROOT / "backend" / "requirements.txt").exists(), "backend/requirements.txt encontrado")
+    ok &= status((ROOT / "scripts" / "server_start.py").exists(), "startup portatil encontrado")
+    ok &= status((ROOT / "scripts" / "export_runtime_backup.py").exists(), "exportador de migracao encontrado")
 
     for relative in ("backend/web/app.js", "backend/web_public/public.js", "backend/web_owner/owner.js"):
         js_path = ROOT / relative
@@ -131,14 +144,17 @@ def main() -> int:
     photos_dir = Path(os.getenv("ROTA_MOBILE_PHOTOS_DIR", ROOT / ".rotahub_runtime" / "fotos_rotas")).expanduser()
     if not photos_dir.is_absolute():
         photos_dir = (ROOT / photos_dir).resolve()
-    try:
-        photos_dir.mkdir(parents=True, exist_ok=True)
-        test_file = photos_dir / ".write_test"
-        test_file.write_text("ok", encoding="utf-8")
-        test_file.unlink(missing_ok=True)
-        ok &= status(True, f"diretorio de fotos gravavel: {photos_dir}")
-    except Exception as exc:
-        ok &= status(False, f"diretorio de fotos sem gravacao: {exc}")
+    ok &= writable_directory(photos_dir, "diretorio de fotos")
+
+    backup_dir = Path(os.getenv("BACKUP_DIR", ROOT / "backup")).expanduser()
+    if not backup_dir.is_absolute():
+        backup_dir = (ROOT / backup_dir).resolve()
+    ok &= writable_directory(backup_dir, "diretorio de backups")
+
+    export_dir = Path(os.getenv("ROTA_EXPORT_DIR", ROOT / "exports")).expanduser()
+    if not export_dir.is_absolute():
+        export_dir = (ROOT / export_dir).resolve()
+    ok &= writable_directory(export_dir, "diretorio de exportacao")
 
     legacy = os.getenv("ROTA_ENABLE_LEGACY_MOBILE_API", "0").strip().lower() in {"1", "true", "yes", "on"}
     if production:

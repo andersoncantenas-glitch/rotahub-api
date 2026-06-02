@@ -8,6 +8,8 @@ Mantenha estes caminhos fora da pasta que pode ser substituida a cada deploy:
 
 - Banco SQLite: `ROTA_DB=/var/rotahub/data/rotadb.db`
 - Fotos do app motorista: `ROTA_MOBILE_PHOTOS_DIR=/var/rotahub/data/fotos_rotas`
+- Backups: `BACKUP_DIR=/var/rotahub/data/backups`
+- Pacotes de migracao: `ROTA_EXPORT_DIR=/var/rotahub/data/exports`
 
 Se usar PostgreSQL, mantenha `DATABASE_URL=postgresql://...` e ainda preserve `ROTA_MOBILE_PHOTOS_DIR`.
 
@@ -31,6 +33,8 @@ Ajuste no servidor:
 - `ROTA_ENABLE_LEGACY_MOBILE_API=1`
 - `ROTA_DB` ou `DATABASE_URL`
 - `ROTA_MOBILE_PHOTOS_DIR`
+- `BACKUP_DIR`
+- `ROTA_EXPORT_DIR`
 
 ## Instalar em uma VPS Linux
 
@@ -56,7 +60,7 @@ python scripts/check_deploy_ready.py
 Subida manual para teste:
 
 ```bash
-uvicorn backend.main:app --host 0.0.0.0 --port 8000
+python scripts/server_start.py
 ```
 
 Acesse:
@@ -77,7 +81,7 @@ After=network.target
 [Service]
 WorkingDirectory=/opt/rotahub
 EnvironmentFile=/opt/rotahub/.env
-ExecStart=/opt/rotahub/.venv/bin/uvicorn backend.main:app --host 0.0.0.0 --port 8000
+ExecStart=/opt/rotahub/.venv/bin/python scripts/server_start.py
 Restart=always
 RestartSec=5
 User=rotahub
@@ -127,7 +131,34 @@ Rotas importantes:
 - API web: `/api/v1`
 - Compatibilidade app motorista: endpoints montados na raiz quando `ROTA_ENABLE_LEGACY_MOBILE_API=1`
 
-## Backup antes de migrar
+## Backup portatil antes de migrar
+
+Com o ambiente configurado, gere um pacote unico:
+
+```bash
+python scripts/export_runtime_backup.py
+```
+
+O arquivo `rotahub_migration_DATA_HORA.zip` sera criado em `ROTA_EXPORT_DIR`. Ele inclui:
+
+- copia consistente do SQLite criada pela API de backup do proprio SQLite;
+- pasta `fotos_rotas`;
+- `manifest.json` com os caminhos esperados para restauracao.
+
+Baixe esse arquivo para outro computador antes de desligar ou publicar novamente no Render free. O disco `/tmp` do Render free e temporario.
+
+Sem acesso ao terminal, entre no sistema web como administrador, abra `Backup / Exportar` e use `BAIXAR PACOTE DE MIGRACAO`. O download usa o mesmo formato ZIP.
+
+Para escolher os caminhos manualmente:
+
+```bash
+python scripts/export_runtime_backup.py \
+  --db /var/rotahub/data/rotadb.db \
+  --photos-dir /var/rotahub/data/fotos_rotas \
+  --output-dir /var/rotahub/data/exports
+```
+
+## Backup manual alternativo
 
 SQLite:
 
@@ -138,9 +169,19 @@ tar -czf fotos_rotas_backup.tar.gz -C /var/rotahub/data fotos_rotas
 
 Na migracao inicial, copie:
 
-- `rotadb.db`
-- pasta `fotos_rotas`
+- o conteudo `database/rotadb.db` do pacote para `/var/rotahub/data/rotadb.db`
+- a pasta `fotos_rotas` do pacote para `/var/rotahub/data/fotos_rotas`
 - `.env` ajustado
+
+## Render free durante os testes
+
+O `render.yaml` usa `/tmp/rotahub` porque o plano gratuito nao oferece disco persistente. Isso serve para testes, mas os dados podem desaparecer ao reiniciar ou publicar novamente.
+
+Na futura VPS/Hostinger, nao altere o codigo. Configure `.env` usando `.env.production.example`, aponte `ROTA_DATA_ROOT`, `ROTA_DB`, `BACKUP_DIR`, `ROTA_EXPORT_DIR` e `ROTA_MOBILE_PHOTOS_DIR` para `/var/rotahub/data`, e suba com:
+
+```bash
+python scripts/server_start.py
+```
 
 ## Checklist final
 

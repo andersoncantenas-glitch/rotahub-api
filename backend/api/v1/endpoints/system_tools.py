@@ -4,10 +4,12 @@ System tools endpoints mirroring BackupExportarPage and SystemToolsPage.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sqlite3
-from datetime import datetime, timedelta
+import zipfile
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -31,6 +33,7 @@ router = APIRouter()
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 BACKUP_DIR = Path(os.getenv("BACKUP_DIR", PROJECT_ROOT / "backup")).resolve()
+EXPORT_DIR = Path(os.getenv("ROTA_EXPORT_DIR", PROJECT_ROOT / "exports")).resolve()
 INSTALLER_DIR = Path(os.getenv("INSTALLER_DIR", PROJECT_ROOT / "dist_installer")).resolve()
 SYSTEM_TABLES = [
     "usuarios",
@@ -141,6 +144,11 @@ def ensure_backup_dir() -> Path:
     return BACKUP_DIR
 
 
+def ensure_export_dir() -> Path:
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    return EXPORT_DIR
+
+
 def assert_sqlite_file(path: Path) -> None:
     try:
         with path.open("rb") as handle:
@@ -210,6 +218,58 @@ def backup_to_info(path: Path) -> BackupInfo:
         tamanho_kb=round(stat.st_size / 1024, 2),
         data_criacao=datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
     )
+
+
+def create_migration_package() -> Path:
+    db_path = sqlite_db_path()
+    if not db_path.exists():
+        raise HTTPException(status_code=404, detail="Banco de dados principal nao encontrado.")
+    assert_sqlite_file(db_path)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    export_dir = ensure_export_dir()
+    archive_path = export_dir / f"rotahub_migration_{timestamp}.zip"
+    backup_db = export_dir / f".rotadb_export_{timestamp}.db"
+    photos_dir = Path(
+        os.getenv("ROTA_MOBILE_PHOTOS_DIR", PROJECT_ROOT / ".rotahub_runtime" / "fotos_rotas")
+    ).expanduser()
+    photos_count = 0
+
+    try:
+        sqlite_backup_copy(db_path, backup_db)
+        manifest = {
+            "format": "rotahub-migration-v1",
+            "created_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "database": {
+                "type": "sqlite",
+                "archive_path": "database/rotadb.db",
+                "source_name": db_path.name,
+                "size_bytes": backup_db.stat().st_size,
+            },
+            "photos": {
+                "archive_path": "fotos_rotas/",
+                "included": photos_dir.exists(),
+                "files": 0,
+            },
+            "restore": {
+                "rota_db": "/var/rotahub/data/rotadb.db",
+                "photos_dir": "/var/rotahub/data/fotos_rotas",
+            },
+        }
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.write(backup_db, "database/rotadb.db")
+            if photos_dir.exists():
+                for path in sorted(photos_dir.rglob("*")):
+                    if not path.is_file():
+                        continue
+                    archive.write(path, Path("fotos_rotas") / path.relative_to(photos_dir))
+                    photos_count += 1
+            manifest["photos"]["files"] = photos_count
+            archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+    finally:
+        backup_db.unlink(missing_ok=True)
+
+    return archive_path
 
 
 async def registrar_log(
@@ -495,6 +555,43 @@ async def baixar_backup(
     return FileResponse(
         path,
         media_type="application/x-sqlite3",
+        filename=path.name,
+    )
+
+
+@router.get("/migration/export/download")
+async def baixar_pacote_migracao(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin_user),
+):
+    try:
+        path = create_migration_package()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Erro ao criar pacote de migracao: {exc}") from exc
+    await registrar_log(
+        db,
+        tipo_acao="EXPORTAR_MIGRACAO",
+        descricao=f"Pacote de migracao criado: {path.name}",
+        usuario=username(current_user),
+        status="OK",
+        resultado=str(path),
+    )
+    record_audit_log(
+        db,
+        action="system_migration_exportado",
+        actor_user=current_user,
+        entity_type="migration_package",
+        entity_id=path.name,
+        ip_address=client_ip_from_request(request),
+        metadata={"tamanho_kb": round(path.stat().st_size / 1024, 2)},
+    )
+    await db.commit()
+    return FileResponse(
+        path,
+        media_type="application/zip",
         filename=path.name,
     )
 

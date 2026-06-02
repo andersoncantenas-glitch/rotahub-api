@@ -747,6 +747,7 @@ function bindEvents() {
   el("relatoriosTableSearch").addEventListener("input", renderRelatoriosResumo);
   el("backupRefreshButton").addEventListener("click", loadSystemTools);
   el("backupCreateButton").addEventListener("click", createSystemBackup);
+  el("backupMigrationButton").addEventListener("click", downloadMigrationPackage);
   el("backupExportVendasButton").addEventListener("click", exportBackupVendas);
   el("backupRestoreForm").addEventListener("submit", restoreBackupUpload);
   el("ferramentasRefreshButton").addEventListener("click", loadSystemTools);
@@ -7573,6 +7574,17 @@ async function exportBackupVendas() {
     const result = await apiBlobRequest("/system-tools/vendas-importadas/export");
     downloadBlob(result.blob, result.filename || "VENDAS_IMPORTADAS.xlsx");
     notify("Pedidos importados exportados.");
+  } catch (error) {
+    notify(error.message, true);
+  }
+}
+
+async function downloadMigrationPackage() {
+  try {
+    notify("Preparando banco e fotos para migracao...");
+    const result = await apiBlobRequest("/system-tools/migration/export/download");
+    downloadBlob(result.blob, result.filename || "rotahub_migration.zip");
+    notify("Pacote de migracao baixado.");
   } catch (error) {
     notify(error.message, true);
   }
