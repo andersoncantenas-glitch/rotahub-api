@@ -1607,7 +1607,8 @@ def ensure_tables():
                 data_hora TEXT,
                 observacao TEXT,
                 payload_json TEXT DEFAULT '{}',
-                created_at TEXT DEFAULT (datetime('now'))
+                created_at TEXT DEFAULT (datetime('now')),
+                company_id INTEGER
             )
         """)
         for col_name, col_ddl in {
@@ -1631,6 +1632,7 @@ def ensure_tables():
             "observacao": "observacao TEXT",
             "payload_json": "payload_json TEXT DEFAULT '{}'",
             "created_at": "created_at TEXT",
+            "company_id": "company_id INTEGER",
         }.items():
             try:
                 cur.execute("PRAGMA table_info(roteiro_operacional)")
@@ -11012,8 +11014,8 @@ def salvar_transbordo_rota(
         try:
             cur.execute(
                 """
-                INSERT INTO programacao_itens_log (codigo_programacao, cod_cliente, pedido, evento, payload_json, registrado_em)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO programacao_itens_log (codigo_programacao, cod_cliente, pedido, evento, payload_json, registrado_em, company_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     codigo_programacao,
@@ -11022,6 +11024,7 @@ def salvar_transbordo_rota(
                     "transbordo",
                     json.dumps({**_payload_dict(payload), "foto_ref": foto_ref}, ensure_ascii=False),
                     _now_iso(),
+                    company_id,
                 ),
             )
         except Exception:
@@ -11171,6 +11174,7 @@ def alterar_ajudantes_rota(
     codigo_programacao = (codigo_programacao or "").strip()
     codigo_motorista = (m.get("codigo") or "").strip().upper()
     nome_motorista = (m.get("nome") or "").strip()
+    company_id = int(m.get("company_id") or 1)
     novos = (payload.ajudantes_novos or "").strip()
     if not novos:
         raise HTTPException(status_code=400, detail="ajudantes_novos e obrigatorio.")
@@ -11224,8 +11228,8 @@ def alterar_ajudantes_rota(
         try:
             cur.execute(
                 """
-                INSERT INTO programacao_itens_log (codigo_programacao, cod_cliente, pedido, evento, payload_json, registrado_em)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO programacao_itens_log (codigo_programacao, cod_cliente, pedido, evento, payload_json, registrado_em, company_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     codigo_programacao,
@@ -11234,6 +11238,7 @@ def alterar_ajudantes_rota(
                     "ajudantes",
                     json.dumps(historico_item, ensure_ascii=False),
                     alterado_em,
+                    company_id,
                 ),
             )
         except Exception:
@@ -11515,38 +11520,63 @@ def _registrar_roteiro_operacional(
     data_hora: str = "",
     observacao: str = "",
     payload: Optional[Dict[str, Any]] = None,
+    company_id: Optional[int] = None,
 ) -> None:
     try:
+        codigo = str(codigo_programacao or "").strip().upper()
+        cur.execute("PRAGMA table_info(roteiro_operacional)")
+        cols = {row[1] for row in cur.fetchall() or []}
+        if company_id is None and "company_id" in cols and codigo:
+            try:
+                cur.execute(
+                    """
+                    SELECT company_id
+                      FROM programacoes
+                     WHERE UPPER(TRIM(COALESCE(codigo_programacao, '')))=UPPER(TRIM(?))
+                       AND company_id IS NOT NULL
+                     LIMIT 1
+                    """,
+                    (codigo,),
+                )
+                row_company = cur.fetchone()
+                if row_company:
+                    company_id = int(row_company["company_id"] or 1)
+            except Exception:
+                company_id = None
+        insert_cols = [
+            "tipo_evento", "codigo_programacao", "origem", "destino", "motorista_codigo", "motorista_nome",
+            "pedido", "cod_cliente", "cliente_nome", "caixas", "kg", "media", "aves_por_caixa",
+            "nf_numero", "nf_preco", "lotes", "data_hora", "observacao", "payload_json", "created_at",
+        ]
+        insert_vals = [
+            str(tipo_evento or "").strip().upper(),
+            codigo,
+            str(origem or "").strip(),
+            str(destino or "").strip(),
+            str(motorista_codigo or "").strip().upper(),
+            str(motorista_nome or "").strip(),
+            str(pedido or "").strip(),
+            str(cod_cliente or "").strip().upper(),
+            str(cliente_nome or "").strip(),
+            int(float(caixas or 0)),
+            safe_float(kg, 0.0),
+            safe_float(media, 0.0),
+            int(float(aves_por_caixa or 0)),
+            str(nf_numero or "").strip(),
+            safe_float(nf_preco, 0.0),
+            json.dumps(lotes, ensure_ascii=False) if isinstance(lotes, (dict, list)) else str(lotes or "").strip(),
+            str(data_hora or "").strip() or _now_iso(),
+            str(observacao or "").strip(),
+            json.dumps(payload or {}, ensure_ascii=False, sort_keys=True),
+            _now_iso(),
+        ]
+        if "company_id" in cols:
+            insert_cols.append("company_id")
+            insert_vals.append(int(company_id or 1))
+        placeholders = ", ".join(["?"] * len(insert_cols))
         cur.execute(
-            """
-            INSERT INTO roteiro_operacional (
-                tipo_evento, codigo_programacao, origem, destino, motorista_codigo, motorista_nome,
-                pedido, cod_cliente, cliente_nome, caixas, kg, media, aves_por_caixa,
-                nf_numero, nf_preco, lotes, data_hora, observacao, payload_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                str(tipo_evento or "").strip().upper(),
-                str(codigo_programacao or "").strip().upper(),
-                str(origem or "").strip(),
-                str(destino or "").strip(),
-                str(motorista_codigo or "").strip().upper(),
-                str(motorista_nome or "").strip(),
-                str(pedido or "").strip(),
-                str(cod_cliente or "").strip().upper(),
-                str(cliente_nome or "").strip(),
-                int(float(caixas or 0)),
-                safe_float(kg, 0.0),
-                safe_float(media, 0.0),
-                int(float(aves_por_caixa or 0)),
-                str(nf_numero or "").strip(),
-                safe_float(nf_preco, 0.0),
-                json.dumps(lotes, ensure_ascii=False) if isinstance(lotes, (dict, list)) else str(lotes or "").strip(),
-                str(data_hora or "").strip() or _now_iso(),
-                str(observacao or "").strip(),
-                json.dumps(payload or {}, ensure_ascii=False, sort_keys=True),
-                _now_iso(),
-            ),
+            f"INSERT INTO roteiro_operacional ({', '.join(insert_cols)}) VALUES ({placeholders})",
+            tuple(insert_vals),
         )
     except Exception:
         logging.debug("Falha ao registrar roteiro operacional.", exc_info=True)

@@ -1261,7 +1261,8 @@ def _ensure_backend_columns(sync_conn):
                     data_hora TEXT,
                     observacao TEXT,
                     payload_json TEXT DEFAULT '{}',
-                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    company_id INTEGER
                 )
                 """
             )
@@ -1337,9 +1338,11 @@ def _ensure_backend_columns(sync_conn):
             "observacao": "TEXT",
             "payload_json": "TEXT DEFAULT '{}'",
             "created_at": "TEXT",
+            "company_id": "INTEGER",
         },
     )
     if "roteiro_operacional" in table_names:
+        backfill_company_id("roteiro_operacional")
         sync_conn.execute(
             text("CREATE INDEX IF NOT EXISTS idx_backend_roteiro_operacional_prog_data ON roteiro_operacional(codigo_programacao, data_hora, id)")
         )
