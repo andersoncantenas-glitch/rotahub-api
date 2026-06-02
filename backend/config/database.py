@@ -1236,6 +1236,88 @@ def _ensure_backend_columns(sync_conn):
             )
         )
 
+    add_missing_columns(
+        "transferencias",
+        {
+            "id": "TEXT",
+            "codigo_origem": "TEXT",
+            "codigo_destino": "TEXT",
+            "cod_cliente": "TEXT",
+            "pedido": "TEXT",
+            "qtd_caixas": "INTEGER DEFAULT 0",
+            "status": "TEXT DEFAULT 'PENDENTE'",
+            "obs": "TEXT",
+            "snapshot": "TEXT",
+            "motorista_origem": "TEXT",
+            "motorista_destino": "TEXT",
+            "qtd_convertida": "INTEGER DEFAULT 0",
+            "criado_em": "TEXT",
+            "atualizado_em": "TEXT",
+            "company_id": "INTEGER",
+        },
+    )
+    if "transferencias" in table_names:
+        backfill_company_id("transferencias", codigo_column="codigo_origem")
+
+    add_missing_columns(
+        "transferencias_conversoes",
+        {
+            "transferencia_id": "TEXT",
+            "pedido_destino": "TEXT",
+            "cod_cliente_destino": "TEXT",
+            "qtd": "INTEGER DEFAULT 0",
+            "obs": "TEXT",
+            "nome_cliente_destino": "TEXT",
+            "novo_cliente": "INTEGER DEFAULT 0",
+            "criado_em": "TEXT",
+            "company_id": "INTEGER",
+        },
+    )
+    if "transferencias_conversoes" in table_names:
+        sync_conn.execute(
+            text(
+                """
+                UPDATE transferencias_conversoes
+                   SET company_id=COALESCE((
+                       SELECT t.company_id
+                         FROM transferencias t
+                        WHERE t.id=transferencias_conversoes.transferencia_id
+                          AND t.company_id IS NOT NULL
+                        LIMIT 1
+                   ), 1)
+                 WHERE company_id IS NULL OR company_id=0
+                """
+            )
+        )
+
+    add_missing_columns(
+        "rota_substituicoes",
+        {
+            "id": "TEXT",
+            "codigo_programacao": "TEXT",
+            "status": "TEXT DEFAULT 'PENDENTE_ACEITE'",
+            "motivo": "TEXT",
+            "km_evento": "INTEGER",
+            "lat_evento": "REAL",
+            "lon_evento": "REAL",
+            "snapshot_json": "TEXT",
+            "origem_motorista_nome": "TEXT",
+            "origem_motorista_codigo": "TEXT",
+            "origem_motorista_id": "INTEGER",
+            "origem_veiculo": "TEXT",
+            "destino_motorista_nome": "TEXT",
+            "destino_motorista_codigo": "TEXT",
+            "destino_motorista_id": "INTEGER",
+            "destino_veiculo": "TEXT",
+            "solicitado_em": "TEXT",
+            "aceito_em": "TEXT",
+            "atualizado_em": "TEXT",
+            "company_id": "INTEGER",
+        },
+    )
+    if "rota_substituicoes" in table_names:
+        backfill_company_id("rota_substituicoes")
+
     if "roteiro_operacional" not in table_names:
         sync_conn.execute(
             text(

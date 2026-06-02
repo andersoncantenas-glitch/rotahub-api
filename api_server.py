@@ -1135,20 +1135,34 @@ def _is_transbordo_row(row: Dict[str, Any]) -> bool:
     return operacao == "TRANSBORDO" or str(row.get("tipo_estimativa") or "").strip().upper() == "CX"
 
 
-def _transferencias_resumo(cur: sqlite3.Cursor, codigo_programacao: str) -> Dict[str, int]:
+def _transferencias_resumo(
+    cur: sqlite3.Cursor,
+    codigo_programacao: str,
+    company_id: Optional[int] = None,
+) -> Dict[str, int]:
     codigo = str(codigo_programacao or "").strip().upper()
     out = {"transferencias_saida": 0, "transferencias_entrada": 0, "transferencias_pendentes": 0}
     if not codigo:
         return out
     try:
+        cur.execute("PRAGMA table_info(transferencias)")
+        cols_transferencias = {str(r[1]) for r in (cur.fetchall() or [])}
+        company_sql = ""
+        params: List[Any] = [codigo, codigo]
+        if company_id is not None and "company_id" in cols_transferencias:
+            company_sql = " AND COALESCE(company_id, ?) = ?"
+            params.extend([int(company_id or 1), int(company_id or 1)])
         cur.execute(
             """
             SELECT codigo_origem, codigo_destino, qtd_caixas, qtd_convertida, status
             FROM transferencias
-            WHERE UPPER(COALESCE(codigo_origem,''))=?
-               OR UPPER(COALESCE(codigo_destino,''))=?
+            WHERE (
+                UPPER(COALESCE(codigo_origem,''))=?
+                OR UPPER(COALESCE(codigo_destino,''))=?
+            )
+            """ + company_sql + """
             """,
-            (codigo, codigo),
+            tuple(params),
         )
         for row in cur.fetchall() or []:
             status_value = str(row["status"] or "").strip().upper()
@@ -2003,7 +2017,8 @@ def ensure_tables():
                 motorista_destino TEXT DEFAULT NULL,
                 qtd_convertida INTEGER DEFAULT 0,
                 criado_em TEXT DEFAULT (datetime('now')),
-                atualizado_em TEXT DEFAULT (datetime('now'))
+                atualizado_em TEXT DEFAULT (datetime('now')),
+                company_id INTEGER
             )
         """)
         cur.execute("""
@@ -2017,9 +2032,18 @@ def ensure_tables():
                 nome_cliente_destino TEXT,
                 novo_cliente INTEGER DEFAULT 0,
                 criado_em TEXT DEFAULT (datetime('now')),
+                company_id INTEGER,
                 FOREIGN KEY(transferencia_id) REFERENCES transferencias(id) ON DELETE CASCADE
             )
         """)
+        for table_name in ("transferencias", "transferencias_conversoes"):
+            try:
+                cur.execute(f"PRAGMA table_info({table_name})")
+                cols_table = {row[1] for row in cur.fetchall() or []}
+                if "company_id" not in cols_table:
+                    cur.execute(f"ALTER TABLE {table_name} ADD COLUMN company_id INTEGER")
+            except Exception:
+                pass
         cur.execute("""
             CREATE TABLE IF NOT EXISTS mobile_sync_idempotency (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2053,9 +2077,17 @@ def ensure_tables():
                 destino_veiculo TEXT DEFAULT NULL,
                 solicitado_em TEXT DEFAULT (datetime('now')),
                 aceito_em TEXT DEFAULT NULL,
-                atualizado_em TEXT DEFAULT (datetime('now'))
+                atualizado_em TEXT DEFAULT (datetime('now')),
+                company_id INTEGER
             )
         """)
+        try:
+            cur.execute("PRAGMA table_info(rota_substituicoes)")
+            cols_subs = {row[1] for row in cur.fetchall() or []}
+            if "company_id" not in cols_subs:
+                cur.execute("ALTER TABLE rota_substituicoes ADD COLUMN company_id INTEGER")
+        except Exception:
+            pass
 
         # programacao avulsa (vendedor) para uso em fim de semana
         cur.execute("""
@@ -4044,8 +4076,14 @@ def _owner_filter_for_programacoes(
 
     conds: List[str] = []
     params: List[Any] = []
+    company_id = int(motorista.get("company_id") or _default_company_id(cur) or 1)
+    company_clause = ""
+    if "company_id" in cols:
+        company_clause = f"COALESCE({alias}.company_id, {company_id})=?"
 
     if bool(motorista.get("is_admin")):
+        if company_clause:
+            return f"({company_clause})", (company_id,)
         return "(1=1)", tuple()
 
     # Prioriza chaves estáveis.
@@ -4073,7 +4111,10 @@ def _owner_filter_for_programacoes(
         conds.append(f"UPPER(TRIM(COALESCE({alias}.motorista,''))) LIKE UPPER(TRIM(?))")
         params.append(f"{str(motorista['codigo'])}/%")
 
-    return "(" + " OR ".join(conds) + ")", tuple(params)
+    owner_clause = "(" + " OR ".join(conds) + ")"
+    if company_clause:
+        return f"({company_clause} AND {owner_clause})", (company_id, *params)
+    return owner_clause, tuple(params)
 
 
 def _fetch_programacao_owned(
@@ -5970,6 +6011,7 @@ def criar_cliente_reserva(
     vendedor = (payload.vendedor or "").strip()
     cidade = (payload.cidade or "").strip()
     observacao = (payload.observacao or "").strip()
+    company_id = int(m.get("company_id") or 1)
 
     if not codigo_programacao:
         raise HTTPException(status_code=400, detail="Código da programação é obrigatório.")
@@ -6024,6 +6066,9 @@ def criar_cliente_reserva(
             if has_status:
                 sets.append("status_pedido=?")
                 params.append(status_final)
+            if "company_id" in cols:
+                sets.append("company_id=COALESCE(company_id, ?)")
+                params.append(company_id)
             params.append(int(existing["id"]))
             cur.execute(f"UPDATE programacao_itens SET {', '.join(sets)} WHERE id=?", params)
         else:
@@ -6051,6 +6096,8 @@ def criar_cliente_reserva(
                 data["status_pedido"] = status_final
             if has_caixas_atual:
                 data["caixas_atual"] = qnt_caixas
+            if "company_id" in cols:
+                data["company_id"] = company_id
 
             keys = list(data.keys())
             vals = [data[k] for k in keys]
@@ -6911,6 +6958,12 @@ def listar_rotas_ativas_todas(m=Depends(get_current_motorista)):
         caixas_saldo_expr = _caixas_saldo_subquery(conn, "p")
         not_finalized_sql = _rotas_not_finalizadas_clause(conn, "p")
         equipe_cols_expr = _equipe_cols_expr(conn, "e")
+        company_id = int(m.get("company_id") or _default_company_id(cur) or 1)
+        company_sql = ""
+        company_params: tuple[Any, ...] = tuple()
+        if col_exists(conn, "programacoes", "company_id"):
+            company_sql = " AND COALESCE(p.company_id, ?) = ?"
+            company_params = (company_id, company_id)
         has_equipe_id = col_exists(conn, "programacoes", "equipe_id")
         equipe_id_select = "p.equipe_id," if has_equipe_id else "NULL AS equipe_id,"
         if has_equipe_id:
@@ -6966,20 +7019,23 @@ def listar_rotas_ativas_todas(m=Depends(get_current_motorista)):
             """ + equipe_join_on + """
             WHERE TRIM(COALESCE(p.codigo_programacao,''))<>''
               AND """ + not_finalized_sql + """
+              """ + company_sql + """
             ORDER BY p.id DESC
             LIMIT 200
-            """
+            """,
+            company_params,
         )
         rows = cur.fetchall()
         response_rows = []
+        company_id = int(m.get("company_id") or 1)
         for r in rows:
             d = _decorate_rota_row(row_to_dict(r), cur)
             codigo = str(d.get("codigo_programacao") or "").strip()
-            pend_sub = _has_pending_substituicao(cur, codigo) if codigo else False
+            pend_sub = _has_pending_substituicao(cur, codigo, company_id=company_id) if codigo else False
             d["substituicao_pendente"] = 1 if pend_sub else 0
             d["status_operacional"] = _status_operacional_especial(d, pend_substituicao=pend_sub)
             d = _attach_ultimo_km_veiculo(cur, d)
-            d.update(_transferencias_resumo(cur, codigo))
+            d.update(_transferencias_resumo(cur, codigo, company_id=company_id))
             response_rows.append(d)
 
     return response_rows
@@ -7062,14 +7118,15 @@ def rotas_ativas(m=Depends(get_current_motorista)):
         )
         rows = cur.fetchall()
         response_rows = []
+        company_id = int(m.get("company_id") or 1)
         for r in rows:
             d = _decorate_rota_row(row_to_dict(r), cur)
             codigo = str(d.get("codigo_programacao") or "").strip()
-            pend_sub = _has_pending_substituicao(cur, codigo) if codigo else False
+            pend_sub = _has_pending_substituicao(cur, codigo, company_id=company_id) if codigo else False
             d["substituicao_pendente"] = 1 if pend_sub else 0
             d["status_operacional"] = _status_operacional_especial(d, pend_substituicao=pend_sub)
             d = _attach_ultimo_km_veiculo(cur, d)
-            d.update(_transferencias_resumo(cur, codigo))
+            d.update(_transferencias_resumo(cur, codigo, company_id=company_id))
             response_rows.append(d)
 
     return response_rows
@@ -7135,22 +7192,24 @@ def rota_detalhe(codigo_programacao: str, m=Depends(get_current_motorista)):
         controles = cur.fetchall()
 
         rota = row_to_dict(pr)
+        company_id = int(rota.get("company_id") or _default_company_id(cur) or 1)
         try:
             rota = _apply_equipe_nome(rota, equipes_map, cur)
             rota = _decorate_rota_row(rota, cur)
-            pend_sub = _has_pending_substituicao(cur, codigo_programacao)
+            company_id = int(rota.get("company_id") or _default_company_id(cur) or 1)
+            pend_sub = _has_pending_substituicao(cur, codigo_programacao, company_id=company_id)
             rota["substituicao_pendente"] = 1 if pend_sub else 0
             rota["status_operacional"] = _status_operacional_especial(rota, pend_substituicao=pend_sub)
-            rota["substituicoes"] = _list_substituicoes_por_rota(cur, codigo_programacao, limit=20)
-            rota.update(_transferencias_resumo(cur, codigo_programacao))
-            rota["transferencias_saida_lista"] = _list_transferencias_por_origem(conn, codigo_programacao)
-            rota["transferencias_entrada_lista"] = _list_transferencias_por_destino(conn, codigo_programacao)
+            rota["substituicoes"] = _list_substituicoes_por_rota(cur, codigo_programacao, limit=20, company_id=company_id)
+            rota.update(_transferencias_resumo(cur, codigo_programacao, company_id=company_id))
+            rota["transferencias_saida_lista"] = _list_transferencias_por_origem(conn, codigo_programacao, company_id=company_id)
+            rota["transferencias_entrada_lista"] = _list_transferencias_por_destino(conn, codigo_programacao, company_id=company_id)
             rota = _attach_ultimo_km_veiculo(cur, rota)
         except Exception:
             logging.debug("Falha ao decorar rota desktop; retornando cabecalho bruto.", exc_info=True)
             rota.setdefault("substituicao_pendente", 0)
             rota.setdefault("substituicoes", [])
-            rota.update(_transferencias_resumo(cur, codigo_programacao))
+            rota.update(_transferencias_resumo(cur, codigo_programacao, company_id=company_id))
             rota = _attach_ultimo_km_veiculo(cur, rota)
 
         controle_map = {}
@@ -7308,22 +7367,24 @@ def rota_detalhe_desktop(codigo_programacao: str, _ok: bool = Depends(_require_d
             log_map = {}
 
         rota = row_to_dict(pr)
+        company_id = int(rota.get("company_id") or _default_company_id(cur) or 1)
         try:
             rota = _apply_equipe_nome(rota, equipes_map, cur)
             rota = _decorate_rota_row(rota, cur)
-            pend_sub = _has_pending_substituicao(cur, codigo_programacao)
+            company_id = int(rota.get("company_id") or _default_company_id(cur) or 1)
+            pend_sub = _has_pending_substituicao(cur, codigo_programacao, company_id=company_id)
             rota["substituicao_pendente"] = 1 if pend_sub else 0
             rota["status_operacional"] = _status_operacional_especial(rota, pend_substituicao=pend_sub)
-            rota["substituicoes"] = _list_substituicoes_por_rota(cur, codigo_programacao, limit=20)
-            rota.update(_transferencias_resumo(cur, codigo_programacao))
-            rota["transferencias_saida_lista"] = _list_transferencias_por_origem(conn, codigo_programacao)
-            rota["transferencias_entrada_lista"] = _list_transferencias_por_destino(conn, codigo_programacao)
+            rota["substituicoes"] = _list_substituicoes_por_rota(cur, codigo_programacao, limit=20, company_id=company_id)
+            rota.update(_transferencias_resumo(cur, codigo_programacao, company_id=company_id))
+            rota["transferencias_saida_lista"] = _list_transferencias_por_origem(conn, codigo_programacao, company_id=company_id)
+            rota["transferencias_entrada_lista"] = _list_transferencias_por_destino(conn, codigo_programacao, company_id=company_id)
             rota = _attach_ultimo_km_veiculo(cur, rota)
         except Exception:
             logging.debug("Falha ao decorar rota desktop; retornando cabecalho bruto.", exc_info=True)
             rota.setdefault("substituicao_pendente", 0)
             rota.setdefault("substituicoes", [])
-            rota.update(_transferencias_resumo(cur, codigo_programacao))
+            rota.update(_transferencias_resumo(cur, codigo_programacao, company_id=company_id))
             rota = _attach_ultimo_km_veiculo(cur, rota)
 
         controle_map = {}
@@ -9453,7 +9514,7 @@ def salvar_controle_cliente(
                 status_code=409,
                 detail=f"Rota ainda nao iniciada (status={status_atual or 'N/D'}). Inicie a rota para alterar pedidos.",
             )
-        if _has_pending_substituicao(cur, codigo_programacao):
+        if _has_pending_substituicao(cur, codigo_programacao, company_id=company_id):
             raise HTTPException(
                 status_code=409,
                 detail="Rota em transferencia de motorista. Alteracoes bloqueadas ate concluir aceite/recusa.",
@@ -10424,7 +10485,7 @@ def finalizar_rota(codigo_programacao: str, payload: FinalizarRotaIn, m=Depends(
             raise HTTPException(status_code=409, detail=f"Rota encerrada (status={status_atual}).")
         if status_atual not in ("EM_ROTA", "EM ROTA", "INICIADA", "EM_ENTREGAS", "EM ENTREGAS", "CARREGADA"):
             raise HTTPException(status_code=409, detail=f"Transicao invalida para finalizar (status={status_atual or 'N/D'}).")
-        if _has_pending_substituicao(cur, codigo_programacao):
+        if _has_pending_substituicao(cur, codigo_programacao, company_id=company_id):
             raise HTTPException(
                 status_code=409,
                 detail="Nao e possivel finalizar: existe substituicao de motorista pendente de aceite.",
@@ -11654,6 +11715,7 @@ def _serialize_transferencia_row(row: sqlite3.Row, cur: sqlite3.Cursor) -> Dict[
         "carga_origem_imediata": carga_origem_imediata,
         "criado_em": row["criado_em"],
         "atualizado_em": row["atualizado_em"],
+        "company_id": row["company_id"] if "company_id" in row.keys() else None,
         "conversoes": _list_transferencia_conversoes(cur, row["id"]),
     }
 
@@ -11668,11 +11730,17 @@ def _fetch_transferencia_by_id(conn: sqlite3.Connection, transferencia_id: str) 
 
 
 def _list_transferencias_por_destino(
-    conn: sqlite3.Connection, codigo_destino: str, status: Optional[str] = None
+    conn: sqlite3.Connection,
+    codigo_destino: str,
+    status: Optional[str] = None,
+    company_id: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     cur = conn.cursor()
     sql = "SELECT * FROM transferencias WHERE codigo_destino=?"
     params = [codigo_destino]
+    if company_id is not None and col_exists(conn, "transferencias", "company_id"):
+        sql += " AND COALESCE(company_id, ?) = ?"
+        params.extend([int(company_id or 1), int(company_id or 1)])
     if status:
         sql += " AND UPPER(status)=?"
         params.append(status.strip().upper())
@@ -11682,11 +11750,17 @@ def _list_transferencias_por_destino(
 
 
 def _list_transferencias_por_origem(
-    conn: sqlite3.Connection, codigo_origem: str, status: Optional[str] = None
+    conn: sqlite3.Connection,
+    codigo_origem: str,
+    status: Optional[str] = None,
+    company_id: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     cur = conn.cursor()
     sql = "SELECT * FROM transferencias WHERE codigo_origem=?"
     params = [codigo_origem]
+    if company_id is not None and col_exists(conn, "transferencias", "company_id"):
+        sql += " AND COALESCE(company_id, ?) = ?"
+        params.extend([int(company_id or 1), int(company_id or 1)])
     if status:
         sql += " AND UPPER(status)=?"
         params.append(status.strip().upper())
@@ -11802,6 +11876,7 @@ def _upsert_item_destino_transferencia(
     carga_raiz_programacao: str = "",
     carga_origem_imediata: str = "",
     transferencia_origem_id: str = "",
+    company_id: Optional[int] = None,
 ) -> None:
     codigo_destino = (codigo_destino or "").strip()
     cod_cliente = (cod_cliente or "").strip().upper()
@@ -11813,6 +11888,23 @@ def _upsert_item_destino_transferencia(
     qtd_caixas = max(int(qtd_caixas or 0), 0)
     if not codigo_destino or not cod_cliente or not pedido or qtd_caixas <= 0:
         return
+    if company_id is None:
+        try:
+            cur.execute(
+                """
+                SELECT company_id
+                  FROM programacoes
+                 WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))
+                   AND company_id IS NOT NULL
+                 LIMIT 1
+                """,
+                (codigo_destino,),
+            )
+            row_company = cur.fetchone()
+            if row_company:
+                company_id = int(row_company["company_id"] or 1)
+        except Exception:
+            company_id = None
 
     cur.execute("PRAGMA table_info(programacao_itens)")
     cols_itens = {row[1] for row in (cur.fetchall() or [])}
@@ -11873,6 +11965,9 @@ def _upsert_item_destino_transferencia(
             sets.append("carga_origem_imediata=?"); params.append(carga_origem_imediata)
         if "transferencia_origem_id" in cols_itens and transferencia_origem_id:
             sets.append("transferencia_origem_id=?"); params.append(transferencia_origem_id)
+        if "company_id" in cols_itens:
+            sets.append("company_id=COALESCE(company_id, ?)")
+            params.append(int(company_id or 1))
         if sets:
             params.append(existing["rid"])
             cur.execute(f"UPDATE programacao_itens SET {', '.join(sets)} WHERE rowid=?", tuple(params))
@@ -11899,6 +11994,7 @@ def _upsert_item_destino_transferencia(
             "carga_raiz_programacao": carga_raiz_programacao,
             "carga_origem_imediata": carga_origem_imediata,
             "transferencia_origem_id": transferencia_origem_id,
+            "company_id": int(company_id or 1),
         }
         keys = [key for key in values if key in cols_itens]
         if keys:
@@ -11916,12 +12012,13 @@ def _upsert_item_destino_transferencia(
                caixas_atual=COALESCE(caixas_atual, 0) + ?,
                alterado_em=?,
                alterado_por=?,
-               updated_at=datetime('now')
+               updated_at=datetime('now'),
+               company_id=COALESCE(company_id, ?)
          WHERE codigo_programacao=?
            AND UPPER(TRIM(cod_cliente))=UPPER(TRIM(?))
            AND COALESCE(TRIM(pedido),'')=COALESCE(TRIM(?),'')
         """,
-        (detalhe, qtd_caixas, now, alterado_por or "SISTEMA", codigo_destino, cod_cliente, pedido),
+        (detalhe, qtd_caixas, now, alterado_por or "SISTEMA", int(company_id or 1), codigo_destino, cod_cliente, pedido),
     )
     if cur.rowcount == 0:
         cur.execute(
@@ -11929,10 +12026,10 @@ def _upsert_item_destino_transferencia(
             INSERT INTO programacao_itens_controle
                 (codigo_programacao, cod_cliente, pedido, status_pedido,
                  alteracao_tipo, alteracao_detalhe, caixas_atual,
-                 alterado_em, alterado_por, updated_at)
-            VALUES (?, ?, ?, 'PENDENTE', 'TRANSBORDO', ?, ?, ?, ?, datetime('now'))
+                 alterado_em, alterado_por, updated_at, company_id)
+            VALUES (?, ?, ?, 'PENDENTE', 'TRANSBORDO', ?, ?, ?, ?, datetime('now'), ?)
             """,
-            (codigo_destino, cod_cliente, pedido, detalhe, qtd_caixas, now, alterado_por or "SISTEMA"),
+            (codigo_destino, cod_cliente, pedido, detalhe, qtd_caixas, now, alterado_por or "SISTEMA", int(company_id or 1)),
         )
 
 
@@ -11952,6 +12049,7 @@ def _recalcular_origem_transferencia(
     pedido_ref: str,
     alterado_por: str,
     evento: str,
+    company_id: Optional[int] = None,
 ) -> None:
     codigo_origem = (codigo_origem or "").strip()
     cod_cliente = (cod_cliente or "").strip()
@@ -11962,16 +12060,22 @@ def _recalcular_origem_transferencia(
     cur.execute("PRAGMA table_info(programacao_itens)")
     cols_itens = {row[1] for row in (cur.fetchall() or [])}
     has_pedido_col = "pedido" in cols_itens
+    company_id = int(company_id or 1)
 
     base = None
+    company_sql = ""
+    company_params: List[Any] = []
+    if "company_id" in cols_itens:
+        company_sql = " AND COALESCE(company_id, ?) = ?"
+        company_params = [company_id, company_id]
     if has_pedido_col:
         cur.execute(
             """
             SELECT rowid AS rid, codigo_programacao, cod_cliente, pedido, qnt_caixas
             FROM programacao_itens
             WHERE codigo_programacao=? AND UPPER(TRIM(cod_cliente))=UPPER(TRIM(?))
-            """,
-            (codigo_origem, cod_cliente),
+            """ + company_sql,
+            tuple([codigo_origem, cod_cliente] + company_params),
         )
         cands = cur.fetchall() or []
         for r in cands:
@@ -11984,9 +12088,10 @@ def _recalcular_origem_transferencia(
             SELECT rowid AS rid, codigo_programacao, cod_cliente, NULL AS pedido, qnt_caixas
             FROM programacao_itens
             WHERE codigo_programacao=? AND UPPER(TRIM(cod_cliente))=UPPER(TRIM(?))
+            """ + company_sql + """
             LIMIT 1
             """,
-            (codigo_origem, cod_cliente),
+            tuple([codigo_origem, cod_cliente] + company_params),
         )
         base = cur.fetchone()
 
@@ -11995,6 +12100,13 @@ def _recalcular_origem_transferencia(
 
     # Soma transferências ainda ativas (pendentes/aceitas) para este pedido.
     qtd_ativa = 0
+    cur.execute("PRAGMA table_info(transferencias)")
+    cols_transferencias = {row[1] for row in (cur.fetchall() or [])}
+    transf_company_sql = ""
+    transf_company_params: List[Any] = []
+    if "company_id" in cols_transferencias:
+        transf_company_sql = " AND COALESCE(company_id, ?) = ?"
+        transf_company_params = [company_id, company_id]
     cur.execute(
         """
         SELECT pedido, qtd_caixas
@@ -12002,8 +12114,9 @@ def _recalcular_origem_transferencia(
         WHERE codigo_origem=?
           AND UPPER(TRIM(cod_cliente))=UPPER(TRIM(?))
           AND UPPER(TRIM(COALESCE(status, ''))) IN ('PENDENTE', 'ACEITA')
+          """ + transf_company_sql + """
         """,
-        (codigo_origem, cod_cliente),
+        tuple([codigo_origem, cod_cliente] + transf_company_params),
     )
     for tr in (cur.fetchall() or []):
         if _norm_pedido_key(tr["pedido"]) == pedido_norm:
@@ -12033,14 +12146,26 @@ def _recalcular_origem_transferencia(
         sets.append("alterado_em=?"); params.append(now)
     if "alterado_por" in cols_itens:
         sets.append("alterado_por=?"); params.append(alterado_por or "SISTEMA")
+    if "company_id" in cols_itens:
+        sets.append("company_id=COALESCE(company_id, ?)"); params.append(company_id)
 
     if sets:
         params.append(base["rid"])
         cur.execute(f"UPDATE programacao_itens SET {', '.join(sets)} WHERE rowid=?", tuple(params))
 
     pedido_db = base["pedido"] if has_pedido_col else None
+    cur.execute("PRAGMA table_info(programacao_itens_controle)")
+    cols_controle = {row[1] for row in (cur.fetchall() or [])}
+    controle_company_set = ", company_id=COALESCE(company_id, ?)" if "company_id" in cols_controle else ""
+    controle_company_where = " AND COALESCE(company_id, ?) = ?" if "company_id" in cols_controle else ""
+    controle_update_params: List[Any] = [novo_status, detalhe, novo_caixas, now, (alterado_por or "SISTEMA")]
+    if "company_id" in cols_controle:
+        controle_update_params.append(company_id)
+    controle_update_params.extend([codigo_origem, cod_cliente, pedido_db])
+    if "company_id" in cols_controle:
+        controle_update_params.extend([company_id, company_id])
     cur.execute(
-        """
+        f"""
         UPDATE programacao_itens_controle
            SET status_pedido=?,
                alteracao_tipo='QUANTIDADE',
@@ -12049,30 +12174,41 @@ def _recalcular_origem_transferencia(
                alterado_em=?,
                alterado_por=?,
                updated_at=datetime('now')
+               {controle_company_set}
          WHERE codigo_programacao=? AND UPPER(TRIM(cod_cliente))=UPPER(TRIM(?))
            AND COALESCE(TRIM(pedido), '')=COALESCE(TRIM(?), '')
+           {controle_company_where}
         """,
-        (novo_status, detalhe, novo_caixas, now, (alterado_por or "SISTEMA"), codigo_origem, cod_cliente, pedido_db),
+        tuple(controle_update_params),
     )
     if cur.rowcount == 0:
+        controle_insert_cols = [
+            "codigo_programacao", "cod_cliente", "pedido", "status_pedido",
+            "alteracao_tipo", "alteracao_detalhe", "caixas_atual",
+            "alterado_em", "alterado_por", "updated_at",
+        ]
+        controle_insert_vals: List[Any] = [
+            codigo_origem,
+            cod_cliente,
+            pedido_db,
+            novo_status,
+            "QUANTIDADE",
+            detalhe,
+            novo_caixas,
+            now,
+            (alterado_por or "SISTEMA"),
+        ]
+        if "company_id" in cols_controle:
+            controle_insert_cols.append("company_id")
+            controle_insert_vals.append(company_id)
+        placeholders = ", ".join(["?"] * (len(controle_insert_cols) - 1))
         cur.execute(
-            """
+            f"""
             INSERT INTO programacao_itens_controle
-                (codigo_programacao, cod_cliente, pedido, status_pedido,
-                 alteracao_tipo, alteracao_detalhe, caixas_atual,
-                 alterado_em, alterado_por, updated_at)
-            VALUES (?, ?, ?, ?, 'QUANTIDADE', ?, ?, ?, ?, datetime('now'))
+                ({', '.join(controle_insert_cols)})
+            VALUES ({placeholders}, datetime('now'))
             """,
-            (
-                codigo_origem,
-                cod_cliente,
-                pedido_db,
-                novo_status,
-                detalhe,
-                novo_caixas,
-                now,
-                (alterado_por or "SISTEMA"),
-            ),
+            tuple(controle_insert_vals),
         )
 
 
@@ -12082,40 +12218,77 @@ def _rota_pertence_ao_motorista(codigo_programacao: str, motorista: Dict[str, An
         return _fetch_programacao_owned(cur, (codigo_programacao or "").strip(), motorista, "p.id") is not None
 
 
-def _has_pending_substituicao(cur: sqlite3.Cursor, codigo_programacao: str) -> bool:
+def _has_pending_substituicao(
+    cur: sqlite3.Cursor,
+    codigo_programacao: str,
+    company_id: Optional[int] = None,
+) -> bool:
+    company_sql = ""
+    params: List[Any] = [(codigo_programacao or "").strip()]
+    cur.execute("PRAGMA table_info(rota_substituicoes)")
+    cols_sub = {str(r[1]) for r in (cur.fetchall() or [])}
+    if company_id is not None and "company_id" in cols_sub:
+        company_sql = " AND COALESCE(company_id, ?) = ?"
+        params.extend([int(company_id or 1), int(company_id or 1)])
     cur.execute(
         """
         SELECT COUNT(*)
         FROM rota_substituicoes
         WHERE codigo_programacao=?
           AND UPPER(TRIM(COALESCE(status,'')))='PENDENTE_ACEITE'
+          """ + company_sql + """
         """,
-        ((codigo_programacao or "").strip(),),
+        tuple(params),
     )
     return int((cur.fetchone() or [0])[0] or 0) > 0
 
 
-def _list_substituicoes_por_rota(cur: sqlite3.Cursor, codigo_programacao: str, limit: int = 20) -> List[Dict[str, Any]]:
+def _list_substituicoes_por_rota(
+    cur: sqlite3.Cursor,
+    codigo_programacao: str,
+    limit: int = 20,
+    company_id: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    company_sql = ""
+    params: List[Any] = [(codigo_programacao or "").strip()]
+    cur.execute("PRAGMA table_info(rota_substituicoes)")
+    cols_sub = {str(r[1]) for r in (cur.fetchall() or [])}
+    if company_id is not None and "company_id" in cols_sub:
+        company_sql = " AND COALESCE(company_id, ?) = ?"
+        params.extend([int(company_id or 1), int(company_id or 1)])
+    params.append(int(limit))
     cur.execute(
         """
         SELECT *
         FROM rota_substituicoes
         WHERE codigo_programacao=?
+          """ + company_sql + """
         ORDER BY solicitado_em DESC
         LIMIT ?
         """,
-        ((codigo_programacao or "").strip(), int(limit)),
+        tuple(params),
     )
     return [_serialize_substituicao_row(r) for r in (cur.fetchall() or [])]
 
 
-def _get_motorista_by_codigo(cur: sqlite3.Cursor, codigo: str) -> Optional[sqlite3.Row]:
+def _get_motorista_by_codigo(
+    cur: sqlite3.Cursor,
+    codigo: str,
+    company_id: Optional[int] = None,
+) -> Optional[sqlite3.Row]:
     cod = (codigo or "").strip().upper()
     if not cod:
         return None
+    cur.execute("PRAGMA table_info(motoristas)")
+    cols = {str(r[1]) for r in (cur.fetchall() or [])}
+    company_sql = ""
+    params: List[Any] = [cod]
+    if company_id is not None and "company_id" in cols:
+        company_sql = " AND COALESCE(company_id, ?) = ?"
+        params.extend([int(company_id or 1), int(company_id or 1)])
     cur.execute(
-        "SELECT id, nome, codigo FROM motoristas WHERE UPPER(TRIM(codigo))=? LIMIT 1",
-        (cod,),
+        "SELECT id, nome, codigo FROM motoristas WHERE UPPER(TRIM(codigo))=?" + company_sql + " LIMIT 1",
+        tuple(params),
     )
     return cur.fetchone()
 
@@ -12201,8 +12374,14 @@ def listar_substituicoes_pendentes(m=Depends(get_current_motorista)):
     codigo_mot = (m.get("codigo") or "").strip().upper()
     nome_mot = (m.get("nome") or "").strip().upper()
     mot_id = int(m.get("id") or 0)
+    company_id = int(m.get("company_id") or 1)
     with get_conn() as conn:
         cur = conn.cursor()
+        company_sql = ""
+        params: List[Any] = [codigo_mot, mot_id, nome_mot]
+        if col_exists(conn, "rota_substituicoes", "company_id"):
+            company_sql = " AND COALESCE(company_id, ?) = ?"
+            params.extend([company_id, company_id])
         cur.execute(
             """
             SELECT *
@@ -12213,15 +12392,17 @@ def listar_substituicoes_pendentes(m=Depends(get_current_motorista)):
                 OR UPPER(TRIM(COALESCE(destino_motorista_nome,'')))=?
             )
               AND UPPER(TRIM(COALESCE(status,''))) IN ('PENDENTE_ACEITE', 'PENDENTE', 'PENDENTE ACEITE')
+              """ + company_sql + """
             ORDER BY solicitado_em DESC
             """,
-            (codigo_mot, mot_id, nome_mot),
+            tuple(params),
         )
         return [_serialize_substituicao_row(r) for r in (cur.fetchall() or [])]
 
 
 @app.get("/cadastros/motoristas")
 def listar_cad_motoristas(m=Depends(get_current_motorista)):
+    company_id = int(m.get("company_id") or 1)
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute("PRAGMA table_info(motoristas)")
@@ -12234,16 +12415,21 @@ def listar_cad_motoristas(m=Depends(get_current_motorista)):
         if "status" in cols:
             sel.append("status")
         where = "WHERE TRIM(COALESCE(nome, '')) <> ''"
+        params: List[Any] = []
+        if "company_id" in cols:
+            where += " AND COALESCE(company_id, ?) = ?"
+            params.extend([company_id, company_id])
         if "status" in cols:
             where += " AND UPPER(TRIM(COALESCE(status, 'ATIVO'))) = 'ATIVO'"
-        recursos_ocupados = _recursos_ocupados_programacoes_ativas(cur)
+        recursos_ocupados = _recursos_ocupados_programacoes_ativas(cur, company_id=company_id)
         cur.execute(
             f"""
             SELECT {', '.join(sel)}
             FROM motoristas
             {where}
             ORDER BY nome
-            """
+            """,
+            tuple(params),
         )
         out = []
         for r in (cur.fetchall() or []):
@@ -12263,6 +12449,7 @@ def listar_cad_motoristas(m=Depends(get_current_motorista)):
 
 @app.get("/cadastros/ajudantes")
 def listar_cad_ajudantes(m=Depends(get_current_motorista)):
+    company_id = int(m.get("company_id") or 1)
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute("PRAGMA table_info(ajudantes)")
@@ -12280,10 +12467,14 @@ def listar_cad_ajudantes(m=Depends(get_current_motorista)):
             sel.append("status")
 
         where = "WHERE TRIM(COALESCE(nome, '')) <> ''"
+        params: List[Any] = []
+        if "company_id" in cols:
+            where += " AND COALESCE(company_id, ?) = ?"
+            params.extend([company_id, company_id])
         if "status" in cols:
             where += " AND UPPER(TRIM(COALESCE(status, 'ATIVO'))) = 'ATIVO'"
 
-        ajudantes_ocupados = _recursos_ocupados_programacoes_ativas(cur)["ajudantes"]
+        ajudantes_ocupados = _recursos_ocupados_programacoes_ativas(cur, company_id=company_id)["ajudantes"]
 
         cur.execute(
             f"""
@@ -12291,7 +12482,8 @@ def listar_cad_ajudantes(m=Depends(get_current_motorista)):
             FROM ajudantes
             {where}
             ORDER BY nome
-            """
+            """,
+            tuple(params),
         )
         out = []
         for r in (cur.fetchall() or []):
@@ -12321,7 +12513,10 @@ def listar_cad_ajudantes(m=Depends(get_current_motorista)):
         return out
 
 
-def _recursos_ocupados_programacoes_ativas(cur: sqlite3.Cursor) -> dict[str, set[str]]:
+def _recursos_ocupados_programacoes_ativas(
+    cur: sqlite3.Cursor,
+    company_id: Optional[int] = None,
+) -> dict[str, set[str]]:
     ocupados = {
         "motoristas_codigos": set(),
         "motoristas_nomes": set(),
@@ -12424,6 +12619,10 @@ def _recursos_ocupados_programacoes_ativas(cur: sqlite3.Cursor) -> dict[str, set
             where.append("COALESCE(finalizada_no_app,0)=0")
         if "prestacao_status" in cols:
             where.append("UPPER(TRIM(COALESCE(prestacao_status,'PENDENTE'))) <> 'FECHADA'")
+        params: List[Any] = []
+        if company_id is not None and "company_id" in cols:
+            where.append("COALESCE(company_id, ?) = ?")
+            params.extend([int(company_id or 1), int(company_id or 1)])
         where_sql = "WHERE " + " AND ".join(where) if where else ""
 
         cur.execute(
@@ -12431,7 +12630,8 @@ def _recursos_ocupados_programacoes_ativas(cur: sqlite3.Cursor) -> dict[str, set
             SELECT {', '.join(select_cols)}
             FROM programacoes
             {where_sql}
-            """
+            """,
+            tuple(params),
         )
         for row in (cur.fetchall() or []):
             motorista_codigo = ""
@@ -12468,6 +12668,7 @@ def _ajudantes_ocupados_programacoes_ativas(cur: sqlite3.Cursor) -> set[str]:
 
 @app.get("/cadastros/veiculos")
 def listar_cad_veiculos(m=Depends(get_current_motorista)):
+    company_id = int(m.get("company_id") or 1)
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute("PRAGMA table_info(veiculos)")
@@ -12506,11 +12707,16 @@ def listar_cad_veiculos(m=Depends(get_current_motorista)):
         if km_col:
             sel.append(km_col)
 
-        where = ""
+        where_parts = []
+        params: List[Any] = []
+        if "company_id" in cols:
+            where_parts.append("COALESCE(company_id, ?) = ?")
+            params.extend([company_id, company_id])
         if "status" in cols:
-            where = "WHERE UPPER(TRIM(COALESCE(status, 'ATIVO'))) = 'ATIVO'"
-        veiculos_ocupados = _recursos_ocupados_programacoes_ativas(cur)["veiculos"]
-        cur.execute(f"SELECT {', '.join(sel)} FROM veiculos {where} ORDER BY placa")
+            where_parts.append("UPPER(TRIM(COALESCE(status, 'ATIVO'))) = 'ATIVO'")
+        where = "WHERE " + " AND ".join(where_parts) if where_parts else ""
+        veiculos_ocupados = _recursos_ocupados_programacoes_ativas(cur, company_id=company_id)["veiculos"]
+        cur.execute(f"SELECT {', '.join(sel)} FROM veiculos {where} ORDER BY placa", tuple(params))
         out = []
         for r in (cur.fetchall() or []):
             placa = str(r["placa"] or "").strip().upper()
@@ -12545,6 +12751,7 @@ def solicitar_substituicao_rota(
     destino_cod = (payload.motorista_destino_codigo or "").strip().upper()
     motivo = (payload.motivo or "").strip()
     destino_veic = (payload.veiculo_destino or "").strip().upper()
+    company_id = int(m.get("company_id") or 1)
 
     if not destino_cod:
         raise HTTPException(status_code=400, detail="Codigo do motorista destino obrigatorio.")
@@ -12569,7 +12776,7 @@ def solicitar_substituicao_rota(
                 detail=f"Substituicao permitida apenas com rota em andamento (status atual: {status_atual or 'N/D'}).",
             )
 
-        destino = _get_motorista_by_codigo(cur, destino_cod)
+        destino = _get_motorista_by_codigo(cur, destino_cod, company_id=company_id)
         if not destino:
             raise HTTPException(status_code=404, detail="Motorista destino nao encontrado.")
         if int(destino["id"]) == int(m["id"]):
@@ -12604,8 +12811,8 @@ def solicitar_substituicao_rota(
                 km_evento, lat_evento, lon_evento, snapshot_json,
                 origem_motorista_nome, origem_motorista_codigo, origem_motorista_id, origem_veiculo,
                 destino_motorista_nome, destino_motorista_codigo, destino_motorista_id, destino_veiculo,
-                solicitado_em, atualizado_em
-            ) VALUES (?, ?, 'PENDENTE_ACEITE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                solicitado_em, atualizado_em, company_id
+            ) VALUES (?, ?, 'PENDENTE_ACEITE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 sid,
@@ -12625,6 +12832,7 @@ def solicitar_substituicao_rota(
                 destino_veic or str(pr["veiculo"] or "").strip().upper(),
                 now,
                 now,
+                company_id,
             ),
         )
         conn.commit()
@@ -12652,6 +12860,9 @@ def aceitar_substituicao_rota(
             raise HTTPException(status_code=404, detail="Substituicao nao encontrada.")
 
         item = _serialize_substituicao_row(row)
+        if "company_id" in row.keys() and row["company_id"] not in (None, "", 0):
+            if int(row["company_id"] or 0) != int(m.get("company_id") or 1):
+                raise HTTPException(status_code=403, detail="Substituicao pertence a outra empresa.")
         st = (item.get("status") or "").strip().upper()
         if st != "PENDENTE_ACEITE":
             raise HTTPException(status_code=409, detail=f"Substituicao nao esta pendente (status={st}).")
@@ -12751,6 +12962,9 @@ def recusar_substituicao_rota(
             raise HTTPException(status_code=404, detail="Substituicao nao encontrada.")
 
         item = _serialize_substituicao_row(row)
+        if "company_id" in row.keys() and row["company_id"] not in (None, "", 0):
+            if int(row["company_id"] or 0) != int(m.get("company_id") or 1):
+                raise HTTPException(status_code=403, detail="Substituicao pertence a outra empresa.")
         st = (item.get("status") or "").strip().upper()
         if st != "PENDENTE_ACEITE":
             raise HTTPException(status_code=409, detail=f"Substituicao nao esta pendente (status={st}).")
@@ -12791,6 +13005,7 @@ def criar_transferencia(
     nome_motorista = (m["nome"] or "").strip()
     codigo_origem = (codigo_programacao or "").strip()
     codigo_destino = (payload.codigo_destino or "").strip()
+    company_id = int(m.get("company_id") or 1)
 
     if not codigo_origem:
         raise HTTPException(status_code=400, detail="Código de origem inválido.")
@@ -12822,7 +13037,7 @@ def criar_transferencia(
 
     with get_conn() as conn:
         cur = conn.cursor()
-        if _has_pending_substituicao(cur, codigo_origem) or _has_pending_substituicao(cur, codigo_destino):
+        if _has_pending_substituicao(cur, codigo_origem, company_id=company_id) or _has_pending_substituicao(cur, codigo_destino, company_id=company_id):
             raise HTTPException(
                 status_code=409,
                 detail="Transferencias bloqueadas enquanto houver substituicao de motorista pendente.",
@@ -13036,8 +13251,8 @@ def criar_transferencia(
             INSERT INTO transferencias
                 (id, codigo_origem, codigo_destino, cod_cliente, pedido, qtd_caixas,
                  status, obs, snapshot, motorista_origem, motorista_destino,
-                 qtd_convertida, criado_em, atualizado_em)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 qtd_convertida, criado_em, atualizado_em, company_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 tid,
@@ -13054,6 +13269,7 @@ def criar_transferencia(
                 0,
                 now,
                 now,
+                company_id,
             ),
         )
 
@@ -13081,7 +13297,8 @@ def criar_transferencia(
                    caixas_atual=?,
                    alterado_em=?,
                    alterado_por=?,
-                   updated_at=datetime('now')
+                   updated_at=datetime('now'),
+                   company_id=COALESCE(company_id, ?)
              WHERE codigo_programacao=? AND cod_cliente=? AND COALESCE(pedido,'')=COALESCE(?, '')
             """,
             (
@@ -13090,6 +13307,7 @@ def criar_transferencia(
                 novo_caixas_atual,
                 now,
                 nome_motorista,
+                company_id,
                 codigo_origem,
                 cod_cliente,
                 pedido,
@@ -13101,8 +13319,8 @@ def criar_transferencia(
                 INSERT INTO programacao_itens_controle
                     (codigo_programacao, cod_cliente, pedido, status_pedido,
                      alteracao_tipo, alteracao_detalhe, caixas_atual,
-                     alterado_em, alterado_por, updated_at)
-                VALUES (?, ?, ?, ?, 'QUANTIDADE', ?, ?, ?, ?, datetime('now'))
+                     alterado_em, alterado_por, updated_at, company_id)
+                VALUES (?, ?, ?, ?, 'QUANTIDADE', ?, ?, ?, ?, datetime('now'), ?)
                 """,
                 (
                     codigo_origem,
@@ -13113,6 +13331,7 @@ def criar_transferencia(
                     novo_caixas_atual,
                     now,
                     nome_motorista,
+                    company_id,
                 ),
             )
 
@@ -13550,7 +13769,7 @@ def listar_transferencias(
         raise HTTPException(status_code=403, detail="Rota de destino não pertence ao motorista logado.")
 
     with get_conn() as conn:
-        return _list_transferencias_por_destino(conn, codigo, status)
+        return _list_transferencias_por_destino(conn, codigo, status, company_id=int(m.get("company_id") or 1))
 
 
 @app.get("/rotas/{codigo_programacao}/transferencias-enviadas")
@@ -13568,7 +13787,7 @@ def listar_transferencias_enviadas(
         raise HTTPException(status_code=403, detail="Rota de origem não pertence ao motorista logado.")
 
     with get_conn() as conn:
-        return _list_transferencias_por_origem(conn, codigo, status)
+        return _list_transferencias_por_origem(conn, codigo, status, company_id=int(m.get("company_id") or 1))
 
 
 @app.post("/transferencias/{transferencia_id}/aceitar")
@@ -13586,6 +13805,9 @@ def aceitar_transferencia(
         item = _fetch_transferencia_by_id(conn, tid)
         if item is None:
             raise HTTPException(status_code=404, detail="Transfer?ncia nao encontrada.")
+
+        if item.get("company_id") not in (None, "", 0) and int(item.get("company_id") or 0) != int(m.get("company_id") or 1):
+            raise HTTPException(status_code=403, detail="Transferencia pertence a outra empresa.")
 
         codigo_destino = str(item.get("codigo_destino", "")).strip()
         if not _rota_pertence_ao_motorista(codigo_destino, m):
@@ -13623,6 +13845,9 @@ def recusar_transferencia(
         if item is None:
             raise HTTPException(status_code=404, detail="Transferência não encontrada.")
 
+        if item.get("company_id") not in (None, "", 0) and int(item.get("company_id") or 0) != int(m.get("company_id") or 1):
+            raise HTTPException(status_code=403, detail="Transferencia pertence a outra empresa.")
+
         codigo_destino = str(item.get("codigo_destino", "")).strip()
 
         if not _rota_pertence_ao_motorista(codigo_destino, m):
@@ -13649,6 +13874,7 @@ def recusar_transferencia(
             pedido_ref=str(item.get("pedido") or "").strip(),
             alterado_por=nome_motorista or "SISTEMA",
             evento="RECUSADA",
+            company_id=int(m.get("company_id") or 1),
         )
 
         conn.commit()
@@ -13674,6 +13900,7 @@ def converter_transferencia(
     m=Depends(get_current_motorista),
 ):
     nome_motorista = (m["nome"] or "").strip()
+    company_id = int(m.get("company_id") or 1)
 
     tid = (transferencia_id or "").strip()
     if not tid:
@@ -13716,13 +13943,16 @@ def converter_transferencia(
         if item is None:
             raise HTTPException(status_code=404, detail="Transferência não encontrada.")
 
+        if item.get("company_id") not in (None, "", 0) and int(item.get("company_id") or 0) != company_id:
+            raise HTTPException(status_code=403, detail="Transferencia pertence a outra empresa.")
+
         st = str(item.get("status", "")).upper().strip()
         if st != "ACEITA":
             raise HTTPException(status_code=409, detail=f"Transferência não está ACEITA (status={st}).")
 
         codigo_destino = str(item.get("codigo_destino", "")).strip()
         codigo_origem = str(item.get("codigo_origem", "")).strip()
-        if _has_pending_substituicao(cur, codigo_origem) or _has_pending_substituicao(cur, codigo_destino):
+        if _has_pending_substituicao(cur, codigo_origem, company_id=company_id) or _has_pending_substituicao(cur, codigo_destino, company_id=company_id):
             raise HTTPException(
                 status_code=409,
                 detail="Conversao de transferencia bloqueada enquanto houver substituicao pendente.",
@@ -13742,8 +13972,8 @@ def converter_transferencia(
         cur.execute(
             """
             INSERT INTO transferencias_conversoes
-                (transferencia_id, pedido_destino, cod_cliente_destino, qtd, obs, nome_cliente_destino, novo_cliente)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (transferencia_id, pedido_destino, cod_cliente_destino, qtd, obs, nome_cliente_destino, novo_cliente, company_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 tid,
@@ -13753,6 +13983,7 @@ def converter_transferencia(
                 obs or None,
                 nome_novo or None,
                 1 if nome_novo else 0,
+                company_id,
             ),
         )
         nome_cliente_destino = nome_novo
@@ -13788,6 +14019,7 @@ def converter_transferencia(
             ).strip().upper(),
             carga_origem_imediata=str(item.get("codigo_origem") or "").strip().upper(),
             transferencia_origem_id=tid,
+            company_id=company_id,
         )
 
         novo_convertido = convertido + qtd
