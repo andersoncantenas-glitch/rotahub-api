@@ -2366,7 +2366,7 @@ def sanitize_status_finalizacao_inconsistente() -> int:
     return fixed
 
 
-def reconcile_programacoes_motorista_links() -> int:
+def reconcile_programacoes_motorista_links(company_id: Optional[int] = None) -> int:
     """
     Preenche motorista_id/motorista_codigo/codigo_motorista em programacoes abertas,
     usando cadastro de motoristas. Evita roteamento incorreto no app mobile.
@@ -2382,6 +2382,7 @@ def reconcile_programacoes_motorista_links() -> int:
         has_mid = "motorista_id" in cols
         has_mcod = "motorista_codigo" in cols
         has_cmot = "codigo_motorista" in cols
+        has_company = "company_id" in cols
         if not (has_mid or has_mcod or has_cmot):
             return 0
 
@@ -2397,6 +2398,10 @@ def reconcile_programacoes_motorista_links() -> int:
             return 0
 
         select_parts = ["id", "COALESCE(motorista,'') AS motorista"]
+        if has_company:
+            select_parts.append("COALESCE(company_id, 1) AS company_id")
+        else:
+            select_parts.append("1 AS company_id")
         if has_mid:
             select_parts.append("COALESCE(motorista_id,0) AS motorista_id")
         else:
@@ -2418,6 +2423,11 @@ def reconcile_programacoes_motorista_links() -> int:
         if has_cmot:
             missing_predicates.append("TRIM(COALESCE(codigo_motorista,''))=''")
         missing_sql = " OR ".join(missing_predicates) or "1=1"
+        scope_sql = ""
+        scope_params: List[Any] = []
+        if company_id is not None and has_company:
+            scope_sql = " AND COALESCE(company_id, ?) = ?"
+            scope_params.extend([int(company_id or 1), int(company_id or 1)])
 
         cur.execute(
             f"""
@@ -2425,13 +2435,16 @@ def reconcile_programacoes_motorista_links() -> int:
             FROM programacoes
             WHERE UPPER(TRIM(COALESCE(status,''))) NOT IN ('FINALIZADA','FINALIZADO','CANCELADA','CANCELADO')
               AND ({missing_sql})
+              {scope_sql}
             ORDER BY id DESC
             LIMIT 5000
-            """
+            """,
+            tuple(scope_params),
         )
         rows = cur.fetchall() or []
         for r in rows:
             pid = int(r["id"] or 0)
+            row_company_id = int(r["company_id"] or company_id or 1)
             mot_txt = str(r["motorista"] or "").strip()
             mid_cur = int(r["motorista_id"] or 0)
             mcod_cur = str(r["motorista_codigo"] or "").strip().upper()
@@ -2442,32 +2455,37 @@ def reconcile_programacoes_motorista_links() -> int:
 
             # 1) se tem ID, resolve codigo
             if mot_id > 0 and not mot_codigo:
-                cur.execute("SELECT COALESCE(codigo,'') AS codigo FROM motoristas WHERE id=? LIMIT 1", (mot_id,))
+                scope_mot, scope_mot_params = _company_scope_condition(cur, "motoristas", row_company_id)
+                cur.execute(
+                    f"SELECT COALESCE(codigo,'') AS codigo FROM motoristas WHERE id=?{f' AND {scope_mot}' if scope_mot else ''} LIMIT 1",
+                    tuple([mot_id] + scope_mot_params),
+                )
                 rr = cur.fetchone()
                 mot_codigo = str((rr["codigo"] if rr else "") or "").strip().upper()
 
             # 2) se nao tem ID/codigo, tenta bater por codigo em texto e depois por nome
             if mot_id <= 0 or not mot_codigo:
                 probe_code = mot_txt.upper()
+                scope_mot, scope_mot_params = _company_scope_condition(cur, "motoristas", row_company_id)
                 cur.execute(
-                    "SELECT id, COALESCE(codigo,'') AS codigo FROM motoristas WHERE UPPER(TRIM(codigo))=UPPER(TRIM(?)) LIMIT 1",
-                    (probe_code,),
+                    f"SELECT id, COALESCE(codigo,'') AS codigo FROM motoristas WHERE UPPER(TRIM(codigo))=UPPER(TRIM(?)){f' AND {scope_mot}' if scope_mot else ''} LIMIT 1",
+                    tuple([probe_code] + scope_mot_params),
                 )
                 rr = cur.fetchone()
                 if not rr and "(" in mot_txt and ")" in mot_txt:
                     try:
                         code_in_name = mot_txt[mot_txt.rfind("(") + 1: mot_txt.rfind(")")].strip().upper()
                         cur.execute(
-                            "SELECT id, COALESCE(codigo,'') AS codigo FROM motoristas WHERE UPPER(TRIM(codigo))=UPPER(TRIM(?)) LIMIT 1",
-                            (code_in_name,),
+                            f"SELECT id, COALESCE(codigo,'') AS codigo FROM motoristas WHERE UPPER(TRIM(codigo))=UPPER(TRIM(?)){f' AND {scope_mot}' if scope_mot else ''} LIMIT 1",
+                            tuple([code_in_name] + scope_mot_params),
                         )
                         rr = cur.fetchone()
                     except Exception:
                         rr = None
                 if not rr and mot_txt:
                     cur.execute(
-                        "SELECT id, COALESCE(codigo,'') AS codigo FROM motoristas WHERE UPPER(TRIM(nome))=UPPER(TRIM(?)) LIMIT 1",
-                        (mot_txt,),
+                        f"SELECT id, COALESCE(codigo,'') AS codigo FROM motoristas WHERE UPPER(TRIM(nome))=UPPER(TRIM(?)){f' AND {scope_mot}' if scope_mot else ''} LIMIT 1",
+                        tuple([mot_txt] + scope_mot_params),
                     )
                     rr = cur.fetchone()
                 if rr:
@@ -2499,11 +2517,14 @@ def _resolve_motorista_vinculo(
     motorista_nome: str = "",
     motorista_id: int = 0,
     motorista_codigo: str = "",
+    company_id: Optional[int] = None,
 ) -> tuple[str, int, str]:
     nome = str(motorista_nome or "").strip().upper()
     mot_id = int(motorista_id or 0)
     codigo = str(motorista_codigo or "").strip().upper()
     row = None
+    scope_sql, scope_params = _company_scope_condition(cur, "motoristas", company_id)
+    scope_clause = f" AND {scope_sql}" if scope_sql else ""
 
     if mot_id > 0:
         cur.execute(
@@ -2511,9 +2532,10 @@ def _resolve_motorista_vinculo(
             SELECT id, COALESCE(nome,'') AS nome, COALESCE(codigo,'') AS codigo
             FROM motoristas
             WHERE id=?
+            """ + scope_clause + """
             LIMIT 1
             """,
-            (mot_id,),
+            tuple([mot_id] + scope_params),
         )
         row = cur.fetchone()
 
@@ -2523,9 +2545,10 @@ def _resolve_motorista_vinculo(
             SELECT id, COALESCE(nome,'') AS nome, COALESCE(codigo,'') AS codigo
             FROM motoristas
             WHERE UPPER(TRIM(codigo))=UPPER(TRIM(?))
+            """ + scope_clause + """
             LIMIT 1
             """,
-            (codigo,),
+            tuple([codigo] + scope_params),
         )
         row = cur.fetchone()
 
@@ -2540,9 +2563,10 @@ def _resolve_motorista_vinculo(
                 SELECT id, COALESCE(nome,'') AS nome, COALESCE(codigo,'') AS codigo
                 FROM motoristas
                 WHERE UPPER(TRIM(codigo))=UPPER(TRIM(?))
+                """ + scope_clause + """
                 LIMIT 1
                 """,
-                (code_in_name,),
+                tuple([code_in_name] + scope_params),
             )
             row = cur.fetchone()
 
@@ -2552,9 +2576,10 @@ def _resolve_motorista_vinculo(
             SELECT id, COALESCE(nome,'') AS nome, COALESCE(codigo,'') AS codigo
             FROM motoristas
             WHERE UPPER(TRIM(nome))=UPPER(TRIM(?))
+            """ + scope_clause + """
             LIMIT 1
             """,
-            (nome,),
+            tuple([nome] + scope_params),
         )
         row = cur.fetchone()
 
@@ -4173,6 +4198,34 @@ def _company_scope_condition(cur: sqlite3.Cursor, table: str, company_id: Option
     return f"{prefix}company_id=?", [int(company_id)]
 
 
+def _company_id_for_programacao(
+    cur: sqlite3.Cursor,
+    codigo_programacao: str,
+    fallback_company_id: Optional[int] = None,
+) -> int:
+    company_id = int(fallback_company_id or _default_company_id(cur) or 1)
+    if not table_exists(cur, "programacoes"):
+        return company_id
+    cur.execute("PRAGMA table_info(programacoes)")
+    cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+    if "company_id" not in cols:
+        return company_id
+    cur.execute(
+        """
+        SELECT COALESCE(company_id, ?) AS company_id
+          FROM programacoes
+         WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))
+         ORDER BY id DESC
+         LIMIT 1
+        """,
+        (company_id, (codigo_programacao or "").strip().upper()),
+    )
+    row = cur.fetchone()
+    if row:
+        return int(row["company_id"] or company_id or 1)
+    return company_id
+
+
 def _next_codigo_avulsa(cur: sqlite3.Cursor, data_ref: Optional[str] = None) -> str:
     base = datetime.now().strftime("%Y%m%d")
     txt = str(data_ref or "").strip()
@@ -5164,13 +5217,23 @@ def desktop_clientes_base(
 
 
 @app.post("/desktop/programacoes/reconciliar-vinculos")
-def desktop_reconciliar_vinculos_motorista(_ok: bool = Depends(_require_desktop_secret)):
-    fixed = reconcile_programacoes_motorista_links()
+def desktop_reconciliar_vinculos_motorista(
+    _ok: bool = Depends(_require_desktop_secret),
+    x_company_id: Optional[str] = Header(default=None, alias="X-Company-ID"),
+):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        company_id = _desktop_company_id(cur, x_company_id)
+    fixed = reconcile_programacoes_motorista_links(company_id=company_id)
     return {"ok": True, "rotas_ajustadas": int(fixed)}
 
 
 @app.post("/desktop/rotas/upsert")
-def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_require_desktop_secret)):
+def desktop_rotas_upsert(
+    payload: DesktopRotaUpsertIn,
+    _ok: bool = Depends(_require_desktop_secret),
+    x_company_id: Optional[str] = Header(default=None, alias="X-Company-ID"),
+):
     codigo = str(payload.codigo_programacao or "").strip().upper()
     if not codigo:
         raise HTTPException(status_code=400, detail="codigo_programacao obrigatorio.")
@@ -5179,6 +5242,7 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
         cur = conn.cursor()
         cur.execute("PRAGMA table_info(programacoes)")
         cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+        company_id = _desktop_company_id(cur, x_company_id)
 
         data_criacao = (payload.data_criacao or datetime.now().strftime("%Y-%m-%d %H:%M:%S")).strip()
         motorista = str(payload.motorista or "").strip().upper()
@@ -5244,15 +5308,18 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
         else:
             select_parts.append("'' AS codigo_motorista")
 
+        scope_prog, scope_prog_params = _company_scope_condition(cur, "programacoes", company_id)
+        scope_prog_clause = f" AND {scope_prog}" if scope_prog else ""
         cur.execute(
             f"""
             SELECT {", ".join(select_parts)}
             FROM programacoes
             WHERE codigo_programacao=?
+              {scope_prog_clause}
             ORDER BY id DESC
             LIMIT 1
             """,
-            (codigo,),
+            tuple([codigo] + scope_prog_params),
         )
         row = cur.fetchone()
         pid = int(row["id"] or 0) if row else 0
@@ -5263,7 +5330,7 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
         motorista_codigo_atual = str(
             ((row["motorista_codigo"] if row else "") or (row["codigo_motorista"] if row else "")) or ""
         ).strip().upper()
-        state_atual = _programacao_state(cur, codigo) if pid > 0 else None
+        state_atual = _programacao_state(cur, codigo, company_id=company_id) if pid > 0 else None
 
         status_execucao = {"EM_ROTA", "EM ROTA", "INICIADA", "EM_ENTREGAS", "EM ENTREGAS", "CARREGADA"}
         status_fechado = {"FINALIZADA", "FINALIZADO", "CANCELADA", "CANCELADO"}
@@ -5306,6 +5373,7 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
             motorista_nome=motorista,
             motorista_id=motorista_id,
             motorista_codigo=motorista_codigo,
+            company_id=company_id,
         )
 
         has_stable_motorista_link = any(
@@ -5428,6 +5496,9 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
             if "usuario_ultima_edicao" in cols_prog:
                 sets.append("usuario_ultima_edicao=?")
                 vals.append(str(payload.usuario_ultima_edicao or payload.usuario_criacao or "").strip().upper())
+            if "company_id" in cols_prog:
+                sets.append("company_id=COALESCE(company_id, ?)")
+                vals.append(company_id)
 
             vals.append(pid)
             cur.execute(f"UPDATE programacoes SET {', '.join(sets)} WHERE id=?", tuple(vals))
@@ -5527,6 +5598,9 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
             if "usuario_ultima_edicao" in cols_prog:
                 col_names.append("usuario_ultima_edicao")
                 values.append(str(payload.usuario_ultima_edicao or payload.usuario_criacao or "").strip().upper())
+            if "company_id" in cols_prog:
+                col_names.append("company_id")
+                values.append(company_id)
 
             ph = ", ".join(["?"] * len(col_names))
             cur.execute(
@@ -5538,7 +5612,12 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
         cur.execute("PRAGMA table_info(programacao_itens)")
         cols_itens = {str(r[1]).lower() for r in (cur.fetchall() or [])}
         has_item_obs = "observacao" in cols_itens
-        cur.execute("DELETE FROM programacao_itens WHERE codigo_programacao=?", (codigo,))
+        scope_itens, scope_itens_params = _company_scope_condition(cur, "programacao_itens", company_id)
+        scope_itens_clause = f" AND {scope_itens}" if scope_itens else ""
+        cur.execute(
+            "DELETE FROM programacao_itens WHERE codigo_programacao=?" + scope_itens_clause,
+            tuple([codigo] + scope_itens_params),
+        )
         for it in (payload.itens or []):
             cod_cli = str(it.cod_cliente or "").strip().upper()
             nome_cli = str(it.nome_cliente or "").strip().upper()
@@ -5567,6 +5646,8 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
                 item_data["distancia"] = float(it.distancia)
             if "confianca_localizacao" in cols_itens and it.confianca_localizacao is not None:
                 item_data["confianca_localizacao"] = float(it.confianca_localizacao)
+            if "company_id" in cols_itens:
+                item_data["company_id"] = company_id
 
             keys = list(item_data.keys())
             vals = [item_data[k] for k in keys]
@@ -5577,6 +5658,8 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
 
         if linked_venda_ids:
             placeholders = ",".join(["?"] * len(linked_venda_ids))
+            scope_vendas, scope_vendas_params = _company_scope_condition(cur, "vendas_importadas", company_id)
+            scope_vendas_clause = f" AND {scope_vendas}" if scope_vendas else ""
             cur.execute(
                 f"""
                 SELECT id,
@@ -5584,8 +5667,9 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
                        UPPER(TRIM(COALESCE(codigo_programacao,''))) AS codigo_programacao
                 FROM vendas_importadas
                 WHERE id IN ({placeholders})
+                  {scope_vendas_clause}
                 """,
-                tuple(linked_venda_ids),
+                tuple(linked_venda_ids + scope_vendas_params),
             )
             venda_rows = cur.fetchall() or []
             venda_map = {int(r["id"] or 0): r for r in venda_rows}
@@ -5618,17 +5702,31 @@ def desktop_rotas_upsert(payload: DesktopRotaUpsertIn, _ok: bool = Depends(_requ
                         status_code=409,
                         detail="existem vendas ja consumidas por outra programacao; recarregue a lista antes de salvar.",
                     )
-            cur.executemany(
-                """
-                UPDATE vendas_importadas
-                   SET usada=1,
-                       usada_em=?,
-                       codigo_programacao=?,
-                       selecionada=0
-                 WHERE id=?
-                """,
-                [(vendas_usada_em, codigo, rid) for rid in linked_venda_ids],
-            )
+            if scope_vendas:
+                cur.executemany(
+                    f"""
+                    UPDATE vendas_importadas
+                       SET usada=1,
+                           usada_em=?,
+                           codigo_programacao=?,
+                           selecionada=0
+                     WHERE id=?
+                       AND {scope_vendas}
+                    """,
+                    [tuple([vendas_usada_em, codigo, rid] + scope_vendas_params) for rid in linked_venda_ids],
+                )
+            else:
+                cur.executemany(
+                    """
+                    UPDATE vendas_importadas
+                       SET usada=1,
+                           usada_em=?,
+                           codigo_programacao=?,
+                           selecionada=0
+                     WHERE id=?
+                    """,
+                    [(vendas_usada_em, codigo, rid) for rid in linked_venda_ids],
+                )
 
         conn.commit()
 
@@ -7487,6 +7585,9 @@ def desktop_listar_recebimentos(
 
     with get_conn() as conn:
         cur = conn.cursor()
+        company_id = _company_id_for_programacao(cur, prog)
+        scope_rec, scope_rec_params = _company_scope_condition(cur, "recebimentos", company_id)
+        scope_rec_clause = f" AND {scope_rec}" if scope_rec else ""
         cur.execute(
             """
             SELECT
@@ -7500,9 +7601,10 @@ def desktop_listar_recebimentos(
                 TRIM(COALESCE(data_registro,'')) AS data_registro
             FROM recebimentos
             WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))
+              """ + scope_rec_clause + """
             ORDER BY id DESC
             """,
-            (prog,),
+            tuple([prog] + scope_rec_params),
         )
         out: List[Dict[str, Any]] = []
         for r in (cur.fetchall() or []):
@@ -7547,16 +7649,21 @@ def desktop_criar_recebimento(
 
     with get_conn() as conn:
         cur = conn.cursor()
-        _ensure_programacao_mutable(cur, prog)
-        _ensure_programacao_has_cliente(cur, prog, cod)
+        company_id = _company_id_for_programacao(cur, prog)
+        _ensure_programacao_mutable(cur, prog, company_id=company_id)
+        _ensure_programacao_has_cliente(cur, prog, cod, company_id=company_id)
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cur.execute("PRAGMA table_info(recebimentos)")
+        cols_rec = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+        insert_cols = ["codigo_programacao", "cod_cliente", "nome_cliente", "valor", "forma_pagamento", "observacao", "num_nf", "data_registro"]
+        insert_vals: List[Any] = [prog, cod, nome, valor, forma, obs, num_nf, ts]
+        if "company_id" in cols_rec:
+            insert_cols.append("company_id")
+            insert_vals.append(company_id)
+        placeholders = ", ".join(["?"] * len(insert_cols))
         cur.execute(
-            """
-            INSERT INTO recebimentos
-                (codigo_programacao, cod_cliente, nome_cliente, valor, forma_pagamento, observacao, num_nf, data_registro)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (prog, cod, nome, valor, forma, obs, num_nf, ts),
+            f"INSERT INTO recebimentos ({', '.join(insert_cols)}) VALUES ({placeholders})",
+            tuple(insert_vals),
         )
         rid = int(cur.lastrowid or 0)
     return {"ok": True, "id": rid, "codigo_programacao": prog}
@@ -7575,10 +7682,13 @@ def desktop_zerar_recebimentos_cliente(
 
     with get_conn() as conn:
         cur = conn.cursor()
-        _ensure_programacao_mutable(cur, prog)
+        company_id = _company_id_for_programacao(cur, prog)
+        _ensure_programacao_mutable(cur, prog, company_id=company_id)
+        scope_rec, scope_rec_params = _company_scope_condition(cur, "recebimentos", company_id)
+        scope_rec_clause = f" AND {scope_rec}" if scope_rec else ""
         cur.execute(
-            "DELETE FROM recebimentos WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?)) AND UPPER(TRIM(COALESCE(cod_cliente,'')))=UPPER(TRIM(?))",
-            (prog, cod),
+            "DELETE FROM recebimentos WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?)) AND UPPER(TRIM(COALESCE(cod_cliente,'')))=UPPER(TRIM(?))" + scope_rec_clause,
+            tuple([prog, cod] + scope_rec_params),
         )
         deleted = int(cur.rowcount or 0)
     return {"ok": True, "deleted": deleted, "codigo_programacao": prog, "cod_cliente": cod}
@@ -7592,11 +7702,15 @@ def _upsert_diarias_despesas_desktop(
     total_ajudantes: float,
     observacao_motorista: str,
     observacao_ajudantes: str,
+    company_id: Optional[int] = None,
 ) -> None:
     cur.execute("PRAGMA table_info(despesas)")
     cols = {str(r[1]).lower() for r in (cur.fetchall() or [])}
     if not cols:
         return
+    company_id = int(company_id or _company_id_for_programacao(cur, prog) or 1)
+    scope_desp, scope_desp_params = _company_scope_condition(cur, "despesas", company_id)
+    scope_desp_clause = f" AND {scope_desp}" if scope_desp else ""
 
     if "id_local" in cols:
         cur.execute(
@@ -7608,15 +7722,16 @@ def _upsert_diarias_despesas_desktop(
                     UPPER(TRIM(COALESCE(descricao, ''))) IN (?, ?)
                  OR UPPER(TRIM(COALESCE(id_local, ''))) IN (?, ?)
                )
+               """ + scope_desp_clause + """
             """,
-            (
+            tuple([
                 prog,
                 "DIARIAS",
                 "DIARIAS MOTORISTA",
                 "DIARIAS AJUDANTES",
                 "AUTO_DIARIA_MOTORISTA",
                 "AUTO_DIARIA_AJUDANTES",
-            ),
+            ] + scope_desp_params),
         )
     else:
         cur.execute(
@@ -7625,8 +7740,9 @@ def _upsert_diarias_despesas_desktop(
              WHERE codigo_programacao=?
                AND UPPER(TRIM(COALESCE(categoria, '')))=?
                AND UPPER(TRIM(COALESCE(descricao, ''))) IN (?, ?)
+               """ + scope_desp_clause + """
             """,
-            (prog, "DIARIAS", "DIARIAS MOTORISTA", "DIARIAS AJUDANTES"),
+            tuple([prog, "DIARIAS", "DIARIAS MOTORISTA", "DIARIAS AJUDANTES"] + scope_desp_params),
         )
 
     now_s = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -7648,6 +7764,7 @@ def _upsert_diarias_despesas_desktop(
             "forma_pagamento": "PAGO",
             "origem": "RECEBIMENTOS",
             "registrado_em": now_s,
+            "company_id": company_id,
         }
         ins_cols = [k for k in data if k.lower() in cols]
         cur.execute(
@@ -7676,7 +7793,8 @@ def desktop_atualizar_cabecalho_rota(
 
     with get_conn() as conn:
         cur = conn.cursor()
-        _ensure_programacao_mutable(cur, prog)
+        company_id = _company_id_for_programacao(cur, prog)
+        _ensure_programacao_mutable(cur, prog, company_id=company_id)
         cur.execute("PRAGMA table_info(programacoes)")
         cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
 
@@ -7710,9 +7828,12 @@ def desktop_atualizar_cabecalho_rota(
         if not sets:
             raise HTTPException(status_code=500, detail="Colunas de cabecalho indisponiveis em programacoes.")
 
+        scope_prog, scope_prog_params = _company_scope_condition(cur, "programacoes", company_id)
+        scope_prog_clause = f" AND {scope_prog}" if scope_prog else ""
         vals.append(prog)
+        vals.extend(scope_prog_params)
         cur.execute(
-            f"UPDATE programacoes SET {', '.join(sets)} WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))",
+            f"UPDATE programacoes SET {', '.join(sets)} WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?)){scope_prog_clause}",
             tuple(vals),
         )
         updated = int(cur.rowcount or 0)
@@ -7746,6 +7867,7 @@ def desktop_atualizar_cabecalho_rota(
                 total_ajudantes=total_ajud,
                 observacao_motorista=obs_motorista,
                 observacao_ajudantes=obs_ajudantes,
+                company_id=company_id,
             )
     return {"ok": True, "codigo_programacao": prog, "updated": updated}
 
@@ -7835,7 +7957,8 @@ def desktop_atualizar_financeiro_rota(
 
     with get_conn() as conn:
         cur = conn.cursor()
-        _ensure_programacao_mutable(cur, prog)
+        company_id = _company_id_for_programacao(cur, prog)
+        _ensure_programacao_mutable(cur, prog, company_id=company_id)
         cur.execute("PRAGMA table_info(programacoes)")
         cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
 
@@ -7907,9 +8030,12 @@ def desktop_atualizar_financeiro_rota(
         if not sets:
             raise HTTPException(status_code=500, detail="Colunas financeiras indisponiveis em programacoes.")
 
+        scope_prog, scope_prog_params = _company_scope_condition(cur, "programacoes", company_id)
+        scope_prog_clause = f" AND {scope_prog}" if scope_prog else ""
         vals.append(prog)
+        vals.extend(scope_prog_params)
         cur.execute(
-            f"UPDATE programacoes SET {', '.join(sets)} WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))",
+            f"UPDATE programacoes SET {', '.join(sets)} WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?)){scope_prog_clause}",
             tuple(vals),
         )
         updated = int(cur.rowcount or 0)
@@ -7941,7 +8067,8 @@ def desktop_sync_diarias_despesas(
 
     with get_conn() as conn:
         cur = conn.cursor()
-        _ensure_programacao_mutable(cur, prog)
+        company_id = _company_id_for_programacao(cur, prog)
+        _ensure_programacao_mutable(cur, prog, company_id=company_id)
         _upsert_diarias_despesas_desktop(
             cur,
             prog,
@@ -7949,6 +8076,7 @@ def desktop_sync_diarias_despesas(
             total_ajudantes=total_ajud,
             observacao_motorista=obs_motorista,
             observacao_ajudantes=obs_ajudantes,
+            company_id=company_id,
         )
     return {
         "ok": True,
@@ -7975,15 +8103,19 @@ def desktop_upsert_cliente_manual_programacao(
 
     with get_conn() as conn:
         cur = conn.cursor()
-        _ensure_programacao_mutable(cur, prog)
+        company_id = _company_id_for_programacao(cur, prog)
+        _ensure_programacao_mutable(cur, prog, company_id=company_id)
+        scope_item, scope_item_params = _company_scope_condition(cur, "programacao_itens", company_id)
+        scope_item_clause = f" AND {scope_item}" if scope_item else ""
         cur.execute(
             """
             SELECT COUNT(1) AS n
             FROM programacao_itens
             WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))
               AND UPPER(TRIM(COALESCE(cod_cliente,'')))=UPPER(TRIM(?))
+              """ + scope_item_clause + """
             """,
-            (prog, cod),
+            tuple([prog, cod] + scope_item_params),
         )
         row = cur.fetchone()
         exists = int((row["n"] if row else 0) or 0)
@@ -7994,18 +8126,23 @@ def desktop_upsert_cliente_manual_programacao(
                    SET nome_cliente=?
                  WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))
                    AND UPPER(TRIM(COALESCE(cod_cliente,'')))=UPPER(TRIM(?))
+                   """ + scope_item_clause + """
                 """,
-                (nome, prog, cod),
+                tuple([nome, prog, cod] + scope_item_params),
             )
             action = "updated"
         else:
+            cur.execute("PRAGMA table_info(programacao_itens)")
+            cols_itens = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+            insert_cols = ["codigo_programacao", "cod_cliente", "nome_cliente", "qnt_caixas", "kg", "preco", "endereco", "vendedor", "pedido"]
+            insert_vals: List[Any] = [prog, cod, nome, 0, 0, 0, "", "", "MANUAL"]
+            if "company_id" in cols_itens:
+                insert_cols.append("company_id")
+                insert_vals.append(company_id)
+            placeholders = ", ".join(["?"] * len(insert_cols))
             cur.execute(
-                """
-                INSERT INTO programacao_itens
-                    (codigo_programacao, cod_cliente, nome_cliente, qnt_caixas, kg, preco, endereco, vendedor, pedido)
-                VALUES (?, ?, ?, 0, 0, 0, '', '', 'MANUAL')
-                """,
-                (prog, cod, nome),
+                f"INSERT INTO programacao_itens ({', '.join(insert_cols)}) VALUES ({placeholders})",
+                tuple(insert_vals),
             )
             action = "created"
     return {"ok": True, "codigo_programacao": prog, "cod_cliente": cod, "nome_cliente": nome, "action": action}
@@ -8022,8 +8159,11 @@ def desktop_listar_despesas(
 
     with get_conn() as conn:
         cur = conn.cursor()
+        company_id = _company_id_for_programacao(cur, prog)
         cur.execute("PRAGMA table_info(despesas)")
         cols_desp = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+        scope_desp, scope_desp_params = _company_scope_condition(cur, "despesas", company_id)
+        scope_desp_clause = f" AND {scope_desp}" if scope_desp else ""
         id_local_expr = "TRIM(COALESCE(id_local,''))" if "id_local" in cols_desp else "''"
         forma_expr = "TRIM(COALESCE(forma_pagamento,''))" if "forma_pagamento" in cols_desp else "''"
         origem_expr = "TRIM(COALESCE(origem,''))" if "origem" in cols_desp else "''"
@@ -8042,9 +8182,10 @@ def desktop_listar_despesas(
                 {origem_expr} AS origem
             FROM despesas
             WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))
+              {scope_desp_clause}
             ORDER BY id DESC
             """,
-            (prog,),
+            tuple([prog] + scope_desp_params),
         )
         out: List[Dict[str, Any]] = []
         for r in (cur.fetchall() or []):
@@ -8110,14 +8251,20 @@ def desktop_criar_despesa(
 
     with get_conn() as conn:
         cur = conn.cursor()
-        _ensure_programacao_mutable(cur, prog)
+        company_id = _company_id_for_programacao(cur, prog)
+        _ensure_programacao_mutable(cur, prog, company_id=company_id)
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cur.execute("PRAGMA table_info(despesas)")
+        cols_desp = {str(r[1]).lower() for r in (cur.fetchall() or [])}
+        insert_cols = ["codigo_programacao", "descricao", "valor", "categoria", "observacao", "data_registro"]
+        insert_vals: List[Any] = [prog, desc, val, cat, obs, ts]
+        if "company_id" in cols_desp:
+            insert_cols.append("company_id")
+            insert_vals.append(company_id)
+        placeholders = ", ".join(["?"] * len(insert_cols))
         cur.execute(
-            """
-            INSERT INTO despesas (codigo_programacao, descricao, valor, categoria, observacao, data_registro)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (prog, desc, val, cat, obs, ts),
+            f"INSERT INTO despesas ({', '.join(insert_cols)}) VALUES ({placeholders})",
+            tuple(insert_vals),
         )
         did = int(cur.lastrowid or 0)
     return {"ok": True, "id": did, "codigo_programacao": prog}
@@ -8244,7 +8391,8 @@ def desktop_atualizar_status_rota(
 
     with get_conn() as conn:
         cur = conn.cursor()
-        _ensure_programacao_mutable(cur, prog)
+        company_id = _company_id_for_programacao(cur, prog)
+        _ensure_programacao_mutable(cur, prog, company_id=company_id)
         cur.execute("PRAGMA table_info(programacoes)")
         cols_prog = {str(r[1]).lower() for r in (cur.fetchall() or [])}
 
@@ -8267,9 +8415,12 @@ def desktop_atualizar_status_rota(
         if not sets:
             raise HTTPException(status_code=400, detail="Nenhum campo de status informado para atualizacao.")
 
+        scope_prog, scope_prog_params = _company_scope_condition(cur, "programacoes", company_id)
+        scope_prog_clause = f" AND {scope_prog}" if scope_prog else ""
         vals.append(prog)
+        vals.extend(scope_prog_params)
         cur.execute(
-            f"UPDATE programacoes SET {', '.join(sets)} WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))",
+            f"UPDATE programacoes SET {', '.join(sets)} WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?)){scope_prog_clause}",
             tuple(vals),
         )
         updated = int(cur.rowcount or 0)
@@ -8290,7 +8441,8 @@ def desktop_excluir_programacao(
 
     with get_conn() as conn:
         cur = conn.cursor()
-        state = _programacao_state(cur, prog)
+        company_id = _company_id_for_programacao(cur, prog)
+        state = _programacao_state(cur, prog, company_id=company_id)
         if not state:
             raise HTTPException(status_code=404, detail="programacao nao encontrada.")
         if state["prestacao_status"] == "FECHADA":
@@ -8304,8 +8456,15 @@ def desktop_excluir_programacao(
             )
 
         if int(delete_vendas or 0) == 1:
-            cur.execute("DELETE FROM vendas_importadas WHERE UPPER(COALESCE(codigo_programacao,''))=UPPER(?)", (prog,))
+            scope_vendas, scope_vendas_params = _company_scope_condition(cur, "vendas_importadas", company_id)
+            scope_vendas_clause = f" AND {scope_vendas}" if scope_vendas else ""
+            cur.execute(
+                "DELETE FROM vendas_importadas WHERE UPPER(COALESCE(codigo_programacao,''))=UPPER(?)" + scope_vendas_clause,
+                tuple([prog] + scope_vendas_params),
+            )
         else:
+            scope_vendas, scope_vendas_params = _company_scope_condition(cur, "vendas_importadas", company_id)
+            scope_vendas_clause = f" AND {scope_vendas}" if scope_vendas else ""
             cur.execute(
                 """
                 UPDATE vendas_importadas
@@ -8314,8 +8473,9 @@ def desktop_excluir_programacao(
                        codigo_programacao='',
                        selecionada=0
                  WHERE UPPER(COALESCE(codigo_programacao,''))=UPPER(?)
+                 """ + scope_vendas_clause + """
                 """,
-                (prog,),
+                tuple([prog] + scope_vendas_params),
             )
 
         for table_name in (
@@ -8329,19 +8489,34 @@ def desktop_excluir_programacao(
             "cliente_localizacao_amostras",
         ):
             if table_exists(cur, table_name):
-                cur.execute(f"DELETE FROM {table_name} WHERE UPPER(COALESCE(codigo_programacao,''))=UPPER(?)", (prog,))
+                scope_table, scope_table_params = _company_scope_condition(cur, table_name, company_id)
+                scope_table_clause = f" AND {scope_table}" if scope_table else ""
+                cur.execute(
+                    f"DELETE FROM {table_name} WHERE UPPER(COALESCE(codigo_programacao,''))=UPPER(?)" + scope_table_clause,
+                    tuple([prog] + scope_table_params),
+                )
 
         if table_exists(cur, "transferencias"):
+            scope_transfer, scope_transfer_params = _company_scope_condition(cur, "transferencias", company_id)
+            scope_transfer_clause = f" AND {scope_transfer}" if scope_transfer else ""
             cur.execute(
                 """
                 DELETE FROM transferencias
-                WHERE UPPER(COALESCE(codigo_origem,''))=UPPER(?)
-                   OR UPPER(COALESCE(codigo_destino,''))=UPPER(?)
+                WHERE (
+                    UPPER(COALESCE(codigo_origem,''))=UPPER(?)
+                    OR UPPER(COALESCE(codigo_destino,''))=UPPER(?)
+                )
+                """ + scope_transfer_clause + """
                 """,
-                (prog, prog),
+                tuple([prog, prog] + scope_transfer_params),
             )
 
-        cur.execute("DELETE FROM programacoes WHERE UPPER(COALESCE(codigo_programacao,''))=UPPER(?)", (prog,))
+        scope_prog, scope_prog_params = _company_scope_condition(cur, "programacoes", company_id)
+        scope_prog_clause = f" AND {scope_prog}" if scope_prog else ""
+        cur.execute(
+            "DELETE FROM programacoes WHERE UPPER(COALESCE(codigo_programacao,''))=UPPER(?)" + scope_prog_clause,
+            tuple([prog] + scope_prog_params),
+        )
         deleted = int(cur.rowcount or 0)
         if deleted <= 0:
             raise HTTPException(status_code=404, detail="programacao nao encontrada.")
@@ -8499,7 +8674,11 @@ def _is_allowed_desktop_sql_mutation(sql: str) -> bool:
     return False
 
 
-def _programacao_state(cur, codigo_programacao: str) -> Optional[Dict[str, Any]]:
+def _programacao_state(
+    cur,
+    codigo_programacao: str,
+    company_id: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
     prog = (codigo_programacao or "").strip().upper()
     if not prog:
         return None
@@ -8512,6 +8691,8 @@ def _programacao_state(cur, codigo_programacao: str) -> Optional[Dict[str, Any]]
     prest_expr = "UPPER(TRIM(COALESCE(prestacao_status,'PENDENTE')))" if "prestacao_status" in cols_prog else "'PENDENTE'"
     status_expr = "UPPER(TRIM(COALESCE(status,'')))" if "status" in cols_prog else "''"
     status_op_expr = "UPPER(TRIM(COALESCE(status_operacional,'')))" if "status_operacional" in cols_prog else "''"
+    scope_sql, scope_params = _company_scope_condition(cur, "programacoes", company_id)
+    scope_clause = f" AND {scope_sql}" if scope_sql else ""
     cur.execute(
         f"""
         SELECT
@@ -8521,10 +8702,11 @@ def _programacao_state(cur, codigo_programacao: str) -> Optional[Dict[str, Any]]
             {status_op_expr} AS status_operacional
         FROM programacoes
         WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))
+          {scope_clause}
         ORDER BY id DESC
         LIMIT 1
         """,
-        (prog,),
+        tuple([prog] + scope_params),
     )
     row = cur.fetchone()
     if not row:
@@ -8537,8 +8719,12 @@ def _programacao_state(cur, codigo_programacao: str) -> Optional[Dict[str, Any]]
     }
 
 
-def _ensure_programacao_mutable(cur, codigo_programacao: str) -> Dict[str, Any]:
-    state = _programacao_state(cur, codigo_programacao)
+def _ensure_programacao_mutable(
+    cur,
+    codigo_programacao: str,
+    company_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    state = _programacao_state(cur, codigo_programacao, company_id=company_id)
     if not state:
         raise HTTPException(status_code=404, detail="programacao nao encontrada.")
     if state["prestacao_status"] == "FECHADA":
@@ -8549,22 +8735,30 @@ def _ensure_programacao_mutable(cur, codigo_programacao: str) -> Dict[str, Any]:
     return state
 
 
-def _ensure_programacao_has_cliente(cur: sqlite3.Cursor, codigo_programacao: str, cod_cliente: str) -> None:
+def _ensure_programacao_has_cliente(
+    cur: sqlite3.Cursor,
+    codigo_programacao: str,
+    cod_cliente: str,
+    company_id: Optional[int] = None,
+) -> None:
     prog = (codigo_programacao or "").strip().upper()
     cod = (cod_cliente or "").strip().upper()
     if not prog or not cod:
         raise HTTPException(status_code=400, detail="codigo_programacao e cod_cliente obrigatorios.")
     if not table_exists(cur, "programacao_itens"):
         return
+    scope_sql, scope_params = _company_scope_condition(cur, "programacao_itens", company_id)
+    scope_clause = f" AND {scope_sql}" if scope_sql else ""
     cur.execute(
         """
         SELECT 1
         FROM programacao_itens
         WHERE UPPER(TRIM(COALESCE(codigo_programacao,'')))=UPPER(TRIM(?))
           AND UPPER(TRIM(COALESCE(cod_cliente,'')))=UPPER(TRIM(?))
+          """ + scope_clause + """
         LIMIT 1
         """,
-        (prog, cod),
+        tuple([prog, cod] + scope_params),
     )
     if not cur.fetchone():
         raise HTTPException(
