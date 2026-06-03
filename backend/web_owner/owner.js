@@ -222,6 +222,43 @@ function accessMessage({companyName = "", username = "", password = "", trialDay
   return lines.join("\n");
 }
 
+function absoluteUrl(path) {
+  const raw = clean(path);
+  if (!raw) return "";
+  if (/^https?:\/\//i.test(raw)) return raw;
+  return `${window.location.origin}${raw.startsWith("/") ? raw : `/${raw}`}`;
+}
+
+function paymentCompanyName(payment) {
+  const company = currentCompany() || {};
+  return company.name || company.nome || company.razao_social || `Empresa #${payment.company_id || state.selectedCompanyId || ""}`;
+}
+
+function boletoMessage(payment) {
+  const link = absoluteUrl(payment.boleto_pdf_url);
+  const lines = [
+    `Olá, ${paymentCompanyName(payment)}.`,
+    "",
+    "Segue boleto da sua assinatura RotaHub.",
+    "",
+    `Valor: ${money(payment.amount || 0)}`,
+    `Vencimento: ${dateTime(payment.due_date)}`,
+  ];
+  if (payment.boleto_digitable_line) lines.push(`Linha digitável: ${payment.boleto_digitable_line}`);
+  if (link) lines.push("", `Boleto: ${link}`);
+  lines.push("", "Após o pagamento, envie o comprovante para registrarmos a baixa.");
+  return lines.join("\n");
+}
+
+async function copyText(text, successMessage) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(successMessage);
+  } catch (_error) {
+    window.prompt("Copie a mensagem", text);
+  }
+}
+
 function openAccessModal(payload) {
   el("accessMessage").value = accessMessage(payload);
   el("copyAccessStatus").textContent = "";
@@ -476,10 +513,15 @@ function renderPayments(payments) {
   const rows = el("paymentRows");
   rows.innerHTML = "";
   if (!payments.length) {
-    rows.innerHTML = '<tr><td colspan="7">Nenhuma cobrança cadastrada.</td></tr>';
+    rows.innerHTML = '<tr><td colspan="8">Nenhuma cobrança cadastrada.</td></tr>';
     return;
   }
   payments.forEach((payment) => {
+    const paid = clean(payment.status).toLowerCase() === "paid";
+    const boletoUrl = clean(payment.boleto_pdf_url);
+    const boletoHtml = boletoUrl
+      ? `<div class="boleto-cell"><strong>${escapeHtml(payment.boleto_our_number || payment.reference || "Gerado")}</strong><small>${escapeHtml(payment.boleto_digitable_line || "")}</small></div>`
+      : '<span class="muted-action">Não gerado</span>';
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td>${escapeHtml(payment.id)}</td>
@@ -488,9 +530,24 @@ function renderPayments(payments) {
       <td>${escapeHtml(dateTime(payment.due_date))}</td>
       <td>${escapeHtml(dateTime(payment.paid_at))}</td>
       <td>${escapeHtml(payment.reference || "-")}</td>
-      <td><button type="button" class="secondary" data-register-payment="${payment.id}" ${clean(payment.status).toLowerCase() === "paid" ? "disabled" : ""}>Registrar baixa</button></td>
+      <td>${boletoHtml}</td>
+      <td><div class="actions">
+        <button type="button" data-generate-boleto="${payment.id}" ${paid ? "disabled" : ""}>${boletoUrl ? "Regerar boleto" : "Gerar boleto"}</button>
+        <button type="button" class="secondary" data-open-boleto="${payment.id}" ${boletoUrl ? "" : "disabled"}>Abrir</button>
+        <button type="button" class="secondary" data-copy-boleto="${payment.id}" ${boletoUrl ? "" : "disabled"}>Copiar envio</button>
+        <button type="button" class="secondary" data-register-payment="${payment.id}" ${paid ? "disabled" : ""}>Registrar baixa</button>
+      </div></td>
     `;
     rows.appendChild(tr);
+  });
+  rows.querySelectorAll("[data-generate-boleto]").forEach((button) => {
+    button.addEventListener("click", () => generateBoleto(Number(button.dataset.generateBoleto)));
+  });
+  rows.querySelectorAll("[data-open-boleto]").forEach((button) => {
+    button.addEventListener("click", () => openBoleto(Number(button.dataset.openBoleto)));
+  });
+  rows.querySelectorAll("[data-copy-boleto]").forEach((button) => {
+    button.addEventListener("click", () => copyBoletoMessage(Number(button.dataset.copyBoleto)));
   });
   rows.querySelectorAll("[data-register-payment]").forEach((button) => {
     button.addEventListener("click", () => registerPayment(Number(button.dataset.registerPayment)));
@@ -661,6 +718,37 @@ async function createPayment(event) {
   } catch (error) {
     toast(error.message, true);
   }
+}
+
+function findPayment(paymentId) {
+  return (state.data?.payments || []).find((item) => Number(item.id) === Number(paymentId)) || null;
+}
+
+async function generateBoleto(paymentId) {
+  try {
+    const result = await api(`/saas-admin/payments/${paymentId}/gerar-boleto`, {method: "POST"});
+    toast("Boleto gerado.");
+    await loadDashboard();
+    const payment = result.payment || findPayment(paymentId);
+    if (payment?.boleto_pdf_url) {
+      await copyText(boletoMessage(payment), "Mensagem de envio copiada.");
+    }
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+function openBoleto(paymentId) {
+  const payment = findPayment(paymentId);
+  const url = absoluteUrl(payment?.boleto_pdf_url);
+  if (!url) return toast("Boleto ainda nao gerado.", true);
+  window.open(url, "_blank", "noopener");
+}
+
+async function copyBoletoMessage(paymentId) {
+  const payment = findPayment(paymentId);
+  if (!payment?.boleto_pdf_url) return toast("Boleto ainda nao gerado.", true);
+  await copyText(boletoMessage(payment), "Mensagem de envio copiada.");
 }
 
 async function registerPayment(paymentId) {

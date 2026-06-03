@@ -48,6 +48,12 @@ def create_payment(data: dict) -> dict:
         "status": data.get("status") or "pending",
         "method": data.get("method"),
         "reference": data.get("reference"),
+        "boleto_status": data.get("boleto_status"),
+        "boleto_our_number": data.get("boleto_our_number"),
+        "boleto_digitable_line": data.get("boleto_digitable_line"),
+        "boleto_pdf_url": data.get("boleto_pdf_url"),
+        "boleto_pdf_path": data.get("boleto_pdf_path"),
+        "boleto_generated_at": data.get("boleto_generated_at"),
         "notes": data.get("notes"),
     }
     if not payload.get("company_id"):
@@ -66,6 +72,51 @@ def create_payment(data: dict) -> dict:
         payment_id = int(cur.lastrowid)
         cur.execute("SELECT * FROM payments WHERE id=? LIMIT 1", (payment_id,))
         return row_to_dict(cur.fetchone()) or {}
+
+
+def update_boleto(payment_id: int, data: dict) -> dict | None:
+    payload = {
+        "method": data.get("method") or "boleto",
+        "reference": data.get("reference"),
+        "boleto_status": data.get("boleto_status") or "generated",
+        "boleto_our_number": data.get("boleto_our_number"),
+        "boleto_digitable_line": data.get("boleto_digitable_line"),
+        "boleto_pdf_url": data.get("boleto_pdf_url"),
+        "boleto_pdf_path": data.get("boleto_pdf_path"),
+        "boleto_generated_at": data.get("boleto_generated_at"),
+    }
+    with get_db() as conn:
+        ensure_saas_ready(conn)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE payments
+            SET
+                method=?,
+                reference=COALESCE(?, reference),
+                boleto_status=?,
+                boleto_our_number=?,
+                boleto_digitable_line=?,
+                boleto_pdf_url=?,
+                boleto_pdf_path=?,
+                boleto_generated_at=COALESCE(?, datetime('now')),
+                updated_at=datetime('now')
+            WHERE id=?
+            """,
+            (
+                payload["method"],
+                payload["reference"],
+                payload["boleto_status"],
+                payload["boleto_our_number"],
+                payload["boleto_digitable_line"],
+                payload["boleto_pdf_url"],
+                payload["boleto_pdf_path"],
+                payload["boleto_generated_at"],
+                int(payment_id or 0),
+            ),
+        )
+        cur.execute("SELECT * FROM payments WHERE id=? LIMIT 1", (int(payment_id or 0),))
+        return row_to_dict(cur.fetchone())
 
 
 def register_payment(payment_id: int, *, method: str | None = None, reference: str | None = None, notes: str | None = None) -> dict | None:

@@ -754,6 +754,18 @@ async def register_payment(
     return {"ok": True, "payment": result.get("data")}
 
 
+@router.post("/payments/{payment_id}/gerar-boleto")
+async def generate_payment_boleto(
+    payment_id: int,
+    current_user: User = Depends(require_owner_user),
+):
+    configure_saas_sqlite()
+    result = saas_admin_service.generate_boleto(payment_id, actor=actor_name(current_user))
+    if not result.get("ok"):
+        raise_service_error(result)
+    return {"ok": True, "payment": result.get("data")}
+
+
 @router.get("/audit-logs")
 async def list_saas_audit_logs(
     company_id: int | None = Query(default=None, ge=1),
