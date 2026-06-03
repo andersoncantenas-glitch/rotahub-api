@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>RotaHub Owner</title>
   <link rel="icon" href="../../assets/app_icon.png">
-  <link rel="stylesheet" href="owner.css?v=20260603-boletos-2">
-  <script defer src="owner.js?v=20260603-boletos-2"></script>
+  <link rel="stylesheet" href="owner.css?v=20260603-boletos-3">
+  <script defer src="owner.js?v=20260603-boletos-3"></script>
 </head>
 <body>
   <main id="loginView" class="login-view">
@@ -216,7 +216,11 @@
             <h2>Cobranças</h2>
             <p id="paymentCompanyInfo">Selecione uma empresa para gerenciar cobranças.</p>
           </div>
-          <form id="paymentForm" class="form-row">
+          <form id="paymentForm" class="form-row payment-form">
+            <label class="payment-company-field">
+              Cliente / empresa
+              <select id="paymentCompanySelect" required></select>
+            </label>
             <label>
               Valor
               <input id="paymentAmount" inputmode="decimal" required>

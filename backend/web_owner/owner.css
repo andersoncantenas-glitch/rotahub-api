@@ -129,6 +129,10 @@ header p { margin: 4px 0 0; color: var(--muted); }
 }
 .panel-toolbar strong { padding-bottom: 9px; color: var(--muted); font-size: 12px; text-align: right; }
 .form-row { display: grid; grid-template-columns: repeat(3, minmax(160px, 1fr)) auto; gap: 10px; align-items: end; padding: 14px; }
+.payment-form {
+  grid-template-columns: minmax(280px, 1.2fr) minmax(130px, .55fr) minmax(150px, .65fr) minmax(180px, 1fr) auto auto;
+}
+.payment-company-field { min-width: 260px; }
 .checkbox-row {
   display: flex;
   align-items: center;

@@ -50,6 +50,7 @@ function bindEvents() {
   el("planForm").addEventListener("submit", changePlan);
   el("adminAccessButton").addEventListener("click", resetAdminAccess);
   el("paymentForm").addEventListener("submit", createPayment);
+  el("paymentCompanySelect").addEventListener("change", changePaymentCompany);
   el("overdueButton").addEventListener("click", runOverdue);
   el("companySearch").addEventListener("input", renderCompanyTable);
   el("companyStatusFilter").addEventListener("change", renderCompanyTable);
@@ -164,6 +165,21 @@ function switchTab(tab) {
 function currentCompany() {
   const companies = state.data?.companies || [];
   return companies.find((item) => Number(item.id) === Number(state.selectedCompanyId)) || state.data?.company || null;
+}
+
+function companyDisplayName(company) {
+  return company?.name || company?.nome || company?.razao_social || company?.legal_name || `Empresa #${company?.id || ""}`;
+}
+
+function companyOptionLabel(company) {
+  const parts = [
+    `#${company.id}`,
+    companyDisplayName(company),
+    company.document || company.cnpj || company.cpf || "",
+    company.plan_code || company.plano || "",
+    statusLabel(company.status),
+  ].map(clean).filter(Boolean);
+  return parts.join(" | ");
 }
 
 function statusLabel(value) {
@@ -492,11 +508,12 @@ function renderCompanies(companies) {
 
 function renderSelectedCompany(company, plans, usage, features) {
   el("selectedCompanyInfo").textContent = company
-    ? `${company.name || company.nome || company.razao_social || "Empresa"} | ${statusLabel(company.status)}`
+    ? `${companyDisplayName(company)} | ${statusLabel(company.status)}`
     : "Nenhuma empresa selecionada.";
   el("paymentCompanyInfo").textContent = company
-    ? `Empresa selecionada: ${company.name || company.nome || company.razao_social || "Empresa"}.`
-    : "Selecione uma empresa para gerenciar cobranças.";
+    ? `Destinatário da cobrança: ${companyDisplayName(company)}${company.document ? ` | ${company.document}` : ""}${company.plan_code ? ` | Plano ${company.plan_code}` : ""} | ${statusLabel(company.status)}.`
+    : "Escolha o cliente/empresa para gerar a cobrança.";
+  renderPaymentCompanySelect(company);
   const select = el("planSelect");
   select.innerHTML = plans.map((plan) => `<option value="${escapeHtml(plan.code)}">${escapeHtml(plan.name || plan.code)}</option>`).join("");
   if (company?.plan_code) select.value = company.plan_code;
@@ -507,6 +524,23 @@ function renderSelectedCompany(company, plans, usage, features) {
   el("featuresGrid").innerHTML = featureItems.map(([key, value]) => `
     <div class="info-item"><span>${escapeHtml(key)}</span><strong>${escapeHtml(value ? "Ativo" : "Inativo")}</strong></div>
   `).join("");
+}
+
+function renderPaymentCompanySelect(selectedCompany) {
+  const select = el("paymentCompanySelect");
+  const companies = state.data?.companies || [];
+  select.innerHTML = companies.length
+    ? companies.map((company) => `<option value="${escapeHtml(company.id)}">${escapeHtml(companyOptionLabel(company))}</option>`).join("")
+    : '<option value="">Nenhuma empresa cadastrada</option>';
+  if (selectedCompany?.id) select.value = String(selectedCompany.id);
+}
+
+async function changePaymentCompany(event) {
+  const companyId = Number(event.currentTarget.value || 0);
+  if (!companyId || companyId === Number(state.selectedCompanyId)) return;
+  state.selectedCompanyId = companyId;
+  await loadDashboard();
+  switchTab("payments");
 }
 
 function renderPayments(payments) {
@@ -698,7 +732,9 @@ async function resetAdminAccess() {
 
 async function createPayment(event) {
   event.preventDefault();
-  if (!state.selectedCompanyId) return toast("Selecione uma empresa.", true);
+  const companyId = Number(el("paymentCompanySelect").value || state.selectedCompanyId || 0);
+  if (!companyId) return toast("Selecione o cliente da cobrança.", true);
+  state.selectedCompanyId = companyId;
   const amount = parseMoney(el("paymentAmount").value);
   if (!Number.isFinite(amount) || amount <= 0) return toast("Informe um valor de cobrança válido.", true);
   const shouldGenerateBoleto = Boolean(el("paymentGenerateBoleto")?.checked);
