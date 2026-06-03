@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>RotaHub Owner</title>
   <link rel="icon" href="../../assets/app_icon.png">
-  <link rel="stylesheet" href="owner.css?v=20260603-boletos-3">
-  <script defer src="owner.js?v=20260603-boletos-3"></script>
+  <link rel="stylesheet" href="owner.css?v=20260603-boletos-4">
+  <script defer src="owner.js?v=20260603-boletos-4"></script>
 </head>
 <body>
   <main id="loginView" class="login-view">
@@ -222,12 +222,16 @@
               <select id="paymentCompanySelect" required></select>
             </label>
             <label>
-              Valor
+              Valor do plano
               <input id="paymentAmount" inputmode="decimal" required>
             </label>
             <label>
               Vencimento
               <input id="paymentDue" type="date">
+            </label>
+            <label>
+              Valor com atraso
+              <input id="paymentLateAmount" readonly>
             </label>
             <label>
               Observação

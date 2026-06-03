@@ -13,6 +13,9 @@ const el = (id) => document.getElementById(id);
 const clean = (value) => String(value ?? "").trim();
 const money = (value) => Number(value || 0).toLocaleString("pt-BR", {style: "currency", currency: "BRL"});
 const number = (value) => Number(value || 0).toLocaleString("pt-BR", {maximumFractionDigits: 2});
+const PAYMENT_GRACE_DAYS = 3;
+const LATE_FINE_PERCENT = 2;
+const MONTHLY_INTEREST_PERCENT = 1;
 const statusLabels = {
   active: "Ativa",
   suspended: "Suspensa",
@@ -51,6 +54,8 @@ function bindEvents() {
   el("adminAccessButton").addEventListener("click", resetAdminAccess);
   el("paymentForm").addEventListener("submit", createPayment);
   el("paymentCompanySelect").addEventListener("change", changePaymentCompany);
+  el("paymentAmount").addEventListener("input", updatePaymentLatePreview);
+  el("paymentDue").addEventListener("change", updatePaymentLatePreview);
   el("overdueButton").addEventListener("click", runOverdue);
   el("companySearch").addEventListener("input", renderCompanyTable);
   el("companyStatusFilter").addEventListener("change", renderCompanyTable);
@@ -180,6 +185,46 @@ function companyOptionLabel(company) {
     statusLabel(company.status),
   ].map(clean).filter(Boolean);
   return parts.join(" | ");
+}
+
+function planForCompany(company) {
+  const plans = state.data?.plans || [];
+  const code = clean(company?.plan_code || company?.plano).toLowerCase();
+  return plans.find((plan) => clean(plan.code).toLowerCase() === code) || null;
+}
+
+function planMonthlyPrice(plan) {
+  return Number(plan?.monthly_price ?? plan?.price ?? plan?.valor ?? 0);
+}
+
+function formatMoneyInput(value) {
+  return Number(value || 0).toLocaleString("pt-BR", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+}
+
+function parseDateOnly(value) {
+  const raw = clean(value);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return null;
+  const [year, month, day] = raw.split("-").map(Number);
+  return new Date(year, month - 1, day);
+}
+
+function daysAfterGrace(dueDateValue) {
+  const due = parseDateOnly(dueDateValue);
+  if (!due) return 0;
+  const today = new Date();
+  const todayOnly = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const msPerDay = 24 * 60 * 60 * 1000;
+  const daysLate = Math.floor((todayOnly.getTime() - due.getTime()) / msPerDay);
+  return Math.max(0, daysLate - PAYMENT_GRACE_DAYS);
+}
+
+function adjustedPaymentAmount(baseAmount, dueDateValue) {
+  const base = Number(baseAmount || 0);
+  const chargeableDays = daysAfterGrace(dueDateValue);
+  if (!base || chargeableDays <= 0) return base;
+  const fine = base * (LATE_FINE_PERCENT / 100);
+  const interest = base * (MONTHLY_INTEREST_PERCENT / 100) * (chargeableDays / 30);
+  return Number((base + fine + interest).toFixed(2));
 }
 
 function statusLabel(value) {
@@ -511,9 +556,10 @@ function renderSelectedCompany(company, plans, usage, features) {
     ? `${companyDisplayName(company)} | ${statusLabel(company.status)}`
     : "Nenhuma empresa selecionada.";
   el("paymentCompanyInfo").textContent = company
-    ? `Destinatário da cobrança: ${companyDisplayName(company)}${company.document ? ` | ${company.document}` : ""}${company.plan_code ? ` | Plano ${company.plan_code}` : ""} | ${statusLabel(company.status)}.`
+    ? paymentCompanyInfoText(company)
     : "Escolha o cliente/empresa para gerar a cobrança.";
   renderPaymentCompanySelect(company);
+  applyPaymentPlanDefaults(company);
   const select = el("planSelect");
   select.innerHTML = plans.map((plan) => `<option value="${escapeHtml(plan.code)}">${escapeHtml(plan.name || plan.code)}</option>`).join("");
   if (company?.plan_code) select.value = company.plan_code;
@@ -526,6 +572,14 @@ function renderSelectedCompany(company, plans, usage, features) {
   `).join("");
 }
 
+function paymentCompanyInfoText(company) {
+  const plan = planForCompany(company);
+  const planName = plan?.name || company?.plan_code || company?.plano || "-";
+  const planPrice = planMonthlyPrice(plan);
+  const priceText = planPrice > 0 ? ` | Valor do plano ${money(planPrice)}` : "";
+  return `Destinatário da cobrança: ${companyDisplayName(company)}${company.document ? ` | ${company.document}` : ""} | Plano ${planName}${priceText} | ${statusLabel(company.status)}. Tolerância: ${PAYMENT_GRACE_DAYS} dias; após isso, multa ${LATE_FINE_PERCENT}% + juros ${MONTHLY_INTEREST_PERCENT}% ao mês.`;
+}
+
 function renderPaymentCompanySelect(selectedCompany) {
   const select = el("paymentCompanySelect");
   const companies = state.data?.companies || [];
@@ -535,11 +589,39 @@ function renderPaymentCompanySelect(selectedCompany) {
   if (selectedCompany?.id) select.value = String(selectedCompany.id);
 }
 
+function applyPaymentPlanDefaults(company, force = false) {
+  const plan = planForCompany(company);
+  const price = planMonthlyPrice(plan);
+  const amountInput = el("paymentAmount");
+  if (price > 0 && (force || !clean(amountInput.value))) {
+    amountInput.value = formatMoneyInput(price);
+  }
+  if (company?.next_due_date && (force || !clean(el("paymentDue").value))) {
+    el("paymentDue").value = clean(company.next_due_date).slice(0, 10);
+  }
+  updatePaymentLatePreview();
+}
+
+function updatePaymentLatePreview() {
+  const baseAmount = parseMoney(el("paymentAmount").value);
+  const dueDate = clean(el("paymentDue").value);
+  if (!Number.isFinite(baseAmount) || baseAmount <= 0) {
+    el("paymentLateAmount").value = "";
+    return;
+  }
+  const adjusted = adjustedPaymentAmount(baseAmount, dueDate);
+  const chargeableDays = daysAfterGrace(dueDate);
+  el("paymentLateAmount").value = chargeableDays > 0
+    ? `${formatMoneyInput(adjusted)} (${chargeableDays} dia(s) com juros)`
+    : `${formatMoneyInput(adjusted)} (sem juros)`;
+}
+
 async function changePaymentCompany(event) {
   const companyId = Number(event.currentTarget.value || 0);
   if (!companyId || companyId === Number(state.selectedCompanyId)) return;
   state.selectedCompanyId = companyId;
   await loadDashboard();
+  applyPaymentPlanDefaults(currentCompany(), true);
   switchTab("payments");
 }
 
@@ -737,13 +819,14 @@ async function createPayment(event) {
   state.selectedCompanyId = companyId;
   const amount = parseMoney(el("paymentAmount").value);
   if (!Number.isFinite(amount) || amount <= 0) return toast("Informe um valor de cobrança válido.", true);
+  const adjustedAmount = adjustedPaymentAmount(amount, clean(el("paymentDue").value));
   const shouldGenerateBoleto = Boolean(el("paymentGenerateBoleto")?.checked);
   try {
     const created = await api("/saas-admin/payments", {
       method: "POST",
       body: JSON.stringify({
         company_id: state.selectedCompanyId,
-        amount,
+        amount: adjustedAmount,
         due_date: clean(el("paymentDue").value) || null,
         notes: clean(el("paymentNotes").value) || null,
       }),
