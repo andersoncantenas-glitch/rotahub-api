@@ -701,8 +701,9 @@ async function createPayment(event) {
   if (!state.selectedCompanyId) return toast("Selecione uma empresa.", true);
   const amount = parseMoney(el("paymentAmount").value);
   if (!Number.isFinite(amount) || amount <= 0) return toast("Informe um valor de cobrança válido.", true);
+  const shouldGenerateBoleto = Boolean(el("paymentGenerateBoleto")?.checked);
   try {
-    await api("/saas-admin/payments", {
+    const created = await api("/saas-admin/payments", {
       method: "POST",
       body: JSON.stringify({
         company_id: state.selectedCompanyId,
@@ -712,7 +713,17 @@ async function createPayment(event) {
       }),
     });
     event.currentTarget.reset();
-    toast("Cobrança criada.");
+    const paymentId = Number((created.payment || {}).id || 0);
+    if (shouldGenerateBoleto && paymentId) {
+      const boleto = await api(`/saas-admin/payments/${paymentId}/gerar-boleto`, {method: "POST"});
+      const payment = boleto.payment || created.payment || {};
+      toast("Cobrança e boleto criados.");
+      if (payment.boleto_pdf_url) {
+        await copyText(boletoMessage(payment), "Mensagem de envio copiada.");
+      }
+    } else {
+      toast("Cobrança criada.");
+    }
     await loadDashboard();
     switchTab("payments");
   } catch (error) {
